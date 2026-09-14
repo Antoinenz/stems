@@ -38,6 +38,12 @@ pub enum SourceEvent {
     },
     /// The source disconnected or lost its session.
     Disconnected,
+    /// Source-provided media for a track (e.g. Spotify Canvas), resolved
+    /// asynchronously after `TrackStarted`.
+    Media {
+        track: TrackRef,
+        canvas_url: Option<String>,
+    },
 }
 
 /// Something that produces audio + transport events: Spotify Connect,

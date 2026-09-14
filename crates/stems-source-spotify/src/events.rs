@@ -23,6 +23,7 @@ pub async fn pump(
                 let mut track = track_ref_from_item(&audio_item);
                 track.isrc = fetch_isrc(&session, &audio_item.track_id).await;
                 current = Some((audio_item.track_id.clone(), track.clone()));
+                spawn_canvas_lookup(&session, &audio_item.track_id, track.clone(), &tx);
                 // If playback already started for this track before we had
                 // metadata, re-announce it with the full details.
                 if started_for.as_ref() == Some(&audio_item.track_id) {
@@ -105,6 +106,29 @@ pub async fn pump(
 }
 
 /// Base62 id for tracks/episodes; the full URI for anything else.
+/// Canvas lookups are best-effort and off the event path.
+fn spawn_canvas_lookup(
+    session: &Session,
+    uri: &SpotifyUri,
+    track: TrackRef,
+    tx: &broadcast::Sender<SourceEvent>,
+) {
+    let (session, uri, tx) = (session.clone(), uri.clone(), tx.clone());
+    tokio::spawn(async move {
+        let canvas_url = match crate::canvas::fetch_canvas_url(&session, &uri).await {
+            Ok(url) => {
+                tracing::debug!(found = url.is_some(), "canvas lookup");
+                url
+            }
+            Err(e) => {
+                tracing::debug!("canvas lookup failed: {e:#}");
+                None
+            }
+        };
+        let _ = tx.send(SourceEvent::Media { track, canvas_url });
+    });
+}
+
 fn spotify_id(uri: &SpotifyUri) -> String {
     match uri {
         SpotifyUri::Track { id } | SpotifyUri::Episode { id } => {

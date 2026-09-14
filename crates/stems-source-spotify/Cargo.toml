@@ -17,5 +17,6 @@ librespot-metadata.workspace = true
 librespot-connect.workspace = true
 tokio.workspace = true
 futures.workspace = true
+http = "1"
 anyhow.workspace = true
 tracing.workspace = true

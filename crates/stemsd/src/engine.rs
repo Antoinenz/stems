@@ -214,6 +214,22 @@ impl Engine {
                 tracing::warn!("source disconnected");
                 self.set_status(PlaybackStatus::Idle);
             }
+            SourceEvent::Media { track, canvas_url } => {
+                if canvas_url.is_some() {
+                    tracing::info!(title = %track.title, "canvas available");
+                }
+                self.state_tx.send_if_modified(|s| {
+                    if s.track.as_ref().map(|t| &t.id) == Some(&track.id)
+                        && s.media.canvas_url != canvas_url
+                    {
+                        s.media.canvas_url = canvas_url;
+                        s.revision += 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
         }
     }
 

@@ -8,6 +8,7 @@
 //! 44.1 kHz straight into the stems ring. Transport events are translated
 //! from [`PlayerEvent`] to [`SourceEvent`].
 
+mod canvas;
 mod events;
 mod mixer;
 mod sink;
