@@ -1,4 +1,0 @@
-# Lighter linker for aarch64 Linux dev boxes (Raspberry Pi). Other targets
-# use the platform default.
-[target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=gold"]
