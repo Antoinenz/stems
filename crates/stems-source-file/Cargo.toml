@@ -1,0 +1,20 @@
+[package]
+name = "stems-source-file"
+description = "Local file playback source for stems (symphonia)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stems-core.workspace = true
+stems-audio.workspace = true
+symphonia.workspace = true
+rubato.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
