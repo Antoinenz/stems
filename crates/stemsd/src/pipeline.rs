@@ -5,8 +5,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use stems_audio::{AudioRing, Consumer, CpalSink, FlushSignal, NullSink, SinkKind, WavSink};
+use stems_audio::{
+    AudioRing, Consumer, CpalSink, FlushSignal, NullSink, Processor, SinkKind, WavSink,
+};
 use stems_core::Sink;
+use stems_sep::CentreCancel;
 use stems_server::Server;
 use stems_source_file::FileSource;
 use stems_source_spotify::{Bitrate, SpotifyConfig, SpotifyDeviceType, SpotifySource};
@@ -14,10 +17,33 @@ use stems_source_spotify::{Bitrate, SpotifyConfig, SpotifyDeviceType, SpotifySou
 use crate::config::Config;
 use crate::engine::{Channels, Engine};
 
-/// Ring capacity between source and sink for file playback.
+/// Ring capacity between source and processor for file playback.
 const RING_SECONDS: f32 = 4.0;
 /// Smaller ring for live sources: bounds pause/seek reaction time.
 const LIVE_RING_SECONDS: f32 = 0.5;
+/// Ring between processor and sink; small, it only smooths scheduling.
+const OUT_RING_SECONDS: f32 = 0.1;
+
+/// Build `source ring → processor → sink`. Returns the producer the source
+/// writes into, its flush signal, the processor and the sink.
+fn build_chain(
+    ring_seconds: f32,
+    sink_kind: &SinkKind,
+) -> Result<(stems_audio::Producer, FlushSignal, Processor, Box<dyn Sink>)> {
+    let (src_producer, src_consumer) = AudioRing::with_seconds(ring_seconds);
+    let (out_producer, out_consumer) = AudioRing::with_seconds(OUT_RING_SECONDS);
+    let src_flush = FlushSignal::new();
+    let out_flush = FlushSignal::new();
+    let sink = build_sink(sink_kind, out_consumer, out_flush.clone())?;
+    let processor = Processor::spawn(
+        src_consumer,
+        out_producer,
+        Box::new(CentreCancel::default()),
+        src_flush.clone(),
+        out_flush,
+    );
+    Ok((src_producer, src_flush, processor, sink))
+}
 
 pub fn build_sink(
     kind: &SinkKind,
@@ -54,14 +80,13 @@ pub async fn play_file(
     title: Option<String>,
     artist: Option<String>,
 ) -> Result<()> {
-    let (producer, consumer) = AudioRing::with_seconds(RING_SECONDS);
-    let sink = build_sink(sink_kind, consumer, FlushSignal::new())?;
+    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind)?;
     let mut source = FileSource::open(file, producer)?;
     source.set_metadata(title, artist);
     let track = source.track();
     tracing::info!(title = %track.title, duration_ms = track.duration_ms, sink = sink.name(), "playing");
 
-    let (engine, ch) = Engine::new(Box::new(source), sink, true);
+    let (engine, ch) = Engine::new(Box::new(source), processor, sink, true);
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
@@ -71,9 +96,7 @@ pub async fn run_spotify(
     web_dir: Option<PathBuf>,
     sink_kind: &SinkKind,
 ) -> Result<()> {
-    let (producer, consumer) = AudioRing::with_seconds(LIVE_RING_SECONDS);
-    let flush = FlushSignal::new();
-    let sink = build_sink(sink_kind, consumer, flush.clone())?;
+    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind)?;
 
     let paths = crate::config::paths()?;
     let cache_dir = paths.cache_dir.join("spotify");
@@ -96,7 +119,7 @@ pub async fn run_spotify(
     let source = SpotifySource::start(spotify_cfg, producer, flush).await?;
     tracing::info!(name = %cfg.device_name, sink = sink.name(), "waiting for a Spotify client");
 
-    let (mut engine, ch) = Engine::new(Box::new(source), sink, false);
+    let (mut engine, ch) = Engine::new(Box::new(source), processor, sink, false);
     engine.set_volume(cfg.spotify.initial_volume_percent as f32 / 100.0);
     spawn_server(cfg, web_dir, &ch);
     engine.run().await

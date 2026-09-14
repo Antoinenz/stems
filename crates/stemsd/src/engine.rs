@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use stems_audio::Processor;
 use stems_core::{
     Clock, ClockTick, Command, Lyrics, PlaybackState, PlaybackStatus, Sink, Source, SourceEvent,
     TrackId, TrackRef,
@@ -27,6 +28,7 @@ pub struct Channels {
 
 pub struct Engine {
     source: Box<dyn Source>,
+    processor: Processor,
     sink: Box<dyn Sink>,
     clock: Clock,
     state_tx: watch::Sender<PlaybackState>,
@@ -45,12 +47,18 @@ pub struct Engine {
 impl Engine {
     pub fn new(
         source: Box<dyn Source>,
+        processor: Processor,
         sink: Box<dyn Sink>,
         exit_on_end: bool,
     ) -> (Self, Channels) {
         let (state_tx, state_rx) = watch::channel(PlaybackState {
             source: Some(source.name().to_string()),
             volume: 1.0,
+            karaoke: stems_core::KaraokeState {
+                enabled: false,
+                vocal_gain: 0.0,
+                backend: Some(processor.backend_name().to_string()),
+            },
             ..PlaybackState::default()
         });
         let (clock_tx, clock_rx) = watch::channel(ClockTick::default());
@@ -58,6 +66,7 @@ impl Engine {
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
         let engine = Self {
             source,
+            processor,
             sink,
             clock: Clock::new(),
             state_tx,
@@ -121,6 +130,7 @@ impl Engine {
             t.abort();
         }
         self.source.shutdown();
+        self.processor.shutdown();
         self.sink.shutdown();
         Ok(())
     }
@@ -184,14 +194,21 @@ impl Engine {
         tracing::info!(?cmd, "command");
         match cmd {
             Command::SetVolume { level } => self.set_volume(level.clamp(0.0, 1.0)),
-            Command::SetKaraoke { enabled } => self.state_tx.send_modify(|s| {
-                s.karaoke.enabled = enabled;
-                s.revision += 1;
-            }),
-            Command::SetVocalGain { gain } => self.state_tx.send_modify(|s| {
-                s.karaoke.vocal_gain = gain.clamp(0.0, 1.0);
-                s.revision += 1;
-            }),
+            Command::SetKaraoke { enabled } => {
+                self.processor.control().set_enabled(enabled);
+                self.state_tx.send_modify(|s| {
+                    s.karaoke.enabled = enabled;
+                    s.revision += 1;
+                });
+            }
+            Command::SetVocalGain { gain } => {
+                let gain = gain.clamp(0.0, 1.0);
+                self.processor.control().set_vocal_gain(gain);
+                self.state_tx.send_modify(|s| {
+                    s.karaoke.vocal_gain = gain;
+                    s.revision += 1;
+                });
+            }
             Command::SetLyricsOffset { offset_ms } => self.state_tx.send_modify(|s| {
                 if let Some(l) = s.lyrics.as_mut() {
                     l.offset_ms = offset_ms;
