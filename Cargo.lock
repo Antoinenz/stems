@@ -3251,6 +3251,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stems-sep"
+version = "0.0.1"
+dependencies = [
+ "stems-core",
+]
+
+[[package]]
 name = "stems-server"
 version = "0.0.1"
 dependencies = [
@@ -3304,9 +3311,13 @@ dependencies = [
  "anyhow",
  "clap",
  "directories",
+ "rustls 0.23.42",
  "serde",
  "stems-audio",
  "stems-core",
+ "stems-enrich",
+ "stems-sep",
+ "stems-server",
  "stems-source-file",
  "stems-source-spotify",
  "tokio",

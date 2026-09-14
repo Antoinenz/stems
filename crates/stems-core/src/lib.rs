@@ -6,12 +6,14 @@
 //! responsible for converting to and from that format at the edges.
 
 pub mod clock;
+pub mod separator;
 pub mod sink;
 pub mod source;
 pub mod state;
 pub mod track;
 
 pub use clock::Clock;
+pub use separator::Separator;
 pub use sink::Sink;
 pub use source::{Source, SourceEvent};
 pub use state::{

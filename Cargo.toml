@@ -51,6 +51,7 @@ stems-audio = { path = "crates/stems-audio" }
 stems-source-file = { path = "crates/stems-source-file" }
 stems-source-spotify = { path = "crates/stems-source-spotify" }
 stems-server = { path = "crates/stems-server" }
+stems-sep = { path = "crates/stems-sep" }
 stems-enrich = { path = "crates/stems-enrich" }
 
 [profile.release]

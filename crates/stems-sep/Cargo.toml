@@ -1,0 +1,11 @@
+[package]
+name = "stems-sep"
+description = "Vocal separation backends for stems (DSP now, ML later)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stems-core.workspace = true
