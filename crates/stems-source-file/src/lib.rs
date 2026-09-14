@@ -8,7 +8,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ pub struct FileSource {
     track: TrackRef,
     events: broadcast::Sender<SourceEvent>,
     stop: Arc<AtomicBool>,
+    frames_pushed: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -94,6 +95,7 @@ impl FileSource {
         let track = TrackRef::local(path.clone(), opened.duration_ms);
         let (events, _) = broadcast::channel(64);
         let stop = Arc::new(AtomicBool::new(false));
+        let frames_pushed = Arc::new(AtomicU64::new(0));
 
         tracing::info!(
             file = %path.display(),
@@ -107,10 +109,17 @@ impl FileSource {
             let events = events.clone();
             let stop = stop.clone();
             let track = track.clone();
+            let frames_pushed = frames_pushed.clone();
             thread::Builder::new()
                 .name("stems-file-source".into())
                 .spawn(move || {
-                    if let Err(e) = decode_loop(opened, &mut producer, &events, &stop, &track) {
+                    let ctx = Ctx {
+                        events: &events,
+                        stop: &stop,
+                        track: &track,
+                        frames_pushed: &frames_pushed,
+                    };
+                    if let Err(e) = decode_loop(opened, &mut producer, &ctx) {
                         tracing::error!("file source: {e:#}");
                     }
                     let _ = events.send(SourceEvent::Ended);
@@ -122,12 +131,23 @@ impl FileSource {
             track,
             events,
             stop,
+            frames_pushed,
             thread: Some(thread),
         })
     }
 
     pub fn track(&self) -> &TrackRef {
         &self.track
+    }
+
+    /// Total 44.1 kHz frames handed to the ring so far.
+    pub fn frames_pushed(&self) -> u64 {
+        self.frames_pushed.load(Ordering::Relaxed)
+    }
+
+    /// True once the decode thread has exited (end of file, error or stop).
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(|t| t.is_finished())
     }
 
     /// Block until decoding has finished (end of file or shutdown).
@@ -138,13 +158,20 @@ impl FileSource {
     }
 }
 
-fn decode_loop(
-    mut o: Opened,
-    producer: &mut Producer,
-    events: &broadcast::Sender<SourceEvent>,
-    stop: &AtomicBool,
-    track: &TrackRef,
-) -> anyhow::Result<()> {
+struct Ctx<'a> {
+    events: &'a broadcast::Sender<SourceEvent>,
+    stop: &'a AtomicBool,
+    track: &'a TrackRef,
+    frames_pushed: &'a AtomicU64,
+}
+
+fn decode_loop(mut o: Opened, producer: &mut Producer, ctx: &Ctx) -> anyhow::Result<()> {
+    let Ctx {
+        events,
+        stop,
+        track,
+        frames_pushed: pushed_counter,
+    } = *ctx;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(
             o.format
@@ -205,6 +232,7 @@ fn decode_loop(
         push_blocking(producer, &out, stop);
 
         frames_pushed += (out.len() / CHANNELS as usize) as u64;
+        pushed_counter.store(frames_pushed, Ordering::Relaxed);
         if frames_pushed - last_event_frame >= event_every_frames {
             last_event_frame = frames_pushed;
             let _ = events.send(SourceEvent::Playing {
@@ -216,6 +244,8 @@ fn decode_loop(
     out.clear();
     resampler.finish(&mut out)?;
     push_blocking(producer, &out, stop);
+    frames_pushed += (out.len() / CHANNELS as usize) as u64;
+    pushed_counter.store(frames_pushed, Ordering::Relaxed);
     Ok(())
 }
 
@@ -306,8 +336,7 @@ mod tests {
         loop {
             let avail = consumer.slots();
             if avail == 0 {
-                if source.thread.as_ref().is_some_and(|t| t.is_finished()) && consumer.slots() == 0
-                {
+                if source.is_finished() && consumer.slots() == 0 {
                     break;
                 }
                 thread::sleep(Duration::from_millis(2));
