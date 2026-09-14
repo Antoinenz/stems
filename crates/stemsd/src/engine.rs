@@ -5,7 +5,6 @@
 //! server forwards to clients. Lyrics lookups run as background tasks keyed
 //! by track so a slow provider never blocks playback events.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,7 +13,7 @@ use stems_core::{
     Clock, ClockTick, Command, Lyrics, PlaybackState, PlaybackStatus, Sink, Source, SourceEvent,
     TrackId, TrackRef,
 };
-use stems_enrich::LrcLib;
+use stems_enrich::{Cache, Cached, LrcLib};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -36,7 +35,9 @@ pub struct Engine {
     cmd_rx: mpsc::Receiver<Command>,
     started: Instant,
     lyrics: LrcLib,
-    lyrics_cache: HashMap<TrackId, Option<Lyrics>>,
+    cache: Cache,
+    /// Applied to every track on top of any per-track offset.
+    lyrics_offset_ms: i64,
     lyrics_task: Option<JoinHandle<()>>,
     lyrics_tx: mpsc::Sender<(TrackId, Option<Lyrics>)>,
     lyrics_rx: mpsc::Receiver<(TrackId, Option<Lyrics>)>,
@@ -50,6 +51,8 @@ impl Engine {
         source: Box<dyn Source>,
         processor: Processor,
         sink: Box<dyn Sink>,
+        cache: Cache,
+        lyrics_offset_ms: i64,
         exit_on_end: bool,
     ) -> (Self, Channels) {
         let (state_tx, state_rx) = watch::channel(PlaybackState {
@@ -75,7 +78,8 @@ impl Engine {
             cmd_rx,
             started: Instant::now(),
             lyrics: LrcLib::new(),
-            lyrics_cache: HashMap::new(),
+            cache,
+            lyrics_offset_ms,
             lyrics_task: None,
             lyrics_tx,
             lyrics_rx,
@@ -156,16 +160,31 @@ impl Engine {
                     "track started"
                 );
                 self.clock.anchor(position_ms, pushed);
-                let cached = self.lyrics_cache.get(&track.id).cloned();
+                if let Err(e) = self.cache.put_track(&track) {
+                    tracing::warn!("cache: {e:#}");
+                }
+                let cached = match self.cache.get_lyrics(&track) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("cache: {e:#}");
+                        Cached::Miss
+                    }
+                };
+                let lyrics = match &cached {
+                    Cached::Hit(l) => Some(self.with_global_offset(l.clone())),
+                    _ => None,
+                };
                 self.state_tx.send_modify(|s| {
                     s.status = PlaybackStatus::Playing;
-                    s.lyrics = cached.clone().flatten();
+                    s.lyrics = lyrics;
                     s.next_track = None;
                     s.track = Some(track.clone());
                     s.revision += 1;
                 });
-                if cached.is_none() {
-                    self.spawn_lyrics_lookup(track);
+                match cached {
+                    Cached::Hit(_) => tracing::info!("lyrics from cache"),
+                    Cached::NotFound => tracing::info!("no lyrics (cached negative)"),
+                    Cached::Miss => self.spawn_lyrics_lookup(track),
                 }
             }
             SourceEvent::Playing { position_ms } | SourceEvent::Seeked { position_ms } => {
@@ -216,17 +235,34 @@ impl Engine {
                     s.revision += 1;
                 });
             }
-            Command::SetLyricsOffset { offset_ms } => self.state_tx.send_modify(|s| {
-                if let Some(l) = s.lyrics.as_mut() {
-                    l.offset_ms = offset_ms;
-                    s.revision += 1;
+            Command::SetLyricsOffset { offset_ms } => {
+                // Per-track offset, persisted; the state carries it combined
+                // with the global one so clients apply a single number.
+                let track = self.state_tx.borrow().track.clone();
+                if let Some(t) = &track {
+                    if let Err(e) = self.cache.set_lyrics_offset(t, offset_ms) {
+                        tracing::warn!("cache: {e:#}");
+                    }
                 }
-            }),
+                let total = offset_ms + self.lyrics_offset_ms;
+                self.state_tx.send_modify(|s| {
+                    if let Some(l) = s.lyrics.as_mut() {
+                        l.offset_ms = total;
+                        s.revision += 1;
+                    }
+                });
+            }
         }
     }
 
     fn on_lyrics(&mut self, id: TrackId, lyrics: Option<Lyrics>) {
-        self.lyrics_cache.insert(id.clone(), lyrics.clone());
+        let current = self.state_tx.borrow().track.clone();
+        if let Some(t) = current.as_ref().filter(|t| t.id == id) {
+            if let Err(e) = self.cache.put_lyrics(t, lyrics.as_ref()) {
+                tracing::warn!("cache: {e:#}");
+            }
+        }
+        let lyrics = lyrics.map(|l| self.with_global_offset(l));
         self.state_tx.send_if_modified(|s| {
             if s.track.as_ref().map(|t| &t.id) == Some(&id) {
                 s.lyrics = lyrics;
@@ -263,6 +299,11 @@ impl Engine {
             };
             let _ = tx.send((id, result)).await;
         }));
+    }
+
+    fn with_global_offset(&self, mut l: Lyrics) -> Lyrics {
+        l.offset_ms += self.lyrics_offset_ms;
+        l
     }
 
     fn set_status(&mut self, status: PlaybackStatus) {

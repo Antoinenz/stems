@@ -57,6 +57,14 @@ pub fn build_sink(
     })
 }
 
+fn open_cache() -> Result<stems_enrich::Cache> {
+    let path = crate::config::paths()?.cache_dir.join("stems.sqlite");
+    let cache = stems_enrich::Cache::open(&path)?;
+    let (tracks, lyrics) = cache.stats()?;
+    tracing::info!(path = %path.display(), tracks, lyrics, "cache open");
+    Ok(cache)
+}
+
 fn spawn_server(cfg: &Config, web_dir: Option<PathBuf>, ch: &Channels) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
     let server = Server { addr, web_dir };
@@ -86,7 +94,15 @@ pub async fn play_file(
     let track = source.track();
     tracing::info!(title = %track.title, duration_ms = track.duration_ms, sink = sink.name(), "playing");
 
-    let (engine, ch) = Engine::new(Box::new(source), processor, sink, true);
+    let cache = open_cache()?;
+    let (engine, ch) = Engine::new(
+        Box::new(source),
+        processor,
+        sink,
+        cache,
+        cfg.lyrics_offset_ms,
+        true,
+    );
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
@@ -119,7 +135,15 @@ pub async fn run_spotify(
     let source = SpotifySource::start(spotify_cfg, producer, flush).await?;
     tracing::info!(name = %cfg.device_name, sink = sink.name(), "waiting for a Spotify client");
 
-    let (mut engine, ch) = Engine::new(Box::new(source), processor, sink, false);
+    let cache = open_cache()?;
+    let (mut engine, ch) = Engine::new(
+        Box::new(source),
+        processor,
+        sink,
+        cache,
+        cfg.lyrics_offset_ms,
+        false,
+    );
     engine.set_volume(cfg.spotify.initial_volume_percent as f32 / 100.0);
     spawn_server(cfg, web_dir, &ch);
     engine.run().await

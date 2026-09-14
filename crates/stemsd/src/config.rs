@@ -17,8 +17,10 @@ pub struct Config {
     pub device_name: String,
     /// Output sink spec (`cpal`, `cpal:<device>`, `wav:<path>`, `null`).
     pub sink: String,
-    /// Local server port (Phase 1: reserved, not yet served).
+    /// Local server port.
     pub port: u16,
+    /// Added to every track's lyric timings (negative = earlier).
+    pub lyrics_offset_ms: i64,
     pub spotify: SpotifyConfig,
 }
 
@@ -39,6 +41,7 @@ impl Default for Config {
             device_name: "stems".into(),
             sink: "cpal".into(),
             port: DEFAULT_PORT,
+            lyrics_offset_ms: 0,
             spotify: SpotifyConfig::default(),
         }
     }
