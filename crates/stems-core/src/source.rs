@@ -53,6 +53,13 @@ pub trait Source: Send {
     /// Subscribe to transport events. Each call returns an independent receiver.
     fn events(&self) -> broadcast::Receiver<SourceEvent>;
 
+    /// Total 44.1 kHz frames this source has pushed into its ring so far.
+    ///
+    /// Position events refer to the frame being pushed at that moment, so
+    /// the [`Clock`](crate::Clock) anchors against this counter — ring fill
+    /// then falls out of the arithmetic automatically.
+    fn frames_pushed(&self) -> u64;
+
     /// Ask the source to stop and release resources. Idempotent.
     fn shutdown(&mut self);
 }

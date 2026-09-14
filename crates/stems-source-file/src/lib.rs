@@ -140,11 +140,6 @@ impl FileSource {
         &self.track
     }
 
-    /// Total 44.1 kHz frames handed to the ring so far.
-    pub fn frames_pushed(&self) -> u64 {
-        self.frames_pushed.load(Ordering::Relaxed)
-    }
-
     /// True once the decode thread has exited (end of file, error or stop).
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(|t| t.is_finished())
@@ -291,6 +286,10 @@ impl Source for FileSource {
 
     fn events(&self) -> broadcast::Receiver<SourceEvent> {
         self.events.subscribe()
+    }
+
+    fn frames_pushed(&self) -> u64 {
+        self.frames_pushed.load(Ordering::Relaxed)
     }
 
     fn shutdown(&mut self) {

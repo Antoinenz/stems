@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{SAMPLE_RATE, frames_to_ms};
+use crate::SAMPLE_RATE;
 
 /// The single playback clock: what the listener is hearing *right now*.
 ///
@@ -46,11 +46,14 @@ impl Clock {
         self.delay = delay;
     }
 
-    /// Re-anchor: the frame currently being pushed into the pipeline
-    /// corresponds to `position_ms` in the source's timeline.
-    pub fn anchor(&mut self, position_ms: u64, frames_emitted: u64) {
+    /// Re-anchor: the frame the source is pushing right now (its
+    /// `frames_pushed()` counter) corresponds to `position_ms` in the
+    /// source's timeline. Frames still buffered between source and sink
+    /// are accounted for because [`position_ms`](Self::position_ms) is
+    /// driven by the *sink's* emitted count.
+    pub fn anchor(&mut self, position_ms: u64, frames_pushed: u64) {
         self.anchor_position_ms = position_ms;
-        self.anchor_frames = frames_emitted;
+        self.anchor_frames = frames_pushed;
         self.running = true;
     }
 
@@ -71,9 +74,11 @@ impl Clock {
         if !self.running {
             return self.anchor_position_ms;
         }
-        let elapsed_ms = frames_to_ms(frames_emitted.saturating_sub(self.anchor_frames));
-        let total_latency_ms = (self.delay + self.sink_latency).as_millis() as u64;
-        (self.anchor_position_ms + elapsed_ms).saturating_sub(total_latency_ms)
+        // Signed: the sink may still be behind the anchor frame (ring fill).
+        let delta_frames = frames_emitted as i64 - self.anchor_frames as i64;
+        let delta_ms = delta_frames * 1000 / SAMPLE_RATE as i64;
+        let total_latency_ms = (self.delay + self.sink_latency).as_millis() as i64;
+        (self.anchor_position_ms as i64 + delta_ms - total_latency_ms).max(0) as u64
     }
 
     /// Frames per millisecond, handy for callers converting the other way.
@@ -102,6 +107,16 @@ mod tests {
         c.anchor(60_000, 1_000);
         // 2 s of frames emitted since anchor, minus 3.1 s of latency
         assert_eq!(c.position_ms(1_000 + 88_200), 60_000 + 2_000 - 3_100);
+    }
+
+    #[test]
+    fn ring_fill_is_subtracted() {
+        let mut c = Clock::new();
+        // source has pushed 3 s, sink has only emitted 1 s → 2 s buffered
+        c.anchor(30_000, 3 * 44_100);
+        assert_eq!(c.position_ms(44_100), 28_000);
+        // once the sink catches up to the anchor frame we hear 30 s
+        assert_eq!(c.position_ms(3 * 44_100), 30_000);
     }
 
     #[test]
