@@ -1,0 +1,22 @@
+[package]
+name = "stemsd"
+description = "stems daemon: audio receiver, separation pipeline and local server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "stemsd"
+path = "src/main.rs"
+
+[dependencies]
+stems-core.workspace = true
+stems-audio.workspace = true
+stems-source-file.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
