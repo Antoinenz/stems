@@ -234,9 +234,11 @@ impl Callback {
                 *s *= volume;
             }
         }
-        // Count in *source* frames so the clock stays in 44.1 kHz units.
-        let frames_out = data.len() / CHANNELS as usize;
-        let frames_src = self.resampler.out_to_in_frames(frames_out);
+        // Count only *real* audio, in source (44.1 kHz) frames, so this
+        // counter shares its origin with the source's `frames_pushed()`.
+        // Silence emitted while idle or underrunning must not advance it.
+        let real_out_frames = (data.len() - missing) / CHANNELS as usize;
+        let frames_src = self.resampler.out_to_in_frames(real_out_frames);
         self.frames.fetch_add(frames_src as u64, Ordering::Relaxed);
         if missing > 0 {
             self.underruns
