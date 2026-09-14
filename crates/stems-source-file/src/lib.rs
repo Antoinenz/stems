@@ -33,6 +33,8 @@ pub struct FileSource {
     events: broadcast::Sender<SourceEvent>,
     stop: Arc<AtomicBool>,
     frames_pushed: Arc<AtomicU64>,
+    /// Probed file + ring producer, consumed by [`play`](Self::play).
+    pending: Option<(Opened, Producer)>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -88,14 +90,14 @@ fn open(path: &Path) -> anyhow::Result<Opened> {
 }
 
 impl FileSource {
-    /// Probe `path` and start decoding into `producer` immediately.
-    pub fn start(path: impl Into<PathBuf>, mut producer: Producer) -> anyhow::Result<Self> {
+    /// Probe `path`. Nothing is decoded until [`play`](Self::play) is
+    /// called, so callers can subscribe to [`events`](Source::events) first
+    /// and are guaranteed to see `TrackStarted`.
+    pub fn open(path: impl Into<PathBuf>, producer: Producer) -> anyhow::Result<Self> {
         let path = path.into();
         let opened = open(&path)?;
         let track = TrackRef::local(path.clone(), opened.duration_ms);
         let (events, _) = broadcast::channel(64);
-        let stop = Arc::new(AtomicBool::new(false));
-        let frames_pushed = Arc::new(AtomicU64::new(0));
 
         tracing::info!(
             file = %path.display(),
@@ -105,35 +107,41 @@ impl FileSource {
             "file source ready"
         );
 
-        let thread = {
-            let events = events.clone();
-            let stop = stop.clone();
-            let track = track.clone();
-            let frames_pushed = frames_pushed.clone();
-            thread::Builder::new()
-                .name("stems-file-source".into())
-                .spawn(move || {
-                    let ctx = Ctx {
-                        events: &events,
-                        stop: &stop,
-                        track: &track,
-                        frames_pushed: &frames_pushed,
-                    };
-                    if let Err(e) = decode_loop(opened, &mut producer, &ctx) {
-                        tracing::error!("file source: {e:#}");
-                    }
-                    let _ = events.send(SourceEvent::Ended);
-                })
-                .expect("spawn file source thread")
-        };
-
         Ok(Self {
             track,
             events,
-            stop,
-            frames_pushed,
-            thread: Some(thread),
+            stop: Arc::new(AtomicBool::new(false)),
+            frames_pushed: Arc::new(AtomicU64::new(0)),
+            pending: Some((opened, producer)),
+            thread: None,
         })
+    }
+
+    /// Start the decode thread. Idempotent after the first call.
+    pub fn play(&mut self) {
+        let Some((opened, mut producer)) = self.pending.take() else {
+            return;
+        };
+        let events = self.events.clone();
+        let stop = self.stop.clone();
+        let track = self.track.clone();
+        let frames_pushed = self.frames_pushed.clone();
+        let thread = thread::Builder::new()
+            .name("stems-file-source".into())
+            .spawn(move || {
+                let ctx = Ctx {
+                    events: &events,
+                    stop: &stop,
+                    track: &track,
+                    frames_pushed: &frames_pushed,
+                };
+                if let Err(e) = decode_loop(opened, &mut producer, &ctx) {
+                    tracing::error!("file source: {e:#}");
+                }
+                let _ = events.send(SourceEvent::Ended);
+            })
+            .expect("spawn file source thread");
+        self.thread = Some(thread);
     }
 
     pub fn track(&self) -> &TrackRef {
@@ -141,8 +149,9 @@ impl FileSource {
     }
 
     /// True once the decode thread has exited (end of file, error or stop).
+    /// A source that was never played is not finished.
     pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().is_none_or(|t| t.is_finished())
+        self.pending.is_none() && self.thread.as_ref().is_none_or(|t| t.is_finished())
     }
 
     /// Block until decoding has finished (end of file or shutdown).
@@ -360,9 +369,11 @@ mod tests {
         let frames = write_sine(&path, 44_100, 2, 1.0);
 
         let (p, mut c) = AudioRing::with_frames(2048);
-        let mut src = FileSource::start(&path, p).unwrap();
+        let mut src = FileSource::open(&path, p).unwrap();
         let mut rx = src.events();
         assert_eq!(src.track().duration_ms, 1000);
+        assert!(!src.is_finished());
+        src.play();
 
         let all = drain_all(&mut src, &mut c);
         assert_eq!(all.len(), frames * 2);
@@ -390,7 +401,8 @@ mod tests {
         write_sine(&path, 48_000, 1, 1.0);
 
         let (p, mut c) = AudioRing::with_frames(2048);
-        let mut src = FileSource::start(&path, p).unwrap();
+        let mut src = FileSource::open(&path, p).unwrap();
+        src.play();
         let all = drain_all(&mut src, &mut c);
         let frames = all.len() / 2;
         assert!((frames as i64 - 44_100).abs() < 2_200, "frames {frames}");

@@ -33,12 +33,14 @@ pub fn build_sink(
 pub fn play_file(file: &Path, sink_kind: &SinkKind) -> Result<()> {
     let (producer, consumer) = AudioRing::with_seconds(RING_SECONDS);
     let mut sink = build_sink(sink_kind, consumer, FlushSignal::new())?;
-    let mut source = FileSource::start(file, producer)?;
+    let mut source = FileSource::open(file, producer)?;
+    // Subscribe before decoding starts so TrackStarted cannot be missed.
     let mut events = source.events();
     let mut clock = Clock::new();
 
     let track = source.track();
     tracing::info!(title = %track.title, duration_ms = track.duration_ms, sink = sink.name(), "playing");
+    source.play();
 
     let mut last_logged_s = u64::MAX;
     loop {
