@@ -14,8 +14,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, StreamConfig};
 use stems_core::{CHANNELS, SAMPLE_RATE, Sink};
 
-use crate::Consumer;
-use crate::ring::pop_or_silence;
+use crate::ring::{drain, pop_or_silence};
+use crate::{Consumer, FlushSignal};
 
 /// One selectable output device.
 #[derive(Debug, Clone)]
@@ -62,7 +62,11 @@ pub struct CpalSink {
 impl CpalSink {
     /// Open `device` (substring match on the name; `None` = system default)
     /// and start playing from `consumer` immediately.
-    pub fn open(device: Option<&str>, consumer: Consumer) -> anyhow::Result<Self> {
+    pub fn open(
+        device: Option<&str>,
+        consumer: Consumer,
+        flush: FlushSignal,
+    ) -> anyhow::Result<Self> {
         let host = cpal::default_host();
         let dev = match device {
             None => host
@@ -121,6 +125,8 @@ impl CpalSink {
             volume_bits: volume_bits.clone(),
             resampler: Resampler::new(SAMPLE_RATE, device_rate),
             scratch: vec![0.0; 4096 * CHANNELS as usize],
+            flush,
+            flush_seen: 0,
         };
         let err_cb = |e: cpal::Error| tracing::error!("cpal stream error: {e}");
 
@@ -207,11 +213,16 @@ struct Callback {
     volume_bits: Arc<AtomicU32>,
     resampler: Resampler,
     scratch: Vec<f32>,
+    flush: FlushSignal,
+    flush_seen: u64,
 }
 
 impl Callback {
     fn fill(&mut self, data: &mut [f32], info: &cpal::OutputCallbackInfo) {
         self.record_latency(info);
+        if self.flush.take(&mut self.flush_seen) {
+            drain(&mut self.consumer);
+        }
         let volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
         let missing = if self.resampler.is_identity() {
             pop_or_silence(&mut self.consumer, data)

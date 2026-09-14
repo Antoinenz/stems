@@ -1,9 +1,51 @@
 //! A thin wrapper over [`rtrb`] fixed to interleaved f32 samples.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use stems_core::{CHANNELS, SAMPLE_RATE};
 
 pub type Producer = rtrb::Producer<f32>;
 pub type Consumer = rtrb::Consumer<f32>;
+
+/// Lets the producer side ask the consumer to discard everything currently
+/// buffered (pause, seek, track change). Cheap, lock-free, many-to-one.
+#[derive(Debug, Clone, Default)]
+pub struct FlushSignal {
+    generation: Arc<AtomicU64>,
+}
+
+impl FlushSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the consumer to drop buffered audio at its next opportunity.
+    pub fn request(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Consumer side: returns `true` once per `request()`.
+    pub fn take(&self, last_seen: &mut u64) -> bool {
+        let g = self.generation.load(Ordering::Acquire);
+        if g != *last_seen {
+            *last_seen = g;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Discard everything currently readable.
+pub fn drain(c: &mut Consumer) -> usize {
+    let n = c.slots();
+    if n > 0 {
+        let chunk = c.read_chunk(n).expect("n <= slots()");
+        chunk.commit_all();
+    }
+    n
+}
 
 /// A single-producer single-consumer ring of interleaved f32 samples.
 pub struct AudioRing;
@@ -69,6 +111,28 @@ mod tests {
         let (mut p, _c) = AudioRing::with_frames(1);
         assert_eq!(push_available(&mut p, &[0.0; 10]), 2);
         assert_eq!(push_available(&mut p, &[0.0; 10]), 0);
+    }
+
+    #[test]
+    fn flush_signal_fires_once_per_request() {
+        let f = FlushSignal::new();
+        let mut seen = 0;
+        assert!(!f.take(&mut seen));
+        f.request();
+        assert!(f.take(&mut seen));
+        assert!(!f.take(&mut seen));
+        f.request();
+        f.request();
+        assert!(f.take(&mut seen));
+        assert!(!f.take(&mut seen));
+    }
+
+    #[test]
+    fn drain_empties_ring() {
+        let (mut p, mut c) = AudioRing::with_frames(8);
+        push_available(&mut p, &[1.0; 6]);
+        assert_eq!(drain(&mut c), 6);
+        assert_eq!(c.slots(), 0);
     }
 
     #[test]

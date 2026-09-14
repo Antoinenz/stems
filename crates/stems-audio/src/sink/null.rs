@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use stems_core::{CHANNELS, SAMPLE_RATE, Sink};
 
-use crate::Consumer;
-use crate::ring::pop_or_silence;
+use crate::ring::{drain, pop_or_silence};
+use crate::{Consumer, FlushSignal};
 
 const TICK: Duration = Duration::from_millis(10);
 
@@ -21,7 +21,7 @@ pub struct NullSink {
 }
 
 impl NullSink {
-    pub fn new(mut consumer: Consumer) -> Self {
+    pub fn new(mut consumer: Consumer, flush: FlushSignal) -> Self {
         let frames = Arc::new(AtomicU64::new(0));
         let underruns = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
@@ -35,7 +35,11 @@ impl NullSink {
                         (SAMPLE_RATE as u64 * TICK.as_millis() as u64 / 1000) as usize;
                     let mut buf = vec![0.0f32; frames_per_tick * CHANNELS as usize];
                     let mut next = Instant::now();
+                    let mut flush_seen = 0;
                     while !stop.load(Ordering::Relaxed) {
+                        if flush.take(&mut flush_seen) {
+                            drain(&mut consumer);
+                        }
                         let missing = pop_or_silence(&mut consumer, &mut buf);
                         frames.fetch_add(frames_per_tick as u64, Ordering::Relaxed);
                         underruns
