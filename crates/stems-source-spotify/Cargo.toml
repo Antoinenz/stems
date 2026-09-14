@@ -1,0 +1,21 @@
+[package]
+name = "stems-source-spotify"
+description = "Spotify Connect source for stems (librespot)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stems-core.workspace = true
+stems-audio.workspace = true
+librespot-core.workspace = true
+librespot-playback.workspace = true
+librespot-discovery.workspace = true
+librespot-metadata.workspace = true
+librespot-connect.workspace = true
+tokio.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
