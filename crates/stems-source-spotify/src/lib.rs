@@ -324,7 +324,10 @@ async fn run(mut rt: Runtime, mut discovery: Discovery, mut stop: oneshot::Recei
     if let Some(t) = spirc_task.take() {
         let _ = tokio::time::timeout(Duration::from_secs(3), t).await;
     }
-    let _ = tokio::time::timeout(Duration::from_secs(3), discovery.shutdown()).await;
+    // libmdns can panic in `Drop` if its responder task is already gone
+    // (seen on Windows at runtime teardown); leaking the discovery handle
+    // avoids that path. The OS reclaims the sockets on exit.
+    std::mem::forget(discovery);
     event_task.abort();
     let _ = rt.events.send(SourceEvent::Disconnected);
 }

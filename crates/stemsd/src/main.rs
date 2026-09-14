@@ -128,7 +128,17 @@ fn main() -> Result<()> {
                 cfg.device_name = n;
             }
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pipeline::run_spotify(&cfg, web_dir, &sink))
+            let result = rt.block_on(pipeline::run_spotify(&cfg, web_dir, &sink));
+            // Skip runtime teardown: librespot/libmdns background tasks can
+            // panic while being dropped. Everything is flushed by now.
+            std::mem::forget(rt);
+            match result {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    tracing::error!("{e:#}");
+                    std::process::exit(1)
+                }
+            }
         }
     }
 }
