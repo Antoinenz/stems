@@ -1,0 +1,26 @@
+# build
+/target
+**/*.rs.bk
+node_modules/
+web/*/build
+web/*/.svelte-kit
+dist/
+
+# models & caches (downloaded at runtime)
+models/*.onnx
+models/*.pt
+*.stems-cache
+
+# local config / secrets
+.env
+*.log
+stems.local.toml
+
+# editors / tooling
+.idea/
+.vscode/
+.cursor/
+.claude/
+CLAUDE.md
+.DS_Store
+Thumbs.db
