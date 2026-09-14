@@ -65,7 +65,7 @@ impl Server {
                     let index = ServeFile::new(dist.join("index.html"));
                     app = app.nest_service(
                         &format!("/{app_name}"),
-                        ServeDir::new(&dist).not_found_service(index),
+                        ServeDir::new(&dist).fallback(index),
                     );
                 } else {
                     tracing::warn!(app = app_name, dir = %dist.display(), "web app not built; skipping");
