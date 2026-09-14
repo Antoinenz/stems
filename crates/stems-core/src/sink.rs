@@ -13,7 +13,10 @@ pub trait Sink: Send {
     /// and it being audible. Used by [`Clock`](crate::Clock).
     fn latency(&self) -> Duration;
 
-    /// Number of frames the sink has actually emitted so far.
+    /// Number of *real* audio frames the sink has emitted so far — frames
+    /// that came out of its ring. Silence played during underruns or while
+    /// idle is not counted, so this shares an origin with
+    /// [`Source::frames_pushed`](crate::Source::frames_pushed).
     fn frames_emitted(&self) -> u64;
 
     /// Number of frames substituted with silence because the ring was empty.
