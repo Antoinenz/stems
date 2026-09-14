@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Antoinenz/stems"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# audio
+cpal = "0.18"
+rtrb = "0.4"
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "wav", "vorbis", "aac", "isomp4", "ogg", "pcm"] }
+hound = "3.5"
+rubato = "5.0"
+
+# spotify
+librespot-core = { version = "0.8", default-features = false }
+librespot-playback = { version = "0.8", default-features = false }
+librespot-discovery = { version = "0.8", default-features = false }
+librespot-metadata = { version = "0.8", default-features = false }
+
+# runtime / cli / logging
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+
+# config
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+directories = "6"
+
+# internal
+stems-core = { path = "crates/stems-core" }
+stems-audio = { path = "crates/stems-audio" }
+stems-source-file = { path = "crates/stems-source-file" }
+stems-source-spotify = { path = "crates/stems-source-spotify" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
