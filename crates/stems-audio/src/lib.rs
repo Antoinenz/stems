@@ -5,9 +5,11 @@
 //! once the stream is running.
 
 pub mod mixer;
+pub mod resample;
 pub mod ring;
 pub mod sink;
 
 pub use mixer::Mixer;
+pub use resample::StreamResampler;
 pub use ring::{AudioRing, Consumer, Producer};
 pub use sink::{SinkKind, cpal::CpalSink, null::NullSink, wav::WavSink};
