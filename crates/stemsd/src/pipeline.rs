@@ -51,10 +51,13 @@ pub async fn play_file(
     web_dir: Option<PathBuf>,
     file: &Path,
     sink_kind: &SinkKind,
+    title: Option<String>,
+    artist: Option<String>,
 ) -> Result<()> {
     let (producer, consumer) = AudioRing::with_seconds(RING_SECONDS);
     let sink = build_sink(sink_kind, consumer, FlushSignal::new())?;
-    let source = FileSource::open(file, producer)?;
+    let mut source = FileSource::open(file, producer)?;
+    source.set_metadata(title, artist);
     let track = source.track();
     tracing::info!(title = %track.title, duration_ms = track.duration_ms, sink = sink.name(), "playing");
 

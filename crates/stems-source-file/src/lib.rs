@@ -148,6 +148,16 @@ impl FileSource {
         &self.track
     }
 
+    /// Override title/artist (e.g. from the CLI) before `play()`.
+    pub fn set_metadata(&mut self, title: Option<String>, artist: Option<String>) {
+        if let Some(t) = title {
+            self.track.title = t;
+        }
+        if let Some(a) = artist {
+            self.track.artists = vec![a];
+        }
+    }
+
     /// True once the decode thread has exited (end of file, error or stop).
     /// A source that was never played is not finished.
     pub fn is_finished(&self) -> bool {

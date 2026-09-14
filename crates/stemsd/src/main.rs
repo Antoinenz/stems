@@ -45,7 +45,15 @@ enum Cmd {
         name: Option<String>,
     },
     /// Play a local audio file through the pipeline.
-    Play { file: PathBuf },
+    Play {
+        file: PathBuf,
+        /// Override the title (used for the lyrics lookup).
+        #[arg(long)]
+        title: Option<String>,
+        /// Override the artist (used for the lyrics lookup).
+        #[arg(long)]
+        artist: Option<String>,
+    },
     /// List output devices.
     Devices,
     /// Print the effective configuration and file locations (writes a
@@ -105,9 +113,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Play { file } => {
+        Cmd::Play {
+            file,
+            title,
+            artist,
+        } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pipeline::play_file(&cfg, web_dir, &file, &sink))
+            rt.block_on(pipeline::play_file(
+                &cfg, web_dir, &file, &sink, title, artist,
+            ))
         }
         Cmd::Spotify { name } => {
             if let Some(n) = name {
