@@ -8,11 +8,15 @@
 pub mod clock;
 pub mod sink;
 pub mod source;
+pub mod state;
 pub mod track;
 
 pub use clock::Clock;
 pub use sink::Sink;
 pub use source::{Source, SourceEvent};
+pub use state::{
+    ClockTick, Command, KaraokeState, LyricLine, Lyrics, PlaybackState, PlaybackStatus,
+};
 pub use track::{TrackId, TrackRef};
 
 /// Internal sample rate in Hz.

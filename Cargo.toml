@@ -33,6 +33,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 
+# server / http
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.7", features = ["fs", "cors"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde_json = "1"
+
 # config
 serde = { version = "1", features = ["derive"] }
 toml = "1"
@@ -43,6 +49,8 @@ stems-core = { path = "crates/stems-core" }
 stems-audio = { path = "crates/stems-audio" }
 stems-source-file = { path = "crates/stems-source-file" }
 stems-source-spotify = { path = "crates/stems-source-spotify" }
+stems-server = { path = "crates/stems-server" }
+stems-enrich = { path = "crates/stems-enrich" }
 
 [profile.release]
 lto = "thin"
