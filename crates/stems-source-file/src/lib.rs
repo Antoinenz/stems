@@ -250,6 +250,16 @@ fn decode_loop(mut o: Opened, producer: &mut Producer, ctx: &Ctx) -> anyhow::Res
     push_blocking(producer, &out, stop);
     frames_pushed += (out.len() / CHANNELS as usize) as u64;
     pushed_counter.store(frames_pushed, Ordering::Relaxed);
+
+    // Decoding is done, but `Ended` means *playback* ended: wait until the
+    // sink has drained everything we pushed.
+    let capacity = producer.buffer().capacity();
+    while producer.slots() < capacity && !stop.load(Ordering::Relaxed) {
+        if producer.is_abandoned() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     Ok(())
 }
 
@@ -295,6 +305,10 @@ impl Source for FileSource {
 
     fn events(&self) -> broadcast::Receiver<SourceEvent> {
         self.events.subscribe()
+    }
+
+    fn start(&mut self) {
+        self.play();
     }
 
     fn frames_pushed(&self) -> u64 {

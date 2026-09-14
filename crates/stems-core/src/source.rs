@@ -53,6 +53,11 @@ pub trait Source: Send {
     /// Subscribe to transport events. Each call returns an independent receiver.
     fn events(&self) -> broadcast::Receiver<SourceEvent>;
 
+    /// Begin producing audio/events. Called by the engine *after* it has
+    /// subscribed to [`events`](Self::events) so nothing is missed. Sources
+    /// that are driven by a remote client (Spotify, AirPlay) may ignore it.
+    fn start(&mut self) {}
+
     /// Total 44.1 kHz frames this source has pushed into its ring so far.
     ///
     /// Position events refer to the frame being pushed at that moment, so
