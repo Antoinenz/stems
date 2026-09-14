@@ -187,12 +187,12 @@ mod tests {
         let mut canvaz = Vec::new();
         put_bytes(&mut canvaz, 1, b"id1");
         put_bytes(&mut canvaz, 2, b"https://canvaz.scdn.co/x.mp4");
-        put_varint(&mut canvaz, (4 << 3) | 0);
+        put_varint(&mut canvaz, 4 << 3); // wire type 0
         put_varint(&mut canvaz, 2);
         put_bytes(&mut canvaz, 5, b"spotify:track:abc");
         let mut resp = Vec::new();
         put_bytes(&mut resp, 1, &canvaz);
-        put_varint(&mut resp, (2 << 3) | 0);
+        put_varint(&mut resp, 2 << 3); // wire type 0
         put_varint(&mut resp, 3600);
 
         let got = decode_response(&resp).unwrap();
