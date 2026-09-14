@@ -329,14 +329,16 @@ Native alternatives considered: **wgpu + glyphon/cosmic-text** (write SDF effect
 
 ### Phase 1 — "It plays, it shows lyrics, it has a button" (PoC, ~4–6 weeks)
 Goal: end-to-end vertical slice on the dev Pi + one laptop.
-1. Workspace scaffold, `stemsd` binary, config, logging.
-2. `stems-source-spotify`: librespot Sink + events → ring buffer → cpal output. Connect device visible on the phone. ✔ criterion: music plays from Spotify app through the box.
-3. Clock + state machine + axum WS broadcast.
-4. `web/stage`: line-level lyrics from LRCLIB, album art background, simple highlight. Runs in Chromium kiosk on the Pi/TV.
-5. `stems-sep::dsp` centre-cancel + mixer crossfade; `web/remote` with one big toggle + QR code on stage.
-6. SQLite cache for tracks/lyrics.
-7. **Stress-stage demo** (rendering de-risk gate, §4.1) on M1 + i7.
-8. Relicense repo to GPL-3.0-or-later.
+1. [x] Workspace scaffold, `stemsd` binary, config (`stems.toml`), logging, CI on Linux/Windows/macOS.
+2. [x] `stems-source-spotify`: librespot discovery (zeroconf) → custom Sink → ring → cpal output. Device visible in the Spotify app. *(advertised + mDNS-verified on the Pi; listening test pending on a machine with speakers)*
+3. [x] Clock + `Source`/`Sink` traits + flush signal (pause/seek drop buffered audio); ring fill and sink latency subtracted from the audible position.
+3b. [x] `stems-source-file` (symphonia + rubato) for Premium-less testing; `wav:`/`null` sinks for headless verification.
+4. [ ] State machine + axum WS broadcast (port 7373).
+5. [ ] `web/stage`: line-level lyrics from LRCLIB, album art background, simple highlight. Runs in Chromium kiosk on the Pi/TV.
+6. [ ] `stems-sep::dsp` centre-cancel + mixer crossfade wired into the pipeline; `web/remote` with one big toggle + QR code on stage. *(Mixer with crossfade exists; not yet in the hot path.)*
+7. [ ] SQLite cache for tracks/lyrics.
+8. [ ] **Stress-stage demo** (rendering de-risk gate, §4.1) on M1 + i7.
+9. [x] Relicense repo to GPL-3.0-or-later.
 **Deliberately excluded:** ML, AirPlay, video, Tauri packaging, auth.
 
 ### Phase 2 — "Real karaoke" (~6–10 weeks)
