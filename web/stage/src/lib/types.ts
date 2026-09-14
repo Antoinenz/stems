@@ -30,6 +30,14 @@ export interface KaraokeState {
   backend: string | null;
 }
 
+export type ViewMode = 'lyrics' | 'karaoke' | 'video' | 'canvas';
+
+export interface Media {
+  canvas_url: string | null;
+  video_url: string | null;
+  video_offset_ms: number;
+}
+
 export interface PlaybackState {
   source: string | null;
   status: PlaybackStatus;
@@ -37,6 +45,8 @@ export interface PlaybackState {
   next_track: TrackRef | null;
   lyrics: Lyrics | null;
   karaoke: KaraokeState;
+  view_mode: ViewMode;
+  media: Media;
   volume: number;
   revision: number;
 }
@@ -57,4 +67,5 @@ export type Command =
   | { cmd: 'set_karaoke'; enabled: boolean }
   | { cmd: 'set_vocal_gain'; gain: number }
   | { cmd: 'set_volume'; level: number }
-  | { cmd: 'set_lyrics_offset'; offset_ms: number };
+  | { cmd: 'set_lyrics_offset'; offset_ms: number }
+  | { cmd: 'set_view_mode'; mode: ViewMode };

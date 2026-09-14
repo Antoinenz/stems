@@ -5,9 +5,15 @@
     track,
     status,
     position,
-    karaoke
-  }: { track: TrackRef | null; status: PlaybackStatus; position: number; karaoke: KaraokeState } =
-    $props();
+    karaoke,
+    minimal = false
+  }: {
+    track: TrackRef | null;
+    status: PlaybackStatus;
+    position: number;
+    karaoke: KaraokeState;
+    minimal?: boolean;
+  } = $props();
 
   const fmt = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -17,8 +23,8 @@
 </script>
 
 {#if track}
-  <footer>
-    {#if track.art}<img class="art" src={track.art} alt="" />{/if}
+  <footer class:minimal>
+    {#if track.art && !minimal}<img class="art" src={track.art} alt="" />{/if}
     <div class="meta">
       <div class="title">{track.title}</div>
       <div class="artists">{track.artists.join(', ')}</div>
@@ -41,6 +47,10 @@
   .bar { height: 0.5vmin; background: rgba(255,255,255,.15); border-radius: 1vmin; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); }
   .time { font-size: 1.6vmin; color: var(--dim); margin-top: 0.6vmin; font-variant-numeric: tabular-nums; }
+  footer.minimal { bottom: 2vh; opacity: 0.8; }
+  footer.minimal .title { font-size: 2vmin; }
+  footer.minimal .artists { display: none; }
+  footer.minimal .time { display: none; }
   .badge {
     padding: 0.8vmin 1.6vmin; border-radius: 1vmin;
     background: var(--accent); color: #000; font-weight: 800; font-size: 1.8vmin; letter-spacing: 0.1em;

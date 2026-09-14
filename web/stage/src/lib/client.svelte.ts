@@ -16,6 +16,8 @@ export const EMPTY_STATE: PlaybackState = {
   next_track: null,
   lyrics: null,
   karaoke: { enabled: false, vocal_gain: 0, backend: null },
+  view_mode: 'lyrics',
+  media: { canvas_url: null, video_url: null, video_offset_ms: 0 },
   volume: 1,
   revision: 0
 };
