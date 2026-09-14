@@ -42,6 +42,7 @@ pub struct Engine {
     lyrics_rx: mpsc::Receiver<(TrackId, Option<Lyrics>)>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
+    tick_count: u64,
 }
 
 impl Engine {
@@ -79,6 +80,7 @@ impl Engine {
             lyrics_tx,
             lyrics_rx,
             exit_on_end,
+            tick_count: 0,
         };
         (
             engine,
@@ -280,15 +282,20 @@ impl Engine {
             position_ms,
             server_ms: self.started.elapsed().as_millis() as u64,
         });
-        if status == PlaybackStatus::Playing {
-            tracing::trace!(
+        // Once every ~5 s while playing: everything needed to diagnose clock
+        // drift (enable with RUST_LOG=info,stemsd=debug).
+        self.tick_count += 1;
+        if status == PlaybackStatus::Playing && self.tick_count % 50 == 0 {
+            let pushed = self.source.frames_pushed();
+            let emitted = self.sink.frames_emitted();
+            tracing::debug!(
                 position_ms,
-                buffered = self
-                    .source
-                    .frames_pushed()
-                    .saturating_sub(self.sink.frames_emitted()),
+                pushed_ms = stems_core::frames_to_ms(pushed),
+                emitted_ms = stems_core::frames_to_ms(emitted),
+                buffered_ms = stems_core::frames_to_ms(pushed.saturating_sub(emitted)),
                 underruns = self.sink.underruns(),
-                "tick"
+                sink_latency_ms = self.sink.latency().as_millis() as u64,
+                "clock"
             );
         }
     }
