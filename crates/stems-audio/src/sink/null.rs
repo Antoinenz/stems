@@ -45,8 +45,14 @@ impl NullSink {
                         underruns
                             .fetch_add((missing / CHANNELS as usize) as u64, Ordering::Relaxed);
                         next += TICK;
-                        if let Some(d) = next.checked_duration_since(Instant::now()) {
-                            thread::sleep(d);
+                        let now = Instant::now();
+                        match next.checked_duration_since(now) {
+                            Some(d) => thread::sleep(d),
+                            // We were descheduled for a while: a real device
+                            // would have played silence, not burst through
+                            // buffered audio. Drop the lost time.
+                            None if now - next > TICK => next = now,
+                            None => {}
                         }
                     }
                 })
