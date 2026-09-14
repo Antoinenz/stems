@@ -41,9 +41,27 @@ impl FromStr for SinkKind {
     }
 }
 
+impl std::fmt::Display for SinkKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SinkKind::Cpal { device: None } => write!(f, "cpal"),
+            SinkKind::Cpal { device: Some(d) } => write!(f, "cpal:{d}"),
+            SinkKind::Wav { path } => write!(f, "wav:{}", path.display()),
+            SinkKind::Null => write!(f, "null"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_roundtrip() {
+        for s in ["null", "cpal", "cpal:HDMI 1", "wav:/tmp/o.wav"] {
+            assert_eq!(s.parse::<SinkKind>().unwrap().to_string(), s);
+        }
+    }
 
     #[test]
     fn parses_kinds() {
