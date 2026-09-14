@@ -29,12 +29,19 @@ pub struct DeviceInfo {
 pub fn list_output_devices() -> anyhow::Result<Vec<DeviceInfo>> {
     let host = cpal::default_host();
     let default_name = host.default_output_device().map(|d| d.to_string());
-    let mut out = Vec::new();
+    let mut out: Vec<DeviceInfo> = Vec::new();
     for d in host.output_devices()? {
         let name = d.to_string();
+        // ALSA lists every plugin/PCM alias; keep only openable, unique names.
+        let Ok(cfg) = d.default_output_config() else {
+            continue;
+        };
+        if out.iter().any(|o| o.name == name) {
+            continue;
+        }
         out.push(DeviceInfo {
             is_default: default_name.as_deref() == Some(name.as_str()),
-            default_sample_rate: d.default_output_config().ok().map(|c| c.sample_rate()),
+            default_sample_rate: Some(cfg.sample_rate()),
             name,
         });
     }
