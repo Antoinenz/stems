@@ -4,6 +4,7 @@
 //! events. The HTTP/WS server, separation and the stage come next.
 
 mod config;
+mod engine;
 mod pipeline;
 
 use std::path::PathBuf;
@@ -25,6 +26,11 @@ struct Cli {
     /// Path to stems.toml (default: platform config dir).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+
+    /// Directory containing the built web apps (`<dir>/stage/dist`, …).
+    /// Defaults to `./web` if it exists.
+    #[arg(long, global = true)]
+    web_dir: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -56,7 +62,17 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    // librespot uses ring; reqwest is built without a provider so both
+    // agree on one process-wide default.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     let cli = Cli::parse();
+    let web_dir = cli.web_dir.clone().or_else(|| {
+        let d = PathBuf::from("web");
+        d.is_dir().then_some(d)
+    });
     let mut cfg = match &cli.config {
         Some(p) => Config::load_from(p)?,
         None => Config::load()?,
@@ -89,13 +105,16 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Play { file } => pipeline::play_file(&file, &sink),
+        Cmd::Play { file } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pipeline::play_file(&cfg, web_dir, &file, &sink))
+        }
         Cmd::Spotify { name } => {
             if let Some(n) = name {
                 cfg.device_name = n;
             }
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pipeline::run_spotify(&cfg, &sink))
+            rt.block_on(pipeline::run_spotify(&cfg, web_dir, &sink))
         }
     }
 }
