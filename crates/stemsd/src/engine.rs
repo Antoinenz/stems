@@ -178,6 +178,7 @@ impl Engine {
                     s.status = PlaybackStatus::Playing;
                     s.lyrics = lyrics;
                     s.next_track = None;
+                    s.media = Default::default();
                     s.track = Some(track.clone());
                     s.revision += 1;
                 });
@@ -235,6 +236,10 @@ impl Engine {
                     s.revision += 1;
                 });
             }
+            Command::SetViewMode { mode } => self.state_tx.send_modify(|s| {
+                s.view_mode = mode;
+                s.revision += 1;
+            }),
             Command::SetLyricsOffset { offset_ms } => {
                 // Per-track offset, persisted; the state carries it combined
                 // with the global one so clients apply a single number.
@@ -334,13 +339,18 @@ impl Engine {
         if status == PlaybackStatus::Playing && self.tick_count % 50 == 0 {
             let pushed = self.source.frames_pushed();
             let emitted = self.sink.frames_emitted();
+            let buffered_ms = stems_core::frames_to_ms(pushed.saturating_sub(emitted));
+            let sink_latency_ms = self.sink.latency().as_millis() as u64;
             tracing::debug!(
                 position_ms,
                 pushed_ms = stems_core::frames_to_ms(pushed),
                 emitted_ms = stems_core::frames_to_ms(emitted),
-                buffered_ms = stems_core::frames_to_ms(pushed.saturating_sub(emitted)),
+                buffered_ms,
                 underruns = self.sink.underruns(),
-                sink_latency_ms = self.sink.latency().as_millis() as u64,
+                sink_latency_ms,
+                // How far the controller's (phone's) timeline runs ahead of
+                // what is audible. Expected: buffered + device latency.
+                controller_lead_ms = buffered_ms + sink_latency_ms,
                 "clock"
             );
         }

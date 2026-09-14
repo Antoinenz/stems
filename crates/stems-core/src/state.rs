@@ -62,6 +62,34 @@ impl Lyrics {
     }
 }
 
+/// How the stage renders. Set by the host / remote; the stage may also be
+/// pinned to a mode via its URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    /// Lyrics with art background and now-playing footer.
+    #[default]
+    Lyrics,
+    /// Fewer lines, larger text, minimal chrome: easiest to sing from.
+    Karaoke,
+    /// Music video (when available) with minimal lyrics overlay.
+    Video,
+    /// Spotify Canvas loop (when available) behind the lyrics.
+    Canvas,
+}
+
+/// Optional media resolved for the current track.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Media {
+    /// Short looping clip (Spotify Canvas), if resolved.
+    pub canvas_url: Option<String>,
+    /// Music video, if resolved (local cache path served by stemsd or URL).
+    pub video_url: Option<String>,
+    /// Video timeline offset relative to the track, ms.
+    pub video_offset_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackState {
@@ -73,6 +101,8 @@ pub struct PlaybackState {
     /// Lyrics for `track`, once resolved. `None` while loading or if none found.
     pub lyrics: Option<Lyrics>,
     pub karaoke: KaraokeState,
+    pub view_mode: ViewMode,
+    pub media: Media,
     /// Output volume 0.0..=1.0.
     pub volume: f32,
     /// Monotonic revision, bumped on every change.
@@ -106,6 +136,9 @@ pub enum Command {
     /// Nudge lyric timing for the current track.
     SetLyricsOffset {
         offset_ms: i64,
+    },
+    SetViewMode {
+        mode: ViewMode,
     },
 }
 

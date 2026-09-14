@@ -17,7 +17,8 @@ pub use separator::Separator;
 pub use sink::Sink;
 pub use source::{Source, SourceEvent};
 pub use state::{
-    ClockTick, Command, KaraokeState, LyricLine, Lyrics, PlaybackState, PlaybackStatus,
+    ClockTick, Command, KaraokeState, LyricLine, Lyrics, Media, PlaybackState, PlaybackStatus,
+    ViewMode,
 };
 pub use track::{TrackId, TrackRef};
 
