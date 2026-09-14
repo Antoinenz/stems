@@ -127,7 +127,12 @@ impl Engine {
             }
         }
 
-        tracing::info!("engine stopping");
+        tracing::info!(
+            pushed_ms = stems_core::frames_to_ms(self.source.frames_pushed()),
+            emitted_ms = stems_core::frames_to_ms(self.sink.frames_emitted()),
+            underruns = self.sink.underruns(),
+            "engine stopping"
+        );
         if let Some(t) = self.lyrics_task.take() {
             t.abort();
         }

@@ -62,11 +62,14 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // User filter (RUST_LOG) or `info`, but always mute libmdns' per-packet
+    // parse warnings: other devices' NSEC queries trip it constantly.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into())
+        .add_directive("libmdns=error".parse().expect("valid directive"))
+        .add_directive("librespot_discovery=warn".parse().expect("valid directive"));
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,libmdns=error,librespot_discovery=warn".into()),
-        )
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 
