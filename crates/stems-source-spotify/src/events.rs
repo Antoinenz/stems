@@ -90,8 +90,11 @@ pub async fn pump(
             PlayerEvent::SessionConnected { user_name, .. } => {
                 tracing::info!(user = %user_name, "spotify session connected");
             }
-            PlayerEvent::SessionDisconnected { .. } => {
-                let _ = tx.send(SourceEvent::Disconnected);
+            // The controlling client released this device (playback moved
+            // elsewhere). Not a lost session: a Stopped/EndOfTrack follows
+            // and the device stays advertised for the next client.
+            PlayerEvent::SessionDisconnected { user_name, .. } => {
+                tracing::info!(user = %user_name, "client released the device");
             }
             PlayerEvent::SessionClientChanged { client_name, .. } => {
                 tracing::info!(client = %client_name, "controlled by");
