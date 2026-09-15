@@ -60,7 +60,16 @@ model = "UVR-MDX-NET-Inst_HQ_3"    # or "Kim_Vocal_2"; downloaded on first use
 device = "auto"                    # auto | cpu | cuda | directml | coreml
 threads = 0                        # CPU threads, 0 = runtime default
 slack_ms = 2000                    # extra latency budget for slow inference bursts
+hop_ms = 0                         # new audio per inference; 0 = full window (~5.9 s)
+lookahead_ms = 0                   # future context before output; 0 = model minimum
+denoise = false                    # run x and -x, average: fewer artefacts, 2x cost
 ```
+
+Latency ≈ `lookahead + hop + slack`. Smaller `hop_ms` blends overlapping windows (better
+quality, lower latency) at `5900 / hop_ms` times the inference cost, so it is bounded by how
+fast the device runs one window. Starting points: GPU with headroom → `hop_ms = 2000,
+lookahead_ms = 1500, slack_ms = 1500` (~5 s); fast GPU → `hop_ms = 1200, lookahead_ms = 1000,
+slack_ms = 1200` (~3.4 s). If the log says `mdx separator starved`, raise `hop_ms`/`slack_ms`.
 
 `mdx` streams audio through the model in ~6 s windows, so playback runs ~8 s behind the
 controller (lyrics and clock account for it). Inference must be at least real time: fine on a
