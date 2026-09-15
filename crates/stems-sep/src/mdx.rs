@@ -6,9 +6,9 @@
 //!   worker thread and hands back instrumental audio delayed by a fixed
 //!   number of frames, so a slow model never stalls the audio thread.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -120,14 +120,15 @@ impl MdxModel {
         let session = builder
             .commit_from_file(path)
             .with_context(|| format!("load {}", path.display()))?;
-        let input_name = session
+        let input = session
             .inputs()
             .first()
-            .map(|i| i.name().to_string())
             .ok_or_else(|| anyhow!("model has no inputs"))?;
+        let input_name = input.name().to_string();
         tracing::info!(
             model = %path.display(),
             provider,
+            input = %input.dtype(),
             n_fft = params.n_fft,
             dim_t = params.dim_t,
             stem = ?params.primary_stem,
@@ -272,6 +273,10 @@ pub struct StreamOpts {
     /// Run each window twice (x and −x) and average: fewer artefacts,
     /// double the cost.
     pub denoise: bool,
+    /// Inference threads, each with its own model session. Windows are
+    /// processed concurrently so the accelerator is not idle while one
+    /// window's CPU-side STFT/iSTFT and transfers run.
+    pub workers: usize,
 }
 
 impl Default for StreamOpts {
@@ -281,16 +286,21 @@ impl Default for StreamOpts {
             lookahead_frames: 0,
             slack_frames: 44_100 * 2,
             denoise: false,
+            workers: 1,
         }
     }
 }
 
 struct Job {
+    generation: u64,
+    seq: u64,
     start: i64,
     window: Vec<f32>,
 }
 
 struct Done {
+    generation: u64,
+    seq: u64,
     start: i64,
     inst: Vec<f32>,
 }
@@ -319,7 +329,20 @@ pub struct MdxSeparator {
     weights: Vec<f32>,
     to_worker: mpsc::Sender<Job>,
     from_worker: mpsc::Receiver<Done>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
+    /// Bumped on reset so results from a previous track are discarded.
+    generation: u64,
+    /// Next sequence number to hand out / to accumulate. Results may
+    /// finish out of order with several workers; they are held in
+    /// `pending` until their turn so finalisation never runs ahead.
+    dispatch_seq: u64,
+    next_seq: u64,
+    pending: BTreeMap<u64, Done>,
+    /// Windows dispatched but not yet returned; bounded so a slow
+    /// accelerator drops windows instead of falling ever further behind.
+    in_flight: usize,
+    max_in_flight: usize,
+    dropped: u64,
     starved: bool,
     provider: &'static str,
 }
@@ -330,20 +353,40 @@ pub type WindowRunner = Box<dyn FnMut(&[f32]) -> Result<Vec<f32>> + Send>;
 
 impl MdxSeparator {
     pub fn new(model: MdxModel, opts: StreamOpts) -> Self {
-        let params = model.params().clone();
-        let provider = model.provider();
+        Self::with_models(vec![model], opts)
+    }
+
+    /// One worker thread per model session.
+    pub fn with_models(models: Vec<MdxModel>, opts: StreamOpts) -> Self {
+        assert!(!models.is_empty(), "at least one model session");
+        let params = models[0].params().clone();
+        let provider = models[0].provider();
         let denoise = opts.denoise;
-        let mut model = model;
-        let runner: WindowRunner = Box::new(move |w| model.instrumental_for_window_opt(w, denoise));
-        Self::with_runner(params, provider, runner, opts)
+        let runners = models
+            .into_iter()
+            .map(|mut model| -> WindowRunner {
+                Box::new(move |w| model.instrumental_for_window_opt(w, denoise))
+            })
+            .collect();
+        Self::with_runners(params, provider, runners, opts)
     }
 
     pub fn with_runner(
         params: MdxParams,
         provider: &'static str,
-        mut runner: WindowRunner,
+        runner: WindowRunner,
         opts: StreamOpts,
     ) -> Self {
+        Self::with_runners(params, provider, vec![runner], opts)
+    }
+
+    pub fn with_runners(
+        params: MdxParams,
+        provider: &'static str,
+        runners: Vec<WindowRunner>,
+        opts: StreamOpts,
+    ) -> Self {
+        assert!(!runners.is_empty(), "at least one runner");
         let chunk = params.chunk_size();
         let trim = params.trim();
         let hop = if opts.hop_frames == 0 {
@@ -369,31 +412,46 @@ impl MdxSeparator {
             .collect();
 
         let (to_worker, jobs) = mpsc::channel::<Job>();
+        let jobs = Arc::new(Mutex::new(jobs));
         let (results, from_worker) = mpsc::channel::<Done>();
         let denoise = opts.denoise;
-        let worker = thread::Builder::new()
-            .name("stems-mdx".into())
-            .spawn(move || {
-                for job in jobs {
-                    let inst = match runner(&job.window) {
-                        Ok(inst) => inst,
-                        Err(e) => {
-                            tracing::error!("mdx inference failed: {e:#}");
-                            job.window.clone()
+        let n_workers = runners.len();
+        let workers = runners
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut runner)| {
+                let jobs = Arc::clone(&jobs);
+                let results = results.clone();
+                thread::Builder::new()
+                    .name(format!("stems-mdx-{i}"))
+                    .spawn(move || {
+                        loop {
+                            let job = match jobs.lock() {
+                                Ok(rx) => rx.recv(),
+                                Err(_) => break,
+                            };
+                            let Ok(job) = job else { break };
+                            let inst = match runner(&job.window) {
+                                Ok(inst) => inst,
+                                Err(e) => {
+                                    tracing::error!("mdx inference failed: {e:#}");
+                                    job.window.clone()
+                                }
+                            };
+                            let done = Done {
+                                generation: job.generation,
+                                seq: job.seq,
+                                start: job.start,
+                                inst,
+                            };
+                            if results.send(done).is_err() {
+                                break;
+                            }
                         }
-                    };
-                    if results
-                        .send(Done {
-                            start: job.start,
-                            inst,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
+                    })
+                    .expect("spawn mdx worker")
             })
-            .expect("spawn mdx worker");
+            .collect();
 
         tracing::info!(
             hop_ms = hop as u64 * 1000 / 44_100,
@@ -401,6 +459,7 @@ impl MdxSeparator {
             latency_ms = latency as u64 * 1000 / 44_100,
             inferences_per_window = format!("{:.1}", params.gen_size() as f32 / hop as f32),
             denoise,
+            workers = n_workers,
             "mdx streaming"
         );
 
@@ -421,7 +480,15 @@ impl MdxSeparator {
             weights,
             to_worker,
             from_worker,
-            worker: Some(worker),
+            workers,
+            generation: 0,
+            dispatch_seq: 0,
+            next_seq: 0,
+            pending: BTreeMap::new(),
+            in_flight: 0,
+            // one queued window per worker on top of those running
+            max_in_flight: n_workers * 2,
+            dropped: 0,
             starved: false,
             provider,
         };
@@ -443,6 +510,9 @@ impl MdxSeparator {
         self.ready_valid.clear();
         self.ready.resize(self.latency * 2, 0.0);
         self.ready_valid.resize(self.latency, false);
+        self.pending.clear();
+        self.next_seq = self.dispatch_seq;
+        self.in_flight = 0;
     }
 
     fn push_input(&mut self, input: &[f32]) {
@@ -462,6 +532,16 @@ impl MdxSeparator {
         while self.input_frames >= self.next_window_end {
             let end = self.next_window_end;
             let start = end - chunk;
+            self.next_window_end += self.hop as i64;
+            if self.in_flight >= self.max_in_flight {
+                // Falling behind: skip this window rather than queue it.
+                // Frames only it covered stay invalid → dry fallback.
+                if self.dropped == 0 {
+                    tracing::warn!("mdx inference too slow: dropping windows");
+                }
+                self.dropped += 1;
+                continue;
+            }
             let mut window = vec![0.0f32; chunk as usize * 2];
             for f in start.max(self.history_start)..end {
                 let src = ((f - self.history_start) as usize) * 2;
@@ -469,15 +549,30 @@ impl MdxSeparator {
                 window[dst] = self.history[src];
                 window[dst + 1] = self.history[src + 1];
             }
-            if self.to_worker.send(Job { start, window }).is_err() {
+            let job = Job {
+                generation: self.generation,
+                seq: self.dispatch_seq,
+                start,
+                window,
+            };
+            if self.to_worker.send(job).is_err() {
                 break;
             }
-            self.next_window_end += self.hop as i64;
+            self.dispatch_seq += 1;
+            self.in_flight += 1;
         }
     }
 
     fn collect_results(&mut self) {
         while let Ok(done) = self.from_worker.try_recv() {
+            if done.generation != self.generation {
+                continue;
+            }
+            self.in_flight = self.in_flight.saturating_sub(1);
+            self.pending.insert(done.seq, done);
+        }
+        while let Some(done) = self.pending.remove(&self.next_seq) {
+            self.next_seq += 1;
             self.accumulate(done.start, &done.inst);
             let end = done.start + self.params.chunk_size() as i64;
             self.finalize_upto(end - self.lookahead as i64);
@@ -547,8 +642,9 @@ impl Separator for MdxSeparator {
             return false;
         }
         if self.starved {
-            tracing::info!("mdx separator caught up");
+            tracing::info!(dropped = self.dropped, "mdx separator caught up");
             self.starved = false;
+            self.dropped = 0;
         }
         let mut valid = true;
         for o in instrumental.iter_mut() {
@@ -561,6 +657,7 @@ impl Separator for MdxSeparator {
     }
 
     fn reset(&mut self) {
+        self.generation += 1;
         while self.from_worker.try_recv().is_ok() {}
         self.prime();
     }
@@ -570,7 +667,7 @@ impl Drop for MdxSeparator {
     fn drop(&mut self) {
         let (tx, _) = mpsc::channel();
         self.to_worker = tx;
-        if let Some(w) = self.worker.take() {
+        for w in self.workers.drain(..) {
             let _ = w.join();
         }
     }
@@ -624,8 +721,19 @@ mod tests {
 
     fn run_stream(opts: StreamOpts, frames: usize) -> (Vec<f32>, Vec<f32>, usize, Vec<bool>) {
         let params = small_params();
-        let runner: WindowRunner = Box::new(|w: &[f32]| Ok(w.to_vec()));
-        let mut sep = MdxSeparator::with_runner(params, "test", runner, opts);
+        // identity runners; with several, odd ones are slower so results
+        // come back out of order and must be re-sequenced
+        let runners = (0..opts.workers.max(1))
+            .map(|i| -> WindowRunner {
+                Box::new(move |w: &[f32]| {
+                    if i % 2 == 1 {
+                        std::thread::sleep(std::time::Duration::from_micros(500));
+                    }
+                    Ok(w.to_vec())
+                })
+            })
+            .collect();
+        let mut sep = MdxSeparator::with_runners(params, "test", runners, opts);
         let latency = sep.latency_frames();
         let input: Vec<f32> = (0..frames)
             .flat_map(|i| [(i % 1000) as f32 / 1000.0, -((i % 777) as f32) / 777.0])
@@ -650,8 +758,24 @@ mod tests {
             lookahead_frames: 512,
             slack_frames: 1536,
             denoise: false,
+            workers: 1,
         };
         assert_eq!(params.chunk_size(), 4096);
+        check_identity(opts);
+    }
+
+    #[test]
+    fn parallel_workers_resequence_results() {
+        check_identity(StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 1536,
+            denoise: false,
+            workers: 3,
+        });
+    }
+
+    fn check_identity(opts: StreamOpts) {
         let frames = 40_000;
         let (input, out, latency, valid) = run_stream(opts, frames);
         assert_eq!(latency, 512 + 1024 + 1536);
