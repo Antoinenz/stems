@@ -26,6 +26,7 @@ use stems_core::{ClockTick, Command, PlaybackState};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[derive(Clone)]
 pub struct Channels {
@@ -58,15 +59,21 @@ impl Server {
             .layer(CorsLayer::permissive());
 
         if let Some(dir) = web_dir {
+            // Vite hashes asset file names, so only the HTML shell must not
+            // be cached — otherwise browsers keep loading the old bundle.
+            let no_cache = SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            );
             for app_name in ["stage", "remote"] {
                 let dist = dir.join(app_name).join("dist");
                 if dist.join("index.html").is_file() {
                     tracing::info!(app = app_name, dir = %dist.display(), "serving web app");
                     let index = ServeFile::new(dist.join("index.html"));
-                    app = app.nest_service(
-                        &format!("/{app_name}"),
-                        ServeDir::new(&dist).fallback(index),
-                    );
+                    let svc = tower::ServiceBuilder::new()
+                        .layer(no_cache.clone())
+                        .service(ServeDir::new(&dist).fallback(index));
+                    app = app.nest_service(&format!("/{app_name}"), svc);
                 } else {
                     tracing::warn!(app = app_name, dir = %dist.display(), "web app not built; skipping");
                 }
