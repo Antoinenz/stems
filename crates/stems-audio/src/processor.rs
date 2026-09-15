@@ -118,7 +118,13 @@ impl Processor {
                             &original
                         };
                         if streaming || enabled || mixer.is_fading() {
-                            separator.process(&original, &mut inst);
+                            let valid = separator.process(&original, &mut inst);
+                            if !valid {
+                                // No usable instrumental for this block (priming
+                                // after a seek, or inference behind): keep the
+                                // music going with the original instead of silence.
+                                inst.copy_from_slice(dry);
+                            }
                             let g = control.vocal_gain();
                             for ((p, o), i) in processed.iter_mut().zip(dry).zip(&inst) {
                                 *p = i + g * (o - i);
@@ -191,8 +197,9 @@ mod tests {
         fn latency_frames(&self) -> usize {
             0
         }
-        fn process(&mut self, _input: &[f32], instrumental: &mut [f32]) {
+        fn process(&mut self, _input: &[f32], instrumental: &mut [f32]) -> bool {
             instrumental.fill(0.0);
+            true
         }
         fn reset(&mut self) {}
     }
@@ -244,11 +251,12 @@ mod tests {
         fn latency_frames(&self) -> usize {
             self.lat
         }
-        fn process(&mut self, input: &[f32], instrumental: &mut [f32]) {
+        fn process(&mut self, input: &[f32], instrumental: &mut [f32]) -> bool {
             self.fifo.extend(input.iter().copied());
             for o in instrumental.iter_mut() {
                 *o = self.fifo.pop_front().unwrap();
             }
+            true
         }
         fn reset(&mut self) {
             self.fifo.clear();

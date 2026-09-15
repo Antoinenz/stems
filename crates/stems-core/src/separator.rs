@@ -9,7 +9,11 @@ pub trait Separator: Send {
     /// Process `input` (interleaved stereo) into `instrumental` (same
     /// length). Called from the processing thread, never from the device
     /// callback, so moderate work and allocation-free loops are fine.
-    fn process(&mut self, input: &[f32], instrumental: &mut [f32]);
+    ///
+    /// Returns `false` when `instrumental` is not usable for this block
+    /// (backend still priming after a reset, or inference fell behind);
+    /// the caller should fall back to the original signal.
+    fn process(&mut self, input: &[f32], instrumental: &mut [f32]) -> bool;
 
     /// Drop internal state (seek / track change).
     fn reset(&mut self);

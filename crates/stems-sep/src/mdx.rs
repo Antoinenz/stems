@@ -250,6 +250,8 @@ pub struct MdxSeparator {
     from_worker: mpsc::Receiver<Vec<f32>>,
     worker: Option<JoinHandle<()>>,
     starved: bool,
+    /// Samples at the head of `ready` that are priming silence, not audio.
+    priming_left: usize,
     provider: &'static str,
 }
 
@@ -293,6 +295,7 @@ impl MdxSeparator {
             from_worker,
             worker: Some(worker),
             starved: false,
+            priming_left: 0,
             provider,
         };
         s.prime();
@@ -307,6 +310,7 @@ impl MdxSeparator {
         // the input with `trim` frames of silence to keep alignment exact.
         self.pending.resize(self.params.trim() * 2, 0.0);
         self.ready.resize(self.latency * 2, 0.0);
+        self.priming_left = self.latency * 2;
     }
 
     fn dispatch_windows(&mut self) {
@@ -337,7 +341,7 @@ impl Separator for MdxSeparator {
         self.latency
     }
 
-    fn process(&mut self, input: &[f32], instrumental: &mut [f32]) {
+    fn process(&mut self, input: &[f32], instrumental: &mut [f32]) -> bool {
         self.pending.extend_from_slice(input);
         self.dispatch_windows();
         self.collect_results();
@@ -347,12 +351,20 @@ impl Separator for MdxSeparator {
                 self.starved = true;
             }
             instrumental.fill(0.0);
-            return;
+            return false;
         }
-        self.starved = false;
+        if self.starved {
+            tracing::info!("mdx separator caught up");
+            self.starved = false;
+        }
         for o in instrumental.iter_mut() {
             *o = self.ready.pop_front().unwrap_or(0.0);
         }
+        if self.priming_left > 0 {
+            self.priming_left = self.priming_left.saturating_sub(instrumental.len());
+            return false;
+        }
+        true
     }
 
     fn reset(&mut self) {

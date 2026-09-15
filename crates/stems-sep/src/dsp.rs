@@ -48,7 +48,7 @@ impl Separator for CentreCancel {
         0
     }
 
-    fn process(&mut self, input: &[f32], instrumental: &mut [f32]) {
+    fn process(&mut self, input: &[f32], instrumental: &mut [f32]) -> bool {
         debug_assert_eq!(input.len(), instrumental.len());
         for (i, o) in input.chunks_exact(2).zip(instrumental.chunks_exact_mut(2)) {
             let (l, r) = (i[0], i[1]);
@@ -60,6 +60,7 @@ impl Separator for CentreCancel {
             o[0] = side + bass;
             o[1] = -side + bass;
         }
+        true
     }
 
     fn reset(&mut self) {
