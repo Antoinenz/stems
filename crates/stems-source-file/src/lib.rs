@@ -211,6 +211,7 @@ fn decode_loop(mut o: Opened, producer: &mut Producer, ctx: &Ctx) -> anyhow::Res
     let _ = events.send(SourceEvent::TrackStarted {
         track: track.clone(),
         position_ms: 0,
+        at_frame: 0,
     });
 
     loop {
@@ -251,6 +252,7 @@ fn decode_loop(mut o: Opened, producer: &mut Producer, ctx: &Ctx) -> anyhow::Res
             last_event_frame = frames_pushed;
             let _ = events.send(SourceEvent::Playing {
                 position_ms: frames_to_ms(frames_pushed),
+                at_frame: frames_pushed,
             });
         }
     }

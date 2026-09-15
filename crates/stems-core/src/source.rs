@@ -12,19 +12,30 @@ use crate::TrackRef;
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SourceEvent {
     /// A new track has started (or been cued) at `position_ms`.
+    ///
+    /// `at_frame` is the source's `frames_pushed()` at the instant the
+    /// position was valid, so the clock can anchor exactly even if this
+    /// event is handled late.
     TrackStarted {
         track: TrackRef,
         position_ms: u64,
+        at_frame: u64,
     },
-    /// Playback is running; periodic re-anchor of the position.
+    /// Playback is running; re-anchor of the position.
     Playing {
         position_ms: u64,
+        at_frame: u64,
     },
     Paused {
         position_ms: u64,
     },
     Seeked {
         position_ms: u64,
+        at_frame: u64,
+    },
+    /// Metadata for the current track improved (e.g. ISRC resolved).
+    TrackUpdated {
+        track: TrackRef,
     },
     /// The current track finished or was stopped.
     Ended,
