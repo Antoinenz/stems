@@ -104,10 +104,12 @@ pub fn paths() -> Result<Paths> {
 }
 
 impl Config {
-    /// Load from the default location, or return defaults if absent.
+    /// Load from the default location, writing a default file first if
+    /// there is none so users can find and edit it.
     pub fn load() -> Result<Self> {
-        let p = paths()?;
-        Self::load_from(&p.config_file)
+        let path = Self::ensure_exists()?;
+        tracing::info!(path = %path.display(), "config");
+        Self::load_from(&path)
     }
 
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
