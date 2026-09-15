@@ -63,6 +63,7 @@ slack_ms = 2000                    # extra latency budget for slow inference bur
 hop_ms = 0                         # new audio per inference; 0 = full window (~5.9 s)
 lookahead_ms = 0                   # future context before output; 0 = model minimum
 denoise = false                    # run x and -x, average: fewer artefacts, 2x cost
+workers = 1                        # parallel model sessions; 2 keeps a GPU busy
 ```
 
 Latency ≈ `lookahead + hop + slack`. Smaller `hop_ms` blends overlapping windows (better
@@ -70,6 +71,13 @@ quality, lower latency) at `5900 / hop_ms` times the inference cost, so it is bo
 fast the device runs one window. Starting points: GPU with headroom → `hop_ms = 2000,
 lookahead_ms = 1500, slack_ms = 1500` (~5 s); fast GPU → `hop_ms = 1200, lookahead_ms = 1000,
 slack_ms = 1200` (~3.4 s). If the log says `mdx separator starved`, raise `hop_ms`/`slack_ms`.
+
+Each window is a serial chain — STFT on the CPU, the model on the GPU, iSTFT on the CPU —
+so with one worker the GPU idles between windows and shows up as spikes. `workers = 2` runs
+two windows concurrently (second model session, ~2× GPU memory) so the CPU legs overlap the
+GPU work; go to 3 on a discrete GPU with room. When inference cannot keep up, windows are
+dropped instead of queued (`dropping windows` in the log): those seconds pass through dry
+rather than the delay growing without bound.
 
 `mdx` streams audio through the model in ~6 s windows, so playback runs ~8 s behind the
 controller (lyrics and clock account for it). Inference must be at least real time: fine on a
