@@ -151,9 +151,12 @@ impl Engine {
 
     fn on_event(&mut self, ev: SourceEvent) {
         self.clock.set_sink_latency(self.sink.latency());
-        let pushed = self.source.frames_pushed();
         match ev {
-            SourceEvent::TrackStarted { track, position_ms } => {
+            SourceEvent::TrackStarted {
+                track,
+                position_ms,
+                at_frame,
+            } => {
                 tracing::info!(
                     title = %track.title,
                     artists = %track.artists_joined(),
@@ -162,7 +165,7 @@ impl Engine {
                     position_ms,
                     "track started"
                 );
-                self.clock.anchor(position_ms, pushed);
+                self.clock.anchor(position_ms, at_frame);
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
@@ -203,9 +206,41 @@ impl Engine {
                     Cached::Miss => self.spawn_lyrics_lookup(track),
                 }
             }
-            SourceEvent::Playing { position_ms } | SourceEvent::Seeked { position_ms } => {
-                self.clock.anchor(position_ms, pushed);
+            SourceEvent::Playing {
+                position_ms,
+                at_frame,
+            }
+            | SourceEvent::Seeked {
+                position_ms,
+                at_frame,
+            } => {
+                self.clock.anchor(position_ms, at_frame);
                 self.set_status(PlaybackStatus::Playing);
+            }
+            SourceEvent::TrackUpdated { track } => {
+                if let Err(e) = self.cache.put_track(&track) {
+                    tracing::warn!("cache: {e:#}");
+                }
+                let is_current =
+                    self.state_tx.borrow().track.as_ref().map(|t| &t.id) == Some(&track.id);
+                if !is_current {
+                    return;
+                }
+                // A better key (ISRC) may hit the cache where the id did not.
+                let lookup_pending = self.lyrics_task.as_ref().is_some_and(|t| !t.is_finished());
+                let mut cached = None;
+                if self.state_tx.borrow().lyrics.is_none() && !lookup_pending {
+                    if let Ok(Cached::Hit(l)) = self.cache.get_lyrics(&track) {
+                        cached = Some(self.with_global_offset(l));
+                    }
+                }
+                self.state_tx.send_modify(|s| {
+                    s.track = Some(track);
+                    if cached.is_some() {
+                        s.lyrics = cached;
+                    }
+                    s.revision += 1;
+                });
             }
             SourceEvent::Paused { position_ms } => {
                 self.clock.pause(position_ms);

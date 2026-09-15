@@ -1,111 +1,132 @@
-//! Translate librespot `PlayerEvent`s into `SourceEvent`s and enrich them
-//! with track metadata (ISRC, album art).
+//! Translate librespot `PlayerEvent`s into `SourceEvent`s.
+//!
+//! Timing matters here: position events are stamped with the ring sink's
+//! `frames_pushed` the moment they are dequeued, and this loop never awaits
+//! the network — metadata that needs a round trip (ISRC, canvas) is fetched
+//! in spawned tasks and delivered later as `TrackUpdated` / `Media`.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use librespot_core::{Session, SpotifyUri};
 use librespot_metadata::audio::{AudioItem, UniqueFields};
 use librespot_metadata::{Metadata, Track};
 use librespot_playback::player::{PlayerEvent, PlayerEventChannel};
 use stems_core::{SourceEvent, TrackId, TrackRef};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 pub async fn pump(
     mut rx: PlayerEventChannel,
     session: Session,
     tx: broadcast::Sender<SourceEvent>,
+    frames_pushed: Arc<AtomicU64>,
 ) {
     let mut current: Option<(SpotifyUri, TrackRef)> = None;
     let mut started_for: Option<SpotifyUri> = None;
+    let (isrc_tx, mut isrc_rx) = mpsc::channel::<(SpotifyUri, Option<String>)>(8);
 
-    while let Some(ev) = rx.recv().await {
-        tracing::trace!(?ev, "player event");
-        match ev {
-            PlayerEvent::TrackChanged { audio_item } => {
-                let mut track = track_ref_from_item(&audio_item);
-                track.isrc = fetch_isrc(&session, &audio_item.track_id).await;
-                current = Some((audio_item.track_id.clone(), track.clone()));
-                spawn_canvas_lookup(&session, &audio_item.track_id, track.clone(), &tx);
-                // If playback already started for this track before we had
-                // metadata, re-announce it with the full details.
-                if started_for.as_ref() == Some(&audio_item.track_id) {
-                    let _ = tx.send(SourceEvent::TrackStarted {
-                        track,
-                        position_ms: 0,
-                    });
+    loop {
+        tokio::select! {
+            ev = rx.recv() => {
+                let Some(ev) = ev else { break };
+                // Snapshot first: everything below must see the frame count
+                // as it was when the player emitted the event.
+                let at_frame = frames_pushed.load(Ordering::Relaxed);
+                tracing::trace!(?ev, at_frame, "player event");
+                match ev {
+                    PlayerEvent::TrackChanged { audio_item } => {
+                        let track = track_ref_from_item(&audio_item);
+                        current = Some((audio_item.track_id.clone(), track.clone()));
+                        spawn_isrc_lookup(&session, &audio_item.track_id, &isrc_tx);
+                        spawn_canvas_lookup(&session, &audio_item.track_id, track, &tx);
+                    }
+                    PlayerEvent::Playing { track_id, position_ms, .. } => {
+                        if started_for.as_ref() != Some(&track_id) {
+                            started_for = Some(track_id.clone());
+                            let track = match &current {
+                                Some((id, t)) if *id == track_id => t.clone(),
+                                _ => minimal_track(&track_id),
+                            };
+                            let _ = tx.send(SourceEvent::TrackStarted {
+                                track,
+                                position_ms: position_ms as u64,
+                                at_frame,
+                            });
+                        } else {
+                            let _ = tx.send(SourceEvent::Playing { position_ms: position_ms as u64, at_frame });
+                        }
+                    }
+                    PlayerEvent::PositionCorrection { position_ms, .. }
+                    | PlayerEvent::PositionChanged { position_ms, .. } => {
+                        let _ = tx.send(SourceEvent::Playing { position_ms: position_ms as u64, at_frame });
+                    }
+                    PlayerEvent::Paused { position_ms, .. } => {
+                        let _ = tx.send(SourceEvent::Paused { position_ms: position_ms as u64 });
+                    }
+                    PlayerEvent::Seeked { position_ms, .. } => {
+                        let _ = tx.send(SourceEvent::Seeked { position_ms: position_ms as u64, at_frame });
+                    }
+                    PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. } => {
+                        started_for = None;
+                        let _ = tx.send(SourceEvent::Ended);
+                    }
+                    PlayerEvent::Unavailable { track_id, .. } => {
+                        tracing::warn!(%track_id, "track unavailable");
+                    }
+                    PlayerEvent::Preloading { track_id }
+                    | PlayerEvent::TimeToPreloadNextTrack { track_id, .. } => {
+                        spawn_next_track_hint(&session, &track_id, &tx);
+                    }
+                    PlayerEvent::VolumeChanged { volume } => {
+                        let _ = tx.send(SourceEvent::Volume { level: volume as f32 / u16::MAX as f32 });
+                    }
+                    PlayerEvent::SessionConnected { user_name, .. } => {
+                        tracing::info!(user = %user_name, "spotify session connected");
+                    }
+                    // The controlling client released this device (playback
+                    // moved elsewhere). Not a lost session.
+                    PlayerEvent::SessionDisconnected { user_name, .. } => {
+                        tracing::info!(user = %user_name, "client released the device");
+                    }
+                    PlayerEvent::SessionClientChanged { client_name, .. } => {
+                        tracing::info!(client = %client_name, "controlled by");
+                    }
+                    _ => {}
                 }
             }
-            PlayerEvent::Playing {
-                track_id,
-                position_ms,
-                ..
-            } => {
-                if started_for.as_ref() != Some(&track_id) {
-                    started_for = Some(track_id.clone());
-                    let track = match &current {
-                        Some((id, t)) if *id == track_id => t.clone(),
-                        _ => minimal_track(&track_id),
-                    };
-                    let _ = tx.send(SourceEvent::TrackStarted {
-                        track,
-                        position_ms: position_ms as u64,
-                    });
-                } else {
-                    let _ = tx.send(SourceEvent::Playing {
-                        position_ms: position_ms as u64,
-                    });
+            Some((uri, isrc)) = isrc_rx.recv() => {
+                if let Some((id, track)) = current.as_mut().filter(|(id, _)| *id == uri) {
+                    track.isrc = isrc;
+                    if started_for.as_ref() == Some(id) {
+                        let _ = tx.send(SourceEvent::TrackUpdated { track: track.clone() });
+                    }
                 }
             }
-            PlayerEvent::PositionCorrection { position_ms, .. }
-            | PlayerEvent::PositionChanged { position_ms, .. } => {
-                let _ = tx.send(SourceEvent::Playing {
-                    position_ms: position_ms as u64,
-                });
-            }
-            PlayerEvent::Paused { position_ms, .. } => {
-                let _ = tx.send(SourceEvent::Paused {
-                    position_ms: position_ms as u64,
-                });
-            }
-            PlayerEvent::Seeked { position_ms, .. } => {
-                let _ = tx.send(SourceEvent::Seeked {
-                    position_ms: position_ms as u64,
-                });
-            }
-            PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. } => {
-                started_for = None;
-                let _ = tx.send(SourceEvent::Ended);
-            }
-            PlayerEvent::Unavailable { track_id, .. } => {
-                tracing::warn!(%track_id, "track unavailable");
-            }
-            PlayerEvent::Preloading { track_id }
-            | PlayerEvent::TimeToPreloadNextTrack { track_id, .. } => {
-                if let Some(track) = fetch_track_ref(&session, &track_id).await {
-                    let _ = tx.send(SourceEvent::NextTrackHint { track });
-                }
-            }
-            PlayerEvent::VolumeChanged { volume } => {
-                let _ = tx.send(SourceEvent::Volume {
-                    level: volume as f32 / u16::MAX as f32,
-                });
-            }
-            PlayerEvent::SessionConnected { user_name, .. } => {
-                tracing::info!(user = %user_name, "spotify session connected");
-            }
-            // The controlling client released this device (playback moved
-            // elsewhere). Not a lost session: a Stopped/EndOfTrack follows
-            // and the device stays advertised for the next client.
-            PlayerEvent::SessionDisconnected { user_name, .. } => {
-                tracing::info!(user = %user_name, "client released the device");
-            }
-            PlayerEvent::SessionClientChanged { client_name, .. } => {
-                tracing::info!(client = %client_name, "controlled by");
-            }
-            _ => {}
         }
     }
 }
 
-/// Base62 id for tracks/episodes; the full URI for anything else.
+fn spawn_isrc_lookup(
+    session: &Session,
+    uri: &SpotifyUri,
+    out: &mpsc::Sender<(SpotifyUri, Option<String>)>,
+) {
+    let (session, uri, out) = (session.clone(), uri.clone(), out.clone());
+    tokio::spawn(async move {
+        let isrc = fetch_isrc(&session, &uri).await;
+        let _ = out.send((uri, isrc)).await;
+    });
+}
+
+fn spawn_next_track_hint(session: &Session, uri: &SpotifyUri, tx: &broadcast::Sender<SourceEvent>) {
+    let (session, uri, tx) = (session.clone(), uri.clone(), tx.clone());
+    tokio::spawn(async move {
+        if let Some(track) = fetch_track_ref(&session, &uri).await {
+            let _ = tx.send(SourceEvent::NextTrackHint { track });
+        }
+    });
+}
+
 /// Canvas lookups are best-effort and off the event path.
 fn spawn_canvas_lookup(
     session: &Session,
@@ -129,6 +150,7 @@ fn spawn_canvas_lookup(
     });
 }
 
+/// Base62 id for tracks/episodes; the full URI for anything else.
 fn spotify_id(uri: &SpotifyUri) -> String {
     match uri {
         SpotifyUri::Track { id } | SpotifyUri::Episode { id } => {

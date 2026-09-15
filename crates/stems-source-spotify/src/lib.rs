@@ -230,6 +230,7 @@ async fn run(mut rt: Runtime, mut discovery: Discovery, mut stop: oneshot::Recei
         player.get_player_event_channel(),
         session.clone(),
         rt.events.clone(),
+        rt.frames_pushed.clone(),
     ));
 
     loop {
@@ -267,6 +268,7 @@ async fn run(mut rt: Runtime, mut discovery: Discovery, mut stop: oneshot::Recei
                         player.get_player_event_channel(),
                         session.clone(),
                         rt.events.clone(),
+                        rt.frames_pushed.clone(),
                     ));
                 }
                 let creds = credentials.clone().unwrap_or_default();
