@@ -12,9 +12,16 @@ export interface TrackRef {
   art: string | null;
 }
 
+export interface LyricWord {
+  time_ms: number;
+  text: string;
+}
+
 export interface LyricLine {
   time_ms: number;
   text: string;
+  /** Present only when word timings are known (enhanced LRC / alignment). */
+  words?: LyricWord[];
 }
 
 export interface Lyrics {

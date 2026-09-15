@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { lineProgress, wordSpans } from './lib/lyrics';
+  import { lineProgress, lineWordSpans } from './lib/lyrics';
   import type { Lyrics } from './lib/types';
 
   let {
@@ -40,7 +40,7 @@
   });
 
   const progress = $derived(active >= 0 ? lineProgress(lyrics, active, position) : 0);
-  const activeWords = $derived(active >= 0 ? wordSpans(lyrics.lines[active].text) : []);
+  const activeWords = $derived(active >= 0 ? lineWordSpans(lyrics, active) : []);
 
   /** Fill fraction 0..1 for one word given the line's progress. */
   const wordFill = (w: { start: number; end: number }) =>

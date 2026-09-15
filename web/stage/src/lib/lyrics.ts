@@ -37,9 +37,32 @@ export function lineProgress(lyrics: Lyrics, idx: number, positionMs: number): n
 
 export interface WordSpan {
   text: string;
-  /** Character-fraction range of the line this word covers, 0..1. */
+  /** Range this word covers, 0..1: character fraction (interpolated) or time fraction (timed). */
   start: number;
   end: number;
+}
+
+/**
+ * Word spans for a line. With real word timings the ranges are time
+ * fractions of the line's span, so the wipe follows the singer exactly;
+ * without them, character fractions (even pacing).
+ */
+export function lineWordSpans(lyrics: Lyrics, idx: number): WordSpan[] {
+  const line = lyrics.lines[idx];
+  if (!line) return [];
+  const words = line.words;
+  if (!words || words.length === 0) return wordSpans(line.text);
+  const next = lyrics.lines[idx + 1]?.time_ms ?? line.time_ms + MAX_LINE_MS;
+  const end = Math.min(next, line.time_ms + MAX_LINE_MS);
+  const span = Math.max(1, end - line.time_ms);
+  return words.map((w, i) => {
+    const wEnd = words[i + 1]?.time_ms ?? end;
+    return {
+      text: w.text,
+      start: Math.max(0, (w.time_ms - line.time_ms) / span),
+      end: Math.min(1, (wEnd - line.time_ms) / span)
+    };
+  });
 }
 
 /** Split a line into words carrying their character-fraction range (for the wipe). */
