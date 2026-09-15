@@ -13,7 +13,7 @@ use stems_core::{
     Clock, ClockTick, Command, Lyrics, PlaybackState, PlaybackStatus, Sink, Source, SourceEvent,
     TrackId, TrackRef,
 };
-use stems_enrich::{Cache, Cached, LrcLib};
+use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -35,6 +35,7 @@ pub struct Engine {
     cmd_rx: mpsc::Receiver<Command>,
     started: Instant,
     lyrics: LrcLib,
+    local_lyrics: LocalLyrics,
     cache: Cache,
     /// Applied to every track on top of any per-track offset.
     lyrics_offset_ms: i64,
@@ -52,6 +53,7 @@ impl Engine {
         processor: Processor,
         sink: Box<dyn Sink>,
         cache: Cache,
+        local_lyrics: LocalLyrics,
         lyrics_offset_ms: i64,
         exit_on_end: bool,
     ) -> (Self, Channels) {
@@ -78,6 +80,7 @@ impl Engine {
             cmd_rx,
             started: Instant::now(),
             lyrics: LrcLib::new(),
+            local_lyrics,
             cache,
             lyrics_offset_ms,
             lyrics_task: None,
@@ -163,12 +166,23 @@ impl Engine {
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
-                let cached = match self.cache.get_lyrics(&track) {
-                    Ok(c) => c,
+                // Precedence: local override file → cache → provider.
+                let local = match self.local_lyrics.lookup(&track) {
+                    Ok(l) => l,
                     Err(e) => {
-                        tracing::warn!("cache: {e:#}");
-                        Cached::Miss
+                        tracing::warn!("local lyrics: {e:#}");
+                        None
                     }
+                };
+                let cached = match &local {
+                    Some(l) => Cached::Hit(l.clone()),
+                    None => match self.cache.get_lyrics(&track) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("cache: {e:#}");
+                            Cached::Miss
+                        }
+                    },
                 };
                 let lyrics = match &cached {
                     Cached::Hit(l) => Some(self.with_global_offset(l.clone())),
@@ -183,6 +197,7 @@ impl Engine {
                     s.revision += 1;
                 });
                 match cached {
+                    Cached::Hit(_) if local.is_some() => {}
                     Cached::Hit(_) => tracing::info!("lyrics from cache"),
                     Cached::NotFound => tracing::info!("no lyrics (cached negative)"),
                     Cached::Miss => self.spawn_lyrics_lookup(track),

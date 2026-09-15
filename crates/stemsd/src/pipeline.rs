@@ -65,6 +65,17 @@ fn open_cache() -> Result<stems_enrich::Cache> {
     Ok(cache)
 }
 
+/// `<config dir>/lyrics/*.lrc` — user-provided overrides.
+fn local_lyrics() -> Result<stems_enrich::LocalLyrics> {
+    let dir = crate::config::paths()?
+        .config_file
+        .parent()
+        .map(|p| p.join("lyrics"));
+    let dir = dir.unwrap_or_else(|| "lyrics".into());
+    tracing::info!(dir = %dir.display(), "local lyrics overrides");
+    Ok(stems_enrich::LocalLyrics::new(dir))
+}
+
 fn spawn_server(cfg: &Config, web_dir: Option<PathBuf>, ch: &Channels) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
     let server = Server { addr, web_dir };
@@ -100,6 +111,7 @@ pub async fn play_file(
         processor,
         sink,
         cache,
+        local_lyrics()?,
         cfg.lyrics_offset_ms,
         true,
     );
@@ -141,6 +153,7 @@ pub async fn run_spotify(
         processor,
         sink,
         cache,
+        local_lyrics()?,
         cfg.lyrics_offset_ms,
         false,
     );
