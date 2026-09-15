@@ -38,11 +38,21 @@ impl Default for KaraokeState {
     }
 }
 
+/// One timed word inside a line (enhanced LRC / forced alignment).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LyricWord {
+    pub time_ms: u64,
+    pub text: String,
+}
+
 /// One timed lyric line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LyricLine {
     pub time_ms: u64,
     pub text: String,
+    /// Word timings when known; empty means "interpolate across the line".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<LyricWord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +69,11 @@ pub struct Lyrics {
 impl Lyrics {
     pub fn is_synced(&self) -> bool {
         !self.lines.is_empty()
+    }
+
+    /// True when at least one line carries word timings.
+    pub fn has_word_timings(&self) -> bool {
+        self.lines.iter().any(|l| !l.words.is_empty())
     }
 }
 
