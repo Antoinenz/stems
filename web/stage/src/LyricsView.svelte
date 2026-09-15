@@ -81,7 +81,7 @@
   .column {
     position: absolute; left: 8vw; right: 8vw; top: 0;
     display: flex; flex-direction: column; align-items: center; gap: 2.4vmin;
-    transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
     will-change: transform;
   }
   .line {
@@ -91,8 +91,9 @@
     opacity: calc(1 - min(0.85, var(--d) * 0.22));
     transform: scale(calc(1 - min(0.3, var(--d) * 0.07)));
     transform-origin: center;
-    transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 420ms ease, color 300ms ease,
-      font-size 420ms cubic-bezier(0.22, 1, 0.36, 1);
+    /* keep these short: the highlight must land on the beat, not settle after it */
+    transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1), opacity 250ms ease, color 120ms ease,
+      font-size 250ms cubic-bezier(0.22, 1, 0.36, 1);
     text-wrap: balance;
   }
   .line.hidden { opacity: 0; }
