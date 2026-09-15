@@ -19,10 +19,12 @@ use crate::engine::{Channels, Engine};
 
 /// Ring capacity between source and processor for file playback.
 const RING_SECONDS: f32 = 4.0;
-/// Smaller ring for live sources: bounds pause/seek reaction time.
-const LIVE_RING_SECONDS: f32 = 0.5;
+/// Ring for live sources. This is also how far the controller's timeline
+/// (the phone) runs ahead of the speakers, so keep it just large enough to
+/// absorb scheduling jitter of the decoder thread.
+const LIVE_RING_SECONDS: f32 = 0.15;
 /// Ring between processor and sink; small, it only smooths scheduling.
-const OUT_RING_SECONDS: f32 = 0.1;
+const OUT_RING_SECONDS: f32 = 0.05;
 
 /// Build `source ring → processor → sink`. Returns the producer the source
 /// writes into, its flush signal, the processor and the sink.
