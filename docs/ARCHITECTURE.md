@@ -327,19 +327,19 @@ Native alternatives considered: **wgpu + glyphon/cosmic-text** (write SDF effect
 
 ## 7. MVP roadmap (3 phases)
 
-### Phase 1 — "It plays, it shows lyrics, it has a button" (PoC, ~4–6 weeks)
-Goal: end-to-end vertical slice on the dev Pi + one laptop.
-1. [x] Workspace scaffold, `stemsd` binary, config (`stems.toml`), logging, CI on Linux/Windows/macOS.
-2. [x] `stems-source-spotify`: librespot discovery (zeroconf) → custom Sink → ring → cpal output. Device visible in the Spotify app. *(advertised + mDNS-verified on the Pi; listening test pending on a machine with speakers)*
-3. [x] Clock + `Source`/`Sink` traits + flush signal (pause/seek drop buffered audio); ring fill and sink latency subtracted from the audible position.
-3b. [x] `stems-source-file` (symphonia + rubato) for Premium-less testing; `wav:`/`null` sinks for headless verification.
-4. [ ] State machine + axum WS broadcast (port 7373).
-5. [ ] `web/stage`: line-level lyrics from LRCLIB, album art background, simple highlight. Runs in Chromium kiosk on the Pi/TV.
-6. [ ] `stems-sep::dsp` centre-cancel + mixer crossfade wired into the pipeline; `web/remote` with one big toggle + QR code on stage. *(Mixer with crossfade exists; not yet in the hot path.)*
-7. [ ] SQLite cache for tracks/lyrics.
-8. [ ] **Stress-stage demo** (rendering de-risk gate, §4.1) on M1 + i7.
-9. [x] Relicense repo to GPL-3.0-or-later.
-**Deliberately excluded:** ML, AirPlay, video, Tauri packaging, auth.
+### Phase 1 — "It plays, it shows lyrics, it has a button" (PoC) — **mostly delivered**
+1. [x] Workspace, `stemsd`, `stems.toml`, logging, CI on Linux/Windows/macOS + web.
+2. [x] Spotify Connect source (librespot discovery) → ring → processor → cpal. Verified on Windows.
+3. [x] Clock (real-frame anchored, ±2 ms), flush on pause/seek, `Source`/`Sink`/`Separator` traits.
+3b. [x] File source, WAV/null sinks for headless verification.
+4. [x] Engine state machine + axum REST/WS on 7373; `ViewMode`, `Media`, commands.
+5. [x] `web/stage`: LRCLIB line lyrics, smooth transform scrolling, word wipe (interpolated or real word timings), modes `lyrics|karaoke|video|canvas`, Spotify Canvas background.
+6. [~] Centre-cancel DSP through the real mixer/crossfade path, toggled over WS/REST. `web/remote` **not started** (deferred by choice).
+7. [x] SQLite cache (tracks, lyrics, negative TTL, per-track offsets); local `.lrc` overrides incl. enhanced word tags.
+8. [ ] Stress-stage rendering demo on M1 + i7.
+9. [x] GPL-3.0-or-later.
+
+Known/open: phone timeline runs ~0.6 s ahead of audible by design (`controller_lead_ms`); libmdns drop-panic worked around at shutdown; LRC timing vs master varies → `lyrics_offset_ms`.
 
 ### Phase 2 — "Real karaoke" (~6–10 weeks)
 1. `stems-sep::ort` with MDX-Net ONNX; EP auto-select (CUDA/CoreML/DirectML/CPU); model download manifest.
@@ -348,7 +348,8 @@ Goal: end-to-end vertical slice on the dev Pi + one laptop.
 4. `remote` separator backend (P2000 server as worker) — also unlocks "one GPU box serves the party".
 5. AirPlay via shairport-sync sidecar: display mode with latency-offset compensation (multiroom-correct), then karaoke mode; AirPlay 1 first on Windows, AirPlay 2 + nqptp on macOS/Linux.
 5b. **Rebeam**: `stems-sink-airplay` on OpenAir crates; latency-aligned multi-sink mixer.
-5c. Video prefetch pipeline (yt-dlp, H.264 720p cache) — moved up from Phase 3 because prefetch is cheap once `NextTrackHint` exists.
+5c. Video prefetch pipeline (yt-dlp, H.264 720p cache) — stage `video` mode and `media.video_url` already exist; only the fetcher is missing.
+5d. Word-level timings by forced alignment on the vocal stem → `LyricLine.words` (model, parser and stage already support them).
 6. Word-level lyrics by forced alignment on the vocal stem (whisper.cpp / CTC via ort).
 7. Tauri 2 shell: stage fullscreen on chosen display, host panel window; installers for macOS/Windows.
 

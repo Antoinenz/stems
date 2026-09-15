@@ -19,6 +19,36 @@ removal — so any song becomes a karaoke track.
 
 Full design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Running (pre-alpha)
+
+```sh
+cd web/stage && pnpm install && pnpm build && cd ../..   # the TV page
+cargo run -p stemsd -- spotify --name "stems"             # Spotify Connect receiver
+```
+
+Pick **stems** in the Spotify app, then open `http://<host>:7373/stage/`.
+Other commands: `stemsd play <file> [--title … --artist …]`, `stemsd devices`, `stemsd config`.
+
+### Stage view modes
+
+`/stage/` follows the server's view mode; `/stage/?mode=karaoke` pins one screen.
+Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when resolved), `canvas`
+(Spotify Canvas loop when the track has one).
+
+### API (port 7373)
+
+- `GET /api/state` — now playing, lyrics, karaoke state, view mode
+- `WS /api/ws` — state on change + clock at 10 Hz; accepts commands
+- `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
+  `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`
+
+### Config and files
+
+`stemsd config` prints locations and writes a default `stems.toml` (device name, sink, port,
+`lyrics_offset_ms`, Spotify options). Lyrics come from LRCLIB and are cached in SQLite;
+drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
+`<config dir>/lyrics/` named `<Artist> - <Title>.lrc` or `<ISRC>.lrc` to override.
+
 ## Building
 
 Requires stable Rust (see `rust-toolchain.toml`).
