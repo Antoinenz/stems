@@ -74,3 +74,8 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
+
+# The separator's STFT and overlap-add loops run per window on the audio
+# path; keep them optimised even in dev builds.
+[profile.dev.package.stems-sep]
+opt-level = 3
