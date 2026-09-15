@@ -20,7 +20,7 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
 
 #[cfg(feature = "onnx")]
 async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn Separator>> {
-    use stems_sep::mdx::{Device, MdxModel, MdxSeparator, known_model};
+    use stems_sep::mdx::{Device, MdxModel, MdxSeparator, StreamOpts, known_model};
 
     let (base_url, params) =
         known_model(&cfg.model).ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
@@ -36,12 +36,18 @@ async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         _ => Device::Auto,
     };
     let threads = cfg.threads;
-    let slack = (cfg.slack_ms * stems_core::SAMPLE_RATE as u64 / 1000) as usize;
+    let ms = |v: u64| (v * stems_core::SAMPLE_RATE as u64 / 1000) as usize;
+    let opts = StreamOpts {
+        hop_frames: ms(cfg.hop_ms),
+        lookahead_frames: ms(cfg.lookahead_ms),
+        slack_frames: ms(cfg.slack_ms),
+        denoise: cfg.denoise,
+    };
     // Loading a 60+ MB model blocks; keep it off the async runtime.
     let model = tokio::task::spawn_blocking(move || MdxModel::load(&path, params, device, threads))
         .await
         .context("model load task")??;
-    let sep = MdxSeparator::new(model, slack);
+    let sep = MdxSeparator::new(model, opts);
     tracing::info!(
         latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
         "mdx separator ready"

@@ -38,6 +38,14 @@ pub struct KaraokeConfig {
     pub threads: usize,
     /// Extra latency budget so bursts of slow inference do not starve output.
     pub slack_ms: u64,
+    /// New audio per inference. 0 = one full ~5.9 s window (cheapest).
+    /// Smaller values lower latency and blend overlapping windows for
+    /// quality, at `5900 / hop_ms` times the inference cost.
+    pub hop_ms: u64,
+    /// Future context before a sample is finalised. 0 = model minimum (~70 ms).
+    pub lookahead_ms: u64,
+    /// Run the model on x and −x and average (fewer artefacts, 2× cost).
+    pub denoise: bool,
 }
 
 impl Default for KaraokeConfig {
@@ -48,6 +56,9 @@ impl Default for KaraokeConfig {
             device: "auto".into(),
             threads: 0,
             slack_ms: 2000,
+            hop_ms: 0,
+            lookahead_ms: 0,
+            denoise: false,
         }
     }
 }

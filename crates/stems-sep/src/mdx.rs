@@ -155,6 +155,27 @@ impl MdxModel {
     /// `chunk_size()` frames. Returns the **instrumental** for the whole
     /// window, interleaved (derived as mix − vocals for vocal models).
     pub fn instrumental_for_window(&mut self, chunk: &[f32]) -> Result<Vec<f32>> {
+        self.instrumental_for_window_opt(chunk, false)
+    }
+
+    /// As [`instrumental_for_window`](Self::instrumental_for_window); with
+    /// `denoise` the model runs on `x` and `−x` and the results are
+    /// averaged, which cancels some of its additive artefacts.
+    pub fn instrumental_for_window_opt(
+        &mut self,
+        chunk: &[f32],
+        denoise: bool,
+    ) -> Result<Vec<f32>> {
+        if !denoise {
+            return self.run_window(chunk);
+        }
+        let neg: Vec<f32> = chunk.iter().map(|x| -x).collect();
+        let a = self.run_window(chunk)?;
+        let b = self.run_window(&neg)?;
+        Ok(a.iter().zip(&b).map(|(x, y)| 0.5 * (x - y)).collect())
+    }
+
+    fn run_window(&mut self, chunk: &[f32]) -> Result<Vec<f32>> {
         let n = self.params.chunk_size();
         anyhow::ensure!(chunk.len() == n * 2, "window must be {n} stereo frames");
         let left: Vec<f32> = chunk.iter().step_by(2).copied().collect();
@@ -236,98 +257,269 @@ impl MdxModel {
     }
 }
 
-/// Streaming wrapper: windows go to a worker thread; instrumental audio
-/// comes back delayed by `latency_frames()`.
+/// How the streaming wrapper slices audio into model windows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamOpts {
+    /// New input per inference, frames. Smaller = lower latency, more
+    /// inferences (cost ∝ window / hop). `0` = one full window per
+    /// inference (cheapest, ~6 s latency).
+    pub hop_frames: usize,
+    /// Future context required before a sample is finalised, frames.
+    /// `0` = the model's edge trim only.
+    pub lookahead_frames: usize,
+    /// Extra latency budget for inference time and hop granularity.
+    pub slack_frames: usize,
+    /// Run each window twice (x and −x) and average: fewer artefacts,
+    /// double the cost.
+    pub denoise: bool,
+}
+
+impl Default for StreamOpts {
+    fn default() -> Self {
+        Self {
+            hop_frames: 0,
+            lookahead_frames: 0,
+            slack_frames: 44_100 * 2,
+            denoise: false,
+        }
+    }
+}
+
+struct Job {
+    start: i64,
+    window: Vec<f32>,
+}
+
+struct Done {
+    start: i64,
+    inst: Vec<f32>,
+}
+
+/// Streaming wrapper: overlapping windows go to a worker thread, results
+/// are blended with a weighted overlap-add, and finalised audio comes back
+/// delayed by exactly `latency_frames()`.
 pub struct MdxSeparator {
     params: MdxParams,
+    hop: usize,
+    lookahead: usize,
     latency: usize,
-    /// Interleaved input awaiting windowing (includes the window overlap).
-    pending: Vec<f32>,
-    /// Interleaved instrumental ready to be handed out.
+    /// Interleaved input history; `history_start` is the absolute frame
+    /// index of its first frame.
+    history: VecDeque<f32>,
+    history_start: i64,
+    input_frames: i64,
+    next_window_end: i64,
+    /// Weighted accumulation for frames not yet finalised, from `acc_start`.
+    acc: VecDeque<[f32; 2]>,
+    wacc: VecDeque<f32>,
+    acc_start: i64,
+    /// Finalised instrumental awaiting hand-out, with per-frame validity.
     ready: VecDeque<f32>,
-    /// Frames of output still owed before `ready` catches up (priming).
-    to_worker: mpsc::Sender<Vec<f32>>,
-    from_worker: mpsc::Receiver<Vec<f32>>,
+    ready_valid: VecDeque<bool>,
+    weights: Vec<f32>,
+    to_worker: mpsc::Sender<Job>,
+    from_worker: mpsc::Receiver<Done>,
     worker: Option<JoinHandle<()>>,
     starved: bool,
-    /// Samples at the head of `ready` that are priming silence, not audio.
-    priming_left: usize,
     provider: &'static str,
 }
 
+/// Runs one window → instrumental. Boxed so the streaming logic can be
+/// tested without an ONNX session.
+pub type WindowRunner = Box<dyn FnMut(&[f32]) -> Result<Vec<f32>> + Send>;
+
 impl MdxSeparator {
-    /// `slack_frames` extends the latency beyond one window so inference
-    /// slower than real time in bursts does not starve the output.
-    pub fn new(model: MdxModel, slack_frames: usize) -> Self {
+    pub fn new(model: MdxModel, opts: StreamOpts) -> Self {
         let params = model.params().clone();
         let provider = model.provider();
-        let (to_worker, jobs) = mpsc::channel::<Vec<f32>>();
-        let (results, from_worker) = mpsc::channel::<Vec<f32>>();
+        let denoise = opts.denoise;
         let mut model = model;
+        let runner: WindowRunner = Box::new(move |w| model.instrumental_for_window_opt(w, denoise));
+        Self::with_runner(params, provider, runner, opts)
+    }
+
+    pub fn with_runner(
+        params: MdxParams,
+        provider: &'static str,
+        mut runner: WindowRunner,
+        opts: StreamOpts,
+    ) -> Self {
+        let chunk = params.chunk_size();
+        let trim = params.trim();
+        let hop = if opts.hop_frames == 0 {
+            params.gen_size()
+        } else {
+            opts.hop_frames.min(params.gen_size())
+        };
+        let lookahead = opts.lookahead_frames.max(trim).min(chunk - trim - 1);
+        let latency = lookahead + hop + opts.slack_frames;
+
+        // Raised-cosine weight over the valid region with a floor so that
+        // single-window coverage near the finalisation edge still counts.
+        let valid = chunk - 2 * trim;
+        let weights: Vec<f32> = (0..chunk)
+            .map(|i| {
+                if i < trim || i >= chunk - trim {
+                    0.0
+                } else {
+                    let x = (i - trim) as f32 / valid as f32;
+                    0.15 + 0.85 * (std::f32::consts::PI * x).sin().powi(2)
+                }
+            })
+            .collect();
+
+        let (to_worker, jobs) = mpsc::channel::<Job>();
+        let (results, from_worker) = mpsc::channel::<Done>();
+        let denoise = opts.denoise;
         let worker = thread::Builder::new()
             .name("stems-mdx".into())
             .spawn(move || {
-                let trim = model.params().trim();
-                let gen_size = model.params().gen_size();
-                for window in jobs {
-                    let out = match model.instrumental_for_window(&window) {
-                        Ok(inst) => inst[trim * 2..(trim + gen_size) * 2].to_vec(),
+                for job in jobs {
+                    let inst = match runner(&job.window) {
+                        Ok(inst) => inst,
                         Err(e) => {
                             tracing::error!("mdx inference failed: {e:#}");
-                            // fall back to the (trimmed) original: better than silence
-                            window[trim * 2..(trim + gen_size) * 2].to_vec()
+                            job.window.clone()
                         }
                     };
-                    if results.send(out).is_err() {
+                    if results
+                        .send(Done {
+                            start: job.start,
+                            inst,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .expect("spawn mdx worker");
 
-        let latency = params.chunk_size() + slack_frames;
+        tracing::info!(
+            hop_ms = hop as u64 * 1000 / 44_100,
+            lookahead_ms = lookahead as u64 * 1000 / 44_100,
+            latency_ms = latency as u64 * 1000 / 44_100,
+            inferences_per_window = format!("{:.1}", params.gen_size() as f32 / hop as f32),
+            denoise,
+            "mdx streaming"
+        );
+
         let mut s = Self {
             params,
+            hop,
+            lookahead,
             latency,
-            pending: Vec::new(),
+            history: VecDeque::new(),
+            history_start: 0,
+            input_frames: 0,
+            next_window_end: 0,
+            acc: VecDeque::new(),
+            wacc: VecDeque::new(),
+            acc_start: 0,
             ready: VecDeque::new(),
+            ready_valid: VecDeque::new(),
+            weights,
             to_worker,
             from_worker,
             worker: Some(worker),
             starved: false,
-            priming_left: 0,
             provider,
         };
         s.prime();
         s
     }
 
-    /// Start with `latency` frames of silence owed so output lags input.
     fn prime(&mut self) {
-        self.pending.clear();
+        self.history.clear();
+        self.history_start = 0;
+        self.input_frames = 0;
+        // First window ends once hop + lookahead real frames exist; it is
+        // zero-padded on the left. Its finalised region is [0, hop).
+        self.next_window_end = (self.hop + self.lookahead) as i64;
+        self.acc.clear();
+        self.wacc.clear();
+        self.acc_start = 0;
         self.ready.clear();
-        // The first window's leading `trim` samples are discarded, so seed
-        // the input with `trim` frames of silence to keep alignment exact.
-        self.pending.resize(self.params.trim() * 2, 0.0);
+        self.ready_valid.clear();
         self.ready.resize(self.latency * 2, 0.0);
-        self.priming_left = self.latency * 2;
+        self.ready_valid.resize(self.latency, false);
+    }
+
+    fn push_input(&mut self, input: &[f32]) {
+        self.history.extend(input.iter().copied());
+        self.input_frames += (input.len() / 2) as i64;
+        // keep just over one window of history
+        let keep = (self.params.chunk_size() + self.hop) as i64;
+        let excess = (self.input_frames - self.history_start) - keep;
+        if excess > 0 {
+            self.history.drain(..(excess as usize) * 2);
+            self.history_start += excess;
+        }
     }
 
     fn dispatch_windows(&mut self) {
-        let chunk = self.params.chunk_size() * 2;
-        let step = self.params.gen_size() * 2;
-        while self.pending.len() >= chunk {
-            let window = self.pending[..chunk].to_vec();
-            if self.to_worker.send(window).is_err() {
+        let chunk = self.params.chunk_size() as i64;
+        while self.input_frames >= self.next_window_end {
+            let end = self.next_window_end;
+            let start = end - chunk;
+            let mut window = vec![0.0f32; chunk as usize * 2];
+            for f in start.max(self.history_start)..end {
+                let src = ((f - self.history_start) as usize) * 2;
+                let dst = ((f - start) as usize) * 2;
+                window[dst] = self.history[src];
+                window[dst + 1] = self.history[src + 1];
+            }
+            if self.to_worker.send(Job { start, window }).is_err() {
                 break;
             }
-            self.pending.drain(..step);
+            self.next_window_end += self.hop as i64;
         }
     }
 
     fn collect_results(&mut self) {
-        while let Ok(out) = self.from_worker.try_recv() {
-            self.ready.extend(out);
+        while let Ok(done) = self.from_worker.try_recv() {
+            self.accumulate(done.start, &done.inst);
+            let end = done.start + self.params.chunk_size() as i64;
+            self.finalize_upto(end - self.lookahead as i64);
+        }
+    }
+
+    fn accumulate(&mut self, start: i64, inst: &[f32]) {
+        let chunk = self.params.chunk_size();
+        let trim = self.params.trim();
+        for i in trim..chunk - trim {
+            let x = start + i as i64;
+            if x < self.acc_start {
+                continue;
+            }
+            let idx = (x - self.acc_start) as usize;
+            if idx >= self.acc.len() {
+                self.acc.resize(idx + 1, [0.0; 2]);
+                self.wacc.resize(idx + 1, 0.0);
+            }
+            let w = self.weights[i];
+            self.acc[idx][0] += w * inst[2 * i];
+            self.acc[idx][1] += w * inst[2 * i + 1];
+            self.wacc[idx] += w;
+        }
+    }
+
+    fn finalize_upto(&mut self, frontier: i64) {
+        while self.acc_start < frontier {
+            let (sum, w) = match (self.acc.pop_front(), self.wacc.pop_front()) {
+                (Some(s), Some(w)) => (s, w),
+                _ => ([0.0; 2], 0.0),
+            };
+            if w > 1e-6 {
+                self.ready.push_back(sum[0] / w);
+                self.ready.push_back(sum[1] / w);
+                self.ready_valid.push_back(true);
+            } else {
+                self.ready.push_back(0.0);
+                self.ready.push_back(0.0);
+                self.ready_valid.push_back(false);
+            }
+            self.acc_start += 1;
         }
     }
 }
@@ -342,10 +534,11 @@ impl Separator for MdxSeparator {
     }
 
     fn process(&mut self, input: &[f32], instrumental: &mut [f32]) -> bool {
-        self.pending.extend_from_slice(input);
+        self.push_input(input);
         self.dispatch_windows();
         self.collect_results();
-        if self.ready.len() < instrumental.len() {
+        let frames = instrumental.len() / 2;
+        if self.ready_valid.len() < frames {
             if !self.starved {
                 tracing::warn!("mdx separator starved: inference slower than real time");
                 self.starved = true;
@@ -357,18 +550,17 @@ impl Separator for MdxSeparator {
             tracing::info!("mdx separator caught up");
             self.starved = false;
         }
+        let mut valid = true;
         for o in instrumental.iter_mut() {
             *o = self.ready.pop_front().unwrap_or(0.0);
         }
-        if self.priming_left > 0 {
-            self.priming_left = self.priming_left.saturating_sub(instrumental.len());
-            return false;
+        for _ in 0..frames {
+            valid &= self.ready_valid.pop_front().unwrap_or(false);
         }
-        true
+        valid
     }
 
     fn reset(&mut self) {
-        // Drop in-flight results; they belong to audio that was flushed.
         while self.from_worker.try_recv().is_ok() {}
         self.prime();
     }
@@ -376,7 +568,6 @@ impl Separator for MdxSeparator {
 
 impl Drop for MdxSeparator {
     fn drop(&mut self) {
-        // closing the job channel ends the worker loop
         let (tx, _) = mpsc::channel();
         self.to_worker = tx;
         if let Some(w) = self.worker.take() {
@@ -418,6 +609,71 @@ pub fn known_model(name: &str) -> Option<(&'static str, MdxParams)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Small geometry so the test runs fast: window 4096, trim 256, hop 1024.
+    fn small_params() -> MdxParams {
+        MdxParams {
+            n_fft: 512,
+            hop: 16,
+            dim_f: 256,
+            dim_t: 257,
+            primary_stem: PrimaryStem::Instrumental,
+            compensate: 1.0,
+        }
+    }
+
+    fn run_stream(opts: StreamOpts, frames: usize) -> (Vec<f32>, Vec<f32>, usize, Vec<bool>) {
+        let params = small_params();
+        let runner: WindowRunner = Box::new(|w: &[f32]| Ok(w.to_vec()));
+        let mut sep = MdxSeparator::with_runner(params, "test", runner, opts);
+        let latency = sep.latency_frames();
+        let input: Vec<f32> = (0..frames)
+            .flat_map(|i| [(i % 1000) as f32 / 1000.0, -((i % 777) as f32) / 777.0])
+            .collect();
+        let mut out = Vec::new();
+        let mut valid = Vec::new();
+        for b in input.chunks(128 * 2) {
+            // the worker is effectively instant; the slack covers its latency
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            let mut o = vec![0.0; b.len()];
+            valid.push(sep.process(b, &mut o));
+            out.extend(o);
+        }
+        (input, out, latency, valid)
+    }
+
+    #[test]
+    fn identity_model_reproduces_input_delayed_by_latency_with_overlap() {
+        let params = small_params();
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 1536,
+            denoise: false,
+        };
+        assert_eq!(params.chunk_size(), 4096);
+        let frames = 40_000;
+        let (input, out, latency, valid) = run_stream(opts, frames);
+        assert_eq!(latency, 512 + 1024 + 1536);
+        // after priming, every block must carry a usable instrumental
+        let priming_blocks = latency / 128 + 2;
+        assert!(
+            valid[priming_blocks..].iter().all(|v| *v),
+            "invalid blocks after priming"
+        );
+        // compare a region well inside the stream
+        let from = 8_000usize;
+        let to = frames - latency - 2048;
+        let mut max_err = 0.0f32;
+        for f in from..to {
+            for c in 0..2 {
+                let a = input[2 * f + c];
+                let b = out[2 * (f + latency) + c];
+                max_err = max_err.max((a - b).abs());
+            }
+        }
+        assert!(max_err < 1e-4, "max err {max_err}");
+    }
 
     #[test]
     fn window_geometry() {

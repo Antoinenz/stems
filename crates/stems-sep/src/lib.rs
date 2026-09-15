@@ -12,5 +12,5 @@ pub mod stft;
 
 pub use dsp::CentreCancel;
 #[cfg(feature = "onnx")]
-pub use mdx::{Device, MdxModel, MdxParams, MdxSeparator, PrimaryStem};
+pub use mdx::{Device, MdxModel, MdxParams, MdxSeparator, PrimaryStem, StreamOpts};
 pub use stems_core::Separator;
