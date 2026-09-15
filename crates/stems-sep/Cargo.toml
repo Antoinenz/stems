@@ -7,5 +7,26 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+onnx = ["dep:ort", "dep:ndarray", "dep:realfft"]
+# Load libonnxruntime at runtime (ORT_DYLIB_PATH) instead of linking the
+# downloaded static binary; needed where the prebuilt static lib does not
+# match the system C++ runtime (e.g. Debian 12 on aarch64).
+onnx-dylib = ["onnx", "ort/load-dynamic"]
+cuda = ["onnx", "ort/cuda"]
+directml = ["onnx", "ort/directml"]
+coreml = ["onnx", "ort/coreml"]
+
 [dependencies]
 stems-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+realfft = { workspace = true, optional = true }
+
+[dev-dependencies]
+hound.workspace = true
+tracing-subscriber.workspace = true

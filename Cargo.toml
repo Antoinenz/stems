@@ -17,6 +17,13 @@ symphonia = { version = "0.6", default-features = false, features = ["mp3", "fla
 hound = "3.5"
 rubato = "5.0"
 
+# ml
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "download-binaries", "std", "tls-rustls"] }
+ndarray = "0.17"
+realfft = "3.5"
+sha2 = "0.10"
+hex = "0.4"
+
 # spotify
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-playback = { version = "0.8", default-features = false }

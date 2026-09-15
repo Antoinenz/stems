@@ -5,6 +5,12 @@
 //! non-zero `latency_frames()` that the pipeline turns into a delay line.
 
 pub mod dsp;
+#[cfg(feature = "onnx")]
+pub mod mdx;
+#[cfg(feature = "onnx")]
+pub mod stft;
 
 pub use dsp::CentreCancel;
+#[cfg(feature = "onnx")]
+pub use mdx::{Device, MdxModel, MdxParams, MdxSeparator, PrimaryStem};
 pub use stems_core::Separator;
