@@ -8,8 +8,7 @@ use anyhow::Result;
 use stems_audio::{
     AudioRing, Consumer, CpalSink, FlushSignal, NullSink, Processor, SinkKind, WavSink,
 };
-use stems_core::Sink;
-use stems_sep::CentreCancel;
+use stems_core::{Separator, Sink};
 use stems_server::Server;
 use stems_source_file::FileSource;
 use stems_source_spotify::{Bitrate, SpotifyConfig, SpotifyDeviceType, SpotifySource};
@@ -31,6 +30,7 @@ const OUT_RING_SECONDS: f32 = 0.05;
 fn build_chain(
     ring_seconds: f32,
     sink_kind: &SinkKind,
+    separator: Box<dyn Separator>,
 ) -> Result<(stems_audio::Producer, FlushSignal, Processor, Box<dyn Sink>)> {
     let (src_producer, src_consumer) = AudioRing::with_seconds(ring_seconds);
     let (out_producer, out_consumer) = AudioRing::with_seconds(OUT_RING_SECONDS);
@@ -40,11 +40,16 @@ fn build_chain(
     let processor = Processor::spawn(
         src_consumer,
         out_producer,
-        Box::new(CentreCancel::default()),
+        separator,
         src_flush.clone(),
         out_flush,
     );
     Ok((src_producer, src_flush, processor, sink))
+}
+
+async fn separator(cfg: &Config) -> Result<Box<dyn Separator>> {
+    let models_dir = crate::config::paths()?.models_dir;
+    crate::separator::build(&cfg.karaoke, models_dir).await
 }
 
 pub fn build_sink(
@@ -101,7 +106,8 @@ pub async fn play_file(
     title: Option<String>,
     artist: Option<String>,
 ) -> Result<()> {
-    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind)?;
+    let separator = separator(cfg).await?;
+    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind, separator)?;
     let mut source = FileSource::open(file, producer)?;
     source.set_metadata(title, artist);
     let track = source.track();
@@ -126,7 +132,8 @@ pub async fn run_spotify(
     web_dir: Option<PathBuf>,
     sink_kind: &SinkKind,
 ) -> Result<()> {
-    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind)?;
+    let separator = separator(cfg).await?;
+    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind, separator)?;
 
     let paths = crate::config::paths()?;
     let cache_dir = paths.cache_dir.join("spotify");

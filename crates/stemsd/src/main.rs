@@ -6,6 +6,7 @@
 mod config;
 mod engine;
 mod pipeline;
+mod separator;
 
 use std::path::PathBuf;
 

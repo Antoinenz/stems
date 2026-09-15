@@ -70,11 +70,15 @@ impl Engine {
         let (clock_tx, clock_rx) = watch::channel(ClockTick::default());
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
+        let mut clock = Clock::new();
+        clock.set_delay(Duration::from_secs_f64(
+            processor.latency_frames() as f64 / stems_core::SAMPLE_RATE as f64,
+        ));
         let engine = Self {
             source,
             processor,
             sink,
-            clock: Clock::new(),
+            clock,
             state_tx,
             clock_tx,
             cmd_rx,
@@ -372,6 +376,10 @@ impl Engine {
         }));
     }
 
+    fn processor_delay_ms(&self) -> u64 {
+        self.processor.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64
+    }
+
     fn with_global_offset(&self, mut l: Lyrics) -> Lyrics {
         l.offset_ms += self.lyrics_offset_ms;
         l
@@ -415,8 +423,8 @@ impl Engine {
                 underruns = self.sink.underruns(),
                 sink_latency_ms,
                 // How far the controller's (phone's) timeline runs ahead of
-                // what is audible. Expected: buffered + device latency.
-                controller_lead_ms = buffered_ms + sink_latency_ms,
+                // what is audible: buffering + processor delay + device latency.
+                controller_lead_ms = buffered_ms + self.processor_delay_ms() + sink_latency_ms,
                 "clock"
             );
         }

@@ -11,8 +11,19 @@ rust-version.workspace = true
 name = "stemsd"
 path = "src/main.rs"
 
+[features]
+default = ["onnx"]
+onnx = ["stems-sep/onnx", "dep:reqwest", "dep:futures"]
+# load libonnxruntime at runtime from ORT_DYLIB_PATH (see stems-sep)
+onnx-dylib = ["onnx", "stems-sep/onnx-dylib"]
+cuda = ["onnx", "stems-sep/cuda"]
+directml = ["onnx", "stems-sep/directml"]
+coreml = ["onnx", "stems-sep/coreml"]
+
 [dependencies]
 stems-core.workspace = true
+reqwest = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 stems-audio.workspace = true
 stems-source-file.workspace = true
 tokio.workspace = true

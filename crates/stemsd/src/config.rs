@@ -22,6 +22,34 @@ pub struct Config {
     /// Added to every track's lyric timings (negative = earlier).
     pub lyrics_offset_ms: i64,
     pub spotify: SpotifyConfig,
+    pub karaoke: KaraokeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KaraokeConfig {
+    /// `dsp` (centre-cancel, instant) or `mdx` (MDX-Net ONNX model).
+    pub backend: String,
+    /// Model name for `mdx`, e.g. `UVR-MDX-NET-Inst_HQ_3` or `Kim_Vocal_2`.
+    pub model: String,
+    /// `auto`, `cpu`, `cuda`, `directml`, `coreml`.
+    pub device: String,
+    /// CPU threads for inference (0 = runtime default).
+    pub threads: usize,
+    /// Extra latency budget so bursts of slow inference do not starve output.
+    pub slack_ms: u64,
+}
+
+impl Default for KaraokeConfig {
+    fn default() -> Self {
+        Self {
+            backend: "dsp".into(),
+            model: "UVR-MDX-NET-Inst_HQ_3".into(),
+            device: "auto".into(),
+            threads: 0,
+            slack_ms: 2000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +71,7 @@ impl Default for Config {
             port: DEFAULT_PORT,
             lyrics_offset_ms: 0,
             spotify: SpotifyConfig::default(),
+            karaoke: KaraokeConfig::default(),
         }
     }
 }
@@ -62,6 +91,7 @@ impl Default for SpotifyConfig {
 pub struct Paths {
     pub config_file: PathBuf,
     pub cache_dir: PathBuf,
+    pub models_dir: PathBuf,
 }
 
 pub fn paths() -> Result<Paths> {
@@ -69,6 +99,7 @@ pub fn paths() -> Result<Paths> {
     Ok(Paths {
         config_file: dirs.config_dir().join("stems.toml"),
         cache_dir: dirs.cache_dir().to_path_buf(),
+        models_dir: dirs.cache_dir().join("models"),
     })
 }
 
