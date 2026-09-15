@@ -187,6 +187,7 @@ mod tests {
             lines: vec![LyricLine {
                 time_ms: 10,
                 text: "hi".into(),
+                words: vec![],
             }],
             plain: None,
             offset_ms: 0,
