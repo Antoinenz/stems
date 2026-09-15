@@ -49,6 +49,25 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
 `<config dir>/lyrics/` named `<Artist> - <Title>.lrc` or `<ISRC>.lrc` to override.
 
+### Karaoke backends
+
+`[karaoke]` in `stems.toml`:
+
+```toml
+[karaoke]
+backend = "mdx"                    # "dsp" (instant centre-cancel) or "mdx" (ONNX model)
+model = "UVR-MDX-NET-Inst_HQ_3"    # or "Kim_Vocal_2"; downloaded on first use
+device = "auto"                    # auto | cpu | cuda | directml | coreml
+threads = 0                        # CPU threads, 0 = runtime default
+slack_ms = 2000                    # extra latency budget for slow inference bursts
+```
+
+`mdx` streams audio through the model in ~6 s windows, so playback runs ~8 s behind the
+controller (lyrics and clock account for it). Inference must be at least real time: fine on a
+GPU or Apple Silicon, marginal on laptop CPUs, not viable on a Raspberry Pi. GPU providers are
+compile-time features: `cargo build -p stemsd --features cuda` (NVIDIA, CUDA 12 runtime
+required), `--features directml` (any Windows GPU), `--features coreml` (macOS).
+
 ## Building
 
 Requires stable Rust (see `rust-toolchain.toml`).
@@ -61,7 +80,11 @@ cargo build --workspace
 cargo run -p stemsd -- --help
 ```
 
-macOS and Windows need no extra system packages.
+macOS and Windows need no extra system packages. The default build downloads a prebuilt
+ONNX Runtime; where that does not link (e.g. Debian 12 on aarch64) use
+`--no-default-features --features onnx-dylib` and point `ORT_DYLIB_PATH` at a
+`libonnxruntime.so` from the official releases, or `--no-default-features` for a DSP-only
+build.
 
 ## License
 
