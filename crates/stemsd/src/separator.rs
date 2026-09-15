@@ -42,12 +42,18 @@ async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         lookahead_frames: ms(cfg.lookahead_ms),
         slack_frames: ms(cfg.slack_ms),
         denoise: cfg.denoise,
+        workers: cfg.workers.max(1),
     };
     // Loading a 60+ MB model blocks; keep it off the async runtime.
-    let model = tokio::task::spawn_blocking(move || MdxModel::load(&path, params, device, threads))
-        .await
-        .context("model load task")??;
-    let sep = MdxSeparator::new(model, opts);
+    let n = opts.workers;
+    let models = tokio::task::spawn_blocking(move || {
+        (0..n)
+            .map(|_| MdxModel::load(&path, params.clone(), device, threads))
+            .collect::<Result<Vec<_>>>()
+    })
+    .await
+    .context("model load task")??;
+    let sep = MdxSeparator::with_models(models, opts);
     tracing::info!(
         latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
         "mdx separator ready"

@@ -46,6 +46,9 @@ pub struct KaraokeConfig {
     pub lookahead_ms: u64,
     /// Run the model on x and −x and average (fewer artefacts, 2× cost).
     pub denoise: bool,
+    /// Parallel inference sessions. 2 keeps a GPU busy while the CPU side
+    /// of the other window runs; costs one extra model copy in memory.
+    pub workers: usize,
 }
 
 impl Default for KaraokeConfig {
@@ -59,6 +62,7 @@ impl Default for KaraokeConfig {
             hop_ms: 0,
             lookahead_ms: 0,
             denoise: false,
+            workers: 1,
         }
     }
 }
