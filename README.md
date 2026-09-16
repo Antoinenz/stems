@@ -80,9 +80,12 @@ and are ~3× slower.
 Each window is a serial chain — STFT on the CPU, the model on the GPU, iSTFT on the CPU —
 so with one worker the GPU idles between windows and shows up as spikes. `workers = 2` runs
 two windows concurrently (second model session, ~2× GPU memory) so the CPU legs overlap the
-GPU work; go to 3 on a discrete GPU with room. When inference cannot keep up, windows are
-dropped instead of queued (`dropping windows` in the log): those seconds pass through dry
-rather than the delay growing without bound.
+GPU work; go to 3 on a discrete GPU with room. When inference slows down (thermal throttling on a fanless
+laptop, a background job on the GPU) the separator thins the overlap — it skips windows
+that neighbours already cover, so quality dips slightly instead of the audio dropping out
+(`mdx load high: thinning windows` / `mdx load normal` in the log). Only when even that is
+not enough are windows dropped (`dropping windows`): those seconds pass through dry rather
+than the delay growing without bound.
 
 `mdx` streams audio through the model in ~6 s windows, so playback runs ~8 s behind the
 controller (lyrics and clock account for it). Inference must be at least real time: fine on a
