@@ -67,10 +67,12 @@ pub enum Device {
     Cpu,
     Cuda,
     DirectMl,
-    /// Core ML, letting it choose between CPU, GPU and Neural Engine.
+    /// Core ML on CPU + GPU. The Neural Engine cannot compile the UVR
+    /// models' unbounded batch dimension, so `All` silently lands on the
+    /// CPU; GPU is the fast path until a static-shape model is shipped.
     CoreMl,
-    /// Core ML restricted to CPU + GPU.
-    CoreMlGpu,
+    /// Core ML choosing between CPU, GPU and Neural Engine.
+    CoreMlAll,
     /// Core ML restricted to CPU + Neural Engine.
     CoreMlAne,
 }
@@ -94,7 +96,7 @@ impl MdxModel {
             | Device::Cuda
             | Device::DirectMl
             | Device::CoreMl
-            | Device::CoreMlGpu
+            | Device::CoreMlAll
             | Device::CoreMlAne => {
                 #[cfg(feature = "cuda")]
                 if matches!(device, Device::Auto | Device::Cuda) {
@@ -111,13 +113,13 @@ impl MdxModel {
                 #[cfg(feature = "coreml")]
                 if matches!(
                     device,
-                    Device::Auto | Device::CoreMl | Device::CoreMlGpu | Device::CoreMlAne
+                    Device::Auto | Device::CoreMl | Device::CoreMlAll | Device::CoreMlAne
                 ) {
                     use ort::ep::coreml::{ComputeUnits, ModelFormat};
                     let units = match device {
-                        Device::CoreMlGpu => ComputeUnits::CPUAndGPU,
+                        Device::CoreMlAll => ComputeUnits::All,
                         Device::CoreMlAne => ComputeUnits::CPUAndNeuralEngine,
-                        _ => ComputeUnits::All,
+                        _ => ComputeUnits::CPUAndGPU,
                     };
                     // MLProgram covers more operators than the legacy
                     // NeuralNetwork format, so less of the graph falls back

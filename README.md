@@ -57,7 +57,7 @@ drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
 [karaoke]
 backend = "mdx"                    # "dsp" (instant centre-cancel) or "mdx" (ONNX model)
 model = "UVR-MDX-NET-Inst_HQ_3"    # or "Kim_Vocal_2"; downloaded on first use
-device = "auto"                    # auto | cpu | cuda | directml | coreml | coreml-gpu | coreml-ane
+device = "auto"                    # auto | cpu | cuda | directml | coreml (GPU) | coreml-all | coreml-ane
 threads = 0                        # CPU threads, 0 = runtime default
 slack_ms = 2000                    # extra latency budget for slow inference bursts
 hop_ms = 0                         # new audio per inference; 0 = full window (~5.9 s)
@@ -71,6 +71,11 @@ quality, lower latency) at `5900 / hop_ms` times the inference cost, so it is bo
 fast the device runs one window. Starting points: GPU with headroom → `hop_ms = 2000,
 lookahead_ms = 1500, slack_ms = 1500` (~5 s); fast GPU → `hop_ms = 1200, lookahead_ms = 1000,
 slack_ms = 1200` (~3.4 s). If the log says `mdx separator starved`, raise `hop_ms`/`slack_ms`.
+
+On Apple Silicon `coreml` runs the model on the GPU (~0.45 s per window on an M1 Air). The
+Neural Engine rejects the UVR models' unbounded batch dimension (`E5RT … unbounded
+dimension` on stderr), so `coreml-all`/`coreml-ane` currently fall back to Core ML's CPU path
+and are ~3× slower.
 
 Each window is a serial chain — STFT on the CPU, the model on the GPU, iSTFT on the CPU —
 so with one worker the GPU idles between windows and shows up as spikes. `workers = 2` runs

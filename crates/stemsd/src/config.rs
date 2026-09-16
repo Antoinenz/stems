@@ -32,7 +32,7 @@ pub struct KaraokeConfig {
     pub backend: String,
     /// Model name for `mdx`, e.g. `UVR-MDX-NET-Inst_HQ_3` or `Kim_Vocal_2`.
     pub model: String,
-    /// `auto`, `cpu`, `cuda`, `directml`, `coreml`, `coreml-gpu`, `coreml-ane`.
+    /// `auto`, `cpu`, `cuda`, `directml`, `coreml` (GPU), `coreml-all`, `coreml-ane`.
     pub device: String,
     /// CPU threads for inference (0 = runtime default).
     pub threads: usize,
