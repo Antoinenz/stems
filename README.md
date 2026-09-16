@@ -57,7 +57,7 @@ drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
 [karaoke]
 backend = "mdx"                    # "dsp" (instant centre-cancel) or "mdx" (ONNX model)
 model = "UVR-MDX-NET-Inst_HQ_3"    # or "Kim_Vocal_2"; downloaded on first use
-device = "auto"                    # auto | cpu | cuda | directml | coreml
+device = "auto"                    # auto | cpu | cuda | directml | coreml | coreml-gpu | coreml-ane
 threads = 0                        # CPU threads, 0 = runtime default
 slack_ms = 2000                    # extra latency budget for slow inference bursts
 hop_ms = 0                         # new audio per inference; 0 = full window (~5.9 s)

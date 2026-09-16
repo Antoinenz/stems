@@ -33,6 +33,8 @@ async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         "cuda" => Device::Cuda,
         "directml" => Device::DirectMl,
         "coreml" => Device::CoreMl,
+        "coreml-gpu" => Device::CoreMlGpu,
+        "coreml-ane" => Device::CoreMlAne,
         _ => Device::Auto,
     };
     let threads = cfg.threads;
