@@ -335,6 +335,8 @@ struct Done {
     seq: u64,
     start: i64,
     inst: Vec<f32>,
+    /// Runner wall time, for the load predictor.
+    elapsed_ms: f64,
 }
 
 /// Streaming wrapper: overlapping windows go to a worker thread, results
@@ -375,6 +377,18 @@ pub struct MdxSeparator {
     in_flight: usize,
     max_in_flight: usize,
     dropped: u64,
+    n_workers: usize,
+    /// Smoothed runner time per window (ms); 0 until the first result.
+    pred_ms: f64,
+    /// Absolute end frame of the last window actually dispatched.
+    last_dispatched_end: i64,
+    /// Windows skipped because the predictor said they would miss their
+    /// deadline (graceful degradation under thermal throttling).
+    thinned: u64,
+    thinned_episode: u64,
+    /// Consecutive full-rate dispatches, for log hysteresis.
+    since_thin: u32,
+    thinning: bool,
     starved: bool,
     provider: &'static str,
 }
@@ -463,6 +477,7 @@ impl MdxSeparator {
                                 Err(_) => break,
                             };
                             let Ok(job) = job else { break };
+                            let started = Instant::now();
                             let inst = match runner(&job.window) {
                                 Ok(inst) => inst,
                                 Err(e) => {
@@ -475,6 +490,7 @@ impl MdxSeparator {
                                 seq: job.seq,
                                 start: job.start,
                                 inst,
+                                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                             };
                             if results.send(done).is_err() {
                                 break;
@@ -521,6 +537,13 @@ impl MdxSeparator {
             // one queued window per worker on top of those running
             max_in_flight: n_workers * 2,
             dropped: 0,
+            n_workers,
+            pred_ms: 0.0,
+            last_dispatched_end: i64::MIN / 2,
+            thinned: 0,
+            thinned_episode: 0,
+            since_thin: 0,
+            thinning: false,
             starved: false,
             provider,
         };
@@ -545,6 +568,59 @@ impl MdxSeparator {
         self.pending.clear();
         self.next_seq = self.dispatch_seq;
         self.in_flight = 0;
+        self.last_dispatched_end = i64::MIN / 2;
+    }
+
+    /// Would the window ending at `end` be finished in time? It finalises
+    /// everything after the last dispatched window's frontier, and the
+    /// first of those frames is due `hop + slack` after that window's
+    /// end; queued windows ahead of it share the workers.
+    fn will_miss_deadline(&self, end: i64) -> bool {
+        if self.pred_ms <= 0.0 {
+            return false;
+        }
+        let queued = self.in_flight as f64 / self.n_workers as f64;
+        (queued + 1.0) * self.pred_ms > self.budget_ms(end)
+    }
+
+    /// Time the window ending at `end` may take, with a safety margin.
+    fn budget_ms(&self, end: i64) -> f64 {
+        let gap = (end - self.last_dispatched_end).max(self.hop as i64) as f64;
+        let budget_frames = (self.latency - self.lookahead + self.hop) as f64 - gap;
+        budget_frames * 1000.0 / 44_100.0 * 0.85
+    }
+
+    /// Thin when the workers cannot sustain one window per hop (space
+    /// dispatches at least `pred / workers` apart, with margin), or when
+    /// the queue already predicts a missed deadline and skipping lets
+    /// the following window make its tighter one.
+    fn should_thin(&self, end: i64) -> bool {
+        if self.pred_ms <= 0.0 || !self.can_skip(end) {
+            return false;
+        }
+        let gap_ms = (end - self.last_dispatched_end) as f64 * 1000.0 / 44_100.0;
+        let sustain_ms = self.pred_ms / self.n_workers as f64 * 1.1;
+        if gap_ms < sustain_ms {
+            return true;
+        }
+        if !self.will_miss_deadline(end) {
+            return false;
+        }
+        let hop_ms = self.hop as f64 * 1000.0 / 44_100.0;
+        let queued = self.in_flight as f64 / self.n_workers as f64;
+        let eta_next = (queued * self.pred_ms - hop_ms).max(0.0) + self.pred_ms;
+        eta_next <= self.budget_ms(end + self.hop as i64)
+    }
+
+    /// Skipping the window ending at `end` leaves no uncovered frames as
+    /// long as the next window still overlaps the last dispatched one.
+    /// Windows skipped so far by the load predictor.
+    pub fn thinned(&self) -> u64 {
+        self.thinned
+    }
+
+    fn can_skip(&self, end: i64) -> bool {
+        end + self.hop as i64 - self.last_dispatched_end <= self.params.gen_size() as i64
     }
 
     fn push_input(&mut self, input: &[f32]) {
@@ -565,6 +641,21 @@ impl MdxSeparator {
             let end = self.next_window_end;
             let start = end - chunk;
             self.next_window_end += self.hop as i64;
+            if self.should_thin(end) {
+                // Predicted late: thin the overlap instead of queueing.
+                // Neighbouring windows still cover these frames.
+                if !self.thinning {
+                    tracing::info!(
+                        pred_ms = self.pred_ms as u64,
+                        "mdx load high: thinning windows"
+                    );
+                    self.thinning = true;
+                }
+                self.thinned += 1;
+                self.thinned_episode += 1;
+                self.since_thin = 0;
+                continue;
+            }
             if self.in_flight >= self.max_in_flight {
                 // Falling behind: skip this window rather than queue it.
                 // Frames only it covered stay invalid → dry fallback.
@@ -573,6 +664,16 @@ impl MdxSeparator {
                 }
                 self.dropped += 1;
                 continue;
+            }
+            self.since_thin += 1;
+            if self.thinning && self.since_thin >= 8 {
+                tracing::info!(
+                    thinned = self.thinned_episode,
+                    pred_ms = self.pred_ms as u64,
+                    "mdx load normal: full overlap"
+                );
+                self.thinning = false;
+                self.thinned_episode = 0;
             }
             let mut window = vec![0.0f32; chunk as usize * 2];
             for f in start.max(self.history_start)..end {
@@ -592,6 +693,7 @@ impl MdxSeparator {
             }
             self.dispatch_seq += 1;
             self.in_flight += 1;
+            self.last_dispatched_end = end;
         }
     }
 
@@ -601,6 +703,18 @@ impl MdxSeparator {
                 continue;
             }
             self.in_flight = self.in_flight.saturating_sub(1);
+            self.pred_ms = if self.pred_ms <= 0.0 {
+                done.elapsed_ms
+            } else {
+                // fast attack, slow decay: react to a throttle quickly,
+                // ease back to full overlap once it clears
+                let a = if done.elapsed_ms > self.pred_ms {
+                    0.5
+                } else {
+                    0.1
+                };
+                self.pred_ms + a * (done.elapsed_ms - self.pred_ms)
+            };
             self.pending.insert(done.seq, done);
         }
         while let Some(done) = self.pending.remove(&self.next_seq) {
@@ -751,16 +865,24 @@ mod tests {
         }
     }
 
-    fn run_stream(opts: StreamOpts, frames: usize) -> (Vec<f32>, Vec<f32>, usize, Vec<bool>) {
+    struct Run {
+        input: Vec<f32>,
+        out: Vec<f32>,
+        latency: usize,
+        valid: Vec<bool>,
+        thinned: u64,
+    }
+
+    /// Identity runners taking `runner_ms` each; with several workers the
+    /// odd ones are slower so results come back out of order. Blocks are
+    /// paced at `block_us` per 128 frames (real time = 2902 µs).
+    fn run_stream(opts: StreamOpts, frames: usize, runner_ms: u64, block_us: u64) -> Run {
         let params = small_params();
-        // identity runners; with several, odd ones are slower so results
-        // come back out of order and must be re-sequenced
         let runners = (0..opts.workers.max(1))
             .map(|i| -> WindowRunner {
                 Box::new(move |w: &[f32]| {
-                    if i % 2 == 1 {
-                        std::thread::sleep(std::time::Duration::from_micros(500));
-                    }
+                    let extra = if i % 2 == 1 { 500 } else { 0 };
+                    std::thread::sleep(std::time::Duration::from_micros(runner_ms * 1000 + extra));
                     Ok(w.to_vec())
                 })
             })
@@ -773,13 +895,18 @@ mod tests {
         let mut out = Vec::new();
         let mut valid = Vec::new();
         for b in input.chunks(128 * 2) {
-            // the worker is effectively instant; the slack covers its latency
-            std::thread::sleep(std::time::Duration::from_micros(200));
+            std::thread::sleep(std::time::Duration::from_micros(block_us));
             let mut o = vec![0.0; b.len()];
             valid.push(sep.process(b, &mut o));
             out.extend(o);
         }
-        (input, out, latency, valid)
+        Run {
+            input,
+            out,
+            latency,
+            valid,
+            thinned: sep.thinned(),
+        }
     }
 
     #[test]
@@ -807,9 +934,42 @@ mod tests {
         });
     }
 
+    #[test]
+    fn slow_runner_thins_overlap_without_holes() {
+        // a 35 ms runner cannot do every 23 ms hop; windows must be
+        // skipped and the 70 ms slack absorbs the remaining jitter
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 3072,
+            denoise: false,
+            workers: 1,
+        };
+        let r = run_stream(opts, 80_000, 35, 2902);
+        assert!(r.thinned > 5, "thinned {}", r.thinned);
+        let priming_blocks = r.latency / 128 + 2;
+        let invalid: Vec<usize> = r.valid[priming_blocks..]
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !**v)
+            .map(|(i, _)| i + priming_blocks)
+            .collect();
+        assert!(
+            invalid.is_empty(),
+            "invalid blocks after priming: {invalid:?} of {}",
+            r.valid.len()
+        );
+    }
+
     fn check_identity(opts: StreamOpts) {
         let frames = 40_000;
-        let (input, out, latency, valid) = run_stream(opts, frames);
+        let Run {
+            input,
+            out,
+            latency,
+            valid,
+            ..
+        } = run_stream(opts, frames, 0, 200);
         assert_eq!(latency, 512 + 1024 + 1536);
         // after priming, every block must carry a usable instrumental
         let priming_blocks = latency / 128 + 2;
