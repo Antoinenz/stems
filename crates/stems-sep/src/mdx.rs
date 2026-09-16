@@ -67,7 +67,12 @@ pub enum Device {
     Cpu,
     Cuda,
     DirectMl,
+    /// Core ML, letting it choose between CPU, GPU and Neural Engine.
     CoreMl,
+    /// Core ML restricted to CPU + GPU.
+    CoreMlGpu,
+    /// Core ML restricted to CPU + Neural Engine.
+    CoreMlAne,
 }
 
 pub struct MdxModel {
@@ -85,7 +90,12 @@ impl MdxModel {
         #[allow(unused_mut)]
         let mut provider = "cpu";
         match device {
-            Device::Auto | Device::Cuda | Device::DirectMl | Device::CoreMl => {
+            Device::Auto
+            | Device::Cuda
+            | Device::DirectMl
+            | Device::CoreMl
+            | Device::CoreMlGpu
+            | Device::CoreMlAne => {
                 #[cfg(feature = "cuda")]
                 if matches!(device, Device::Auto | Device::Cuda) {
                     eps.push(ort::ep::CUDA::default().build());
@@ -99,8 +109,28 @@ impl MdxModel {
                     }
                 }
                 #[cfg(feature = "coreml")]
-                if matches!(device, Device::Auto | Device::CoreMl) {
-                    eps.push(ort::ep::CoreML::default().build());
+                if matches!(
+                    device,
+                    Device::Auto | Device::CoreMl | Device::CoreMlGpu | Device::CoreMlAne
+                ) {
+                    use ort::ep::coreml::{ComputeUnits, ModelFormat};
+                    let units = match device {
+                        Device::CoreMlGpu => ComputeUnits::CPUAndGPU,
+                        Device::CoreMlAne => ComputeUnits::CPUAndNeuralEngine,
+                        _ => ComputeUnits::All,
+                    };
+                    // MLProgram covers more operators than the legacy
+                    // NeuralNetwork format, so less of the graph falls back
+                    // to the CPU EP. STEMS_COREML_PROFILE=1 prints which
+                    // unit each op landed on.
+                    let ep = ort::ep::CoreML::default()
+                        .with_model_format(ModelFormat::MLProgram)
+                        .with_compute_units(units)
+                        .with_profile_compute_plan(
+                            std::env::var_os("STEMS_COREML_PROFILE").is_some(),
+                        )
+                        .build();
+                    eps.push(ep);
                     if provider == "cpu" {
                         provider = "coreml";
                     }
