@@ -328,10 +328,18 @@ impl Engine {
                 s.view_mode = mode;
                 s.revision += 1;
             }),
-            Command::SetVideoOffset { offset_ms } => self.state_tx.send_modify(|s| {
-                s.media.video_offset_ms = offset_ms;
-                s.revision += 1;
-            }),
+            Command::SetVideoOffset { offset_ms } => {
+                let track = self.state_tx.borrow().track.clone();
+                if let Some(t) = &track {
+                    if let Err(e) = self.cache.set_video_offset(t, offset_ms) {
+                        tracing::warn!("cache: {e:#}");
+                    }
+                }
+                self.state_tx.send_modify(|s| {
+                    s.media.video_offset_ms = offset_ms;
+                    s.revision += 1;
+                });
+            }
             Command::SetLyricsOffset { offset_ms } => {
                 // Per-track offset, persisted; the state carries it combined
                 // with the global one so clients apply a single number.
@@ -429,9 +437,17 @@ impl Engine {
         if let Some(u) = &url {
             tracing::info!(url = %u, "music video ready");
         }
+        let current = self.state_tx.borrow().track.clone();
+        let offset = current
+            .as_ref()
+            .filter(|t| t.id == id)
+            .and_then(|t| self.cache.video_offset(t).ok().flatten());
         self.state_tx.send_if_modified(|s| {
             if s.track.as_ref().map(|t| &t.id) == Some(&id) && s.media.video_url != url {
                 s.media.video_url = url;
+                if let Some(o) = offset {
+                    s.media.video_offset_ms = o;
+                }
                 s.revision += 1;
                 true
             } else {
