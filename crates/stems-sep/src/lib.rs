@@ -7,10 +7,15 @@
 pub mod dsp;
 #[cfg(feature = "onnx")]
 pub mod mdx;
+pub mod params;
+pub mod remote;
 #[cfg(feature = "onnx")]
 pub mod stft;
+pub mod stream;
 
 pub use dsp::CentreCancel;
 #[cfg(feature = "onnx")]
-pub use mdx::{Device, MdxModel, MdxParams, MdxSeparator, PrimaryStem, StreamOpts};
+pub use mdx::{Device, MdxModel};
+pub use params::{MdxParams, PrimaryStem, known_model};
 pub use stems_core::Separator;
+pub use stream::{MdxSeparator, StreamOpts, WindowRunner};

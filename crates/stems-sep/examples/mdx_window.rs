@@ -1,5 +1,6 @@
 //! `cargo run -p stems-sep --features onnx --example mdx_window -- <model.onnx> [in.wav] [out.wav]`
 //! Runs one model window. Without a WAV it synthesises a test signal.
+//! `DENOISE=1` runs the batched x/−x pair.
 use std::time::Instant;
 
 use stems_sep::mdx::{Device, MdxModel, known_model};
@@ -36,8 +37,9 @@ fn main() -> anyhow::Result<()> {
             .collect(),
     };
 
+    let denoise = std::env::var_os("DENOISE").is_some();
     let started = Instant::now();
-    let inst = model.instrumental_for_window(&chunk)?;
+    let inst = model.instrumental_for_window_opt(&chunk, denoise)?;
     let secs = started.elapsed().as_secs_f32();
     let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
     let finite = inst.iter().all(|x| x.is_finite());
