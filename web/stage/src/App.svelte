@@ -24,6 +24,23 @@
   const lyrics = $derived(client.state.lyrics);
   const active = $derived(activeLine(lyrics, client.position));
   const compact = $derived(mode === 'karaoke');
+
+  // Remote QR: big while idle, a small badge while playing; `?qr=0` hides it.
+  const showQr = new URLSearchParams(location.search).get('qr') !== '0';
+  let remoteUrl = $state<string | null>(null);
+  let deviceName = $state<string | null>(null);
+  onMount(async () => {
+    try {
+      const r = await fetch('/api/info');
+      if (r.ok) {
+        const info = (await r.json()) as { remote_url: string | null; device_name: string };
+        remoteUrl = info.remote_url;
+        deviceName = info.device_name;
+      }
+    } catch {
+      /* no LAN address: no QR */
+    }
+  });
 </script>
 
 <div class="stage" data-mode={mode}>
@@ -33,7 +50,13 @@
     {#if !client.connected}
       <p class="hint">connecting to stems…</p>
     {:else if !track}
-      <p class="hint">Pick <b>{client.state.source ?? 'stems'}</b> in Spotify to start</p>
+      <div class="hint idle">
+        <p>Pick <b>{deviceName ?? 'stems'}</b> in Spotify to start</p>
+        {#if showQr && remoteUrl}
+          <img class="qr big" src="/api/remote-qr.svg" alt="" />
+          <p class="sub">scan to control · {remoteUrl}</p>
+        {/if}
+      </div>
     {:else if lyrics && lyrics.lines.length > 0}
       <LyricsView {lyrics} {active} position={client.position} {compact} />
     {:else if lyrics?.plain}
@@ -50,12 +73,22 @@
     karaoke={client.state.karaoke}
     minimal={compact || mode === 'video'}
   />
+
+  {#if showQr && remoteUrl && track && !compact}
+    <img class="qr badge" src="/api/remote-qr.svg" alt="" title={remoteUrl} />
+  {/if}
 </div>
 
 <style>
   .stage { position: relative; width: 100%; height: 100%; }
   main { position: absolute; inset: 6vh 0 16vh; }
   main.video { inset: auto 0 12vh; height: 32vh; }
+  .idle { flex-direction: column; gap: 3vmin; }
+  .idle p { margin: 0; }
+  .sub { font-size: 2vmin; color: var(--dim); }
+  .qr { border-radius: 1.5vmin; background: #fff; }
+  .qr.big { width: 28vmin; height: 28vmin; }
+  .qr.badge { position: absolute; right: 4vw; top: 4vh; width: 9vmin; height: 9vmin; opacity: 0.85; }
   .hint {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     margin: 0; font-size: 3vmin; color: var(--dim);
