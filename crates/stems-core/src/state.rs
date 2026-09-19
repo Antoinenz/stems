@@ -155,6 +155,11 @@ pub enum Command {
     SetViewMode {
         mode: ViewMode,
     },
+    /// Shift the music video relative to the track (positive = video
+    /// runs ahead).
+    SetVideoOffset {
+        offset_ms: i64,
+    },
 }
 
 #[cfg(test)]
