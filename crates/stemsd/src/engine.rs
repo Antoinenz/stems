@@ -13,7 +13,7 @@ use stems_core::{
     Clock, ClockTick, Command, Lyrics, PlaybackState, PlaybackStatus, Sink, Source, SourceEvent,
     TrackId, TrackRef,
 };
-use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib};
+use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib, VideoFetcher};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -42,6 +42,11 @@ pub struct Engine {
     lyrics_task: Option<JoinHandle<()>>,
     lyrics_tx: mpsc::Sender<(TrackId, Option<Lyrics>)>,
     lyrics_rx: mpsc::Receiver<(TrackId, Option<Lyrics>)>,
+    /// Music video downloads (`[video] enabled`), resolved per track.
+    video: Option<VideoFetcher>,
+    video_task: Option<JoinHandle<()>>,
+    video_tx: mpsc::Sender<(TrackId, Option<String>)>,
+    video_rx: mpsc::Receiver<(TrackId, Option<String>)>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -70,6 +75,7 @@ impl Engine {
         let (clock_tx, clock_rx) = watch::channel(ClockTick::default());
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
+        let (video_tx, video_rx) = mpsc::channel(8);
         let mut clock = Clock::new();
         clock.set_delay(Duration::from_secs_f64(
             processor.latency_frames() as f64 / stems_core::SAMPLE_RATE as f64,
@@ -90,6 +96,10 @@ impl Engine {
             lyrics_task: None,
             lyrics_tx,
             lyrics_rx,
+            video: None,
+            video_task: None,
+            video_tx,
+            video_rx,
             exit_on_end,
             tick_count: 0,
         };
@@ -106,6 +116,12 @@ impl Engine {
     pub fn set_volume(&mut self, level: f32) {
         self.sink.set_volume(level);
         self.state_tx.send_modify(|s| s.volume = level);
+    }
+
+    /// Enable music video lookups.
+    pub fn with_video(mut self, fetcher: VideoFetcher) -> Self {
+        self.video = Some(fetcher);
+        self
     }
 
     /// Run until Ctrl-C, source closure, or `Ended` when `exit_on_end`.
@@ -134,6 +150,7 @@ impl Engine {
                 },
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd),
                 Some((id, lyrics)) = self.lyrics_rx.recv() => self.on_lyrics(id, lyrics),
+                Some((id, url)) = self.video_rx.recv() => self.on_video(id, url),
                 _ = ticker.tick() => self.tick(),
             }
         }
@@ -207,8 +224,9 @@ impl Engine {
                     Cached::Hit(_) if local.is_some() => {}
                     Cached::Hit(_) => tracing::info!("lyrics from cache"),
                     Cached::NotFound => tracing::info!("no lyrics (cached negative)"),
-                    Cached::Miss => self.spawn_lyrics_lookup(track),
+                    Cached::Miss => self.spawn_lyrics_lookup(track.clone()),
                 }
+                self.spawn_video_fetch(track);
             }
             SourceEvent::Playing {
                 position_ms,
@@ -310,6 +328,10 @@ impl Engine {
                 s.view_mode = mode;
                 s.revision += 1;
             }),
+            Command::SetVideoOffset { offset_ms } => self.state_tx.send_modify(|s| {
+                s.media.video_offset_ms = offset_ms;
+                s.revision += 1;
+            }),
             Command::SetLyricsOffset { offset_ms } => {
                 // Per-track offset, persisted; the state carries it combined
                 // with the global one so clients apply a single number.
@@ -374,6 +396,48 @@ impl Engine {
             };
             let _ = tx.send((id, result)).await;
         }));
+    }
+
+    fn spawn_video_fetch(&mut self, track: TrackRef) {
+        let Some(fetcher) = self.video.clone() else {
+            return;
+        };
+        if let Some(t) = self.video_task.take() {
+            t.abort();
+        }
+        let tx = self.video_tx.clone();
+        self.video_task = Some(tokio::spawn(async move {
+            let id = track.id.clone();
+            let url = match fetcher.fetch(&track).await {
+                Ok(Some(path)) => path
+                    .file_name()
+                    .map(|f| format!("/media/video/{}", f.to_string_lossy())),
+                Ok(None) => {
+                    tracing::info!(title = %track.title, "no music video found");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("music video: {e:#}");
+                    None
+                }
+            };
+            let _ = tx.send((id, url)).await;
+        }));
+    }
+
+    fn on_video(&mut self, id: TrackId, url: Option<String>) {
+        if let Some(u) = &url {
+            tracing::info!(url = %u, "music video ready");
+        }
+        self.state_tx.send_if_modified(|s| {
+            if s.track.as_ref().map(|t| &t.id) == Some(&id) && s.media.video_url != url {
+                s.media.video_url = url;
+                s.revision += 1;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn processor_delay_ms(&self) -> u64 {

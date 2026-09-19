@@ -23,6 +23,29 @@ pub struct Config {
     pub lyrics_offset_ms: i64,
     pub spotify: SpotifyConfig,
     pub karaoke: KaraokeConfig,
+    pub video: VideoConfig,
+}
+
+/// Music videos for the stage's `video` mode, fetched with yt-dlp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoConfig {
+    /// Look up and download a video for every track.
+    pub enabled: bool,
+    /// yt-dlp executable (name on PATH or full path).
+    pub ytdlp: String,
+    /// Largest video height to download.
+    pub max_height: u32,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ytdlp: "yt-dlp".into(),
+            max_height: 1080,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +114,7 @@ impl Default for Config {
             lyrics_offset_ms: 0,
             spotify: SpotifyConfig::default(),
             karaoke: KaraokeConfig::default(),
+            video: VideoConfig::default(),
         }
     }
 }
@@ -111,6 +135,7 @@ pub struct Paths {
     pub config_file: PathBuf,
     pub cache_dir: PathBuf,
     pub models_dir: PathBuf,
+    pub video_dir: PathBuf,
 }
 
 pub fn paths() -> Result<Paths> {
@@ -119,6 +144,7 @@ pub fn paths() -> Result<Paths> {
         config_file: dirs.config_dir().join("stems.toml"),
         cache_dir: dirs.cache_dir().to_path_buf(),
         models_dir: dirs.cache_dir().join("models"),
+        video_dir: dirs.cache_dir().join("video"),
     })
 }
 

@@ -83,9 +83,34 @@ fn local_lyrics() -> Result<stems_enrich::LocalLyrics> {
     Ok(stems_enrich::LocalLyrics::new(dir))
 }
 
+/// Video fetcher when `[video] enabled`; `None` otherwise.
+fn video_fetcher(cfg: &Config) -> Result<Option<stems_enrich::VideoFetcher>> {
+    if !cfg.video.enabled {
+        return Ok(None);
+    }
+    let dir = crate::config::paths()?.video_dir;
+    tracing::info!(dir = %dir.display(), ytdlp = cfg.video.ytdlp, "music videos enabled");
+    Ok(Some(stems_enrich::VideoFetcher::new(
+        dir,
+        cfg.video.ytdlp.clone(),
+        cfg.video.max_height,
+    )))
+}
+
 fn spawn_server(cfg: &Config, web_dir: Option<PathBuf>, ch: &Channels) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
-    let server = Server { addr, web_dir };
+    let video_dir = cfg
+        .video
+        .enabled
+        .then(|| crate::config::paths().map(|p| p.video_dir))
+        .transpose()
+        .ok()
+        .flatten();
+    let server = Server {
+        addr,
+        web_dir,
+        video_dir,
+    };
     let channels = stems_server::Channels {
         state: ch.state.clone(),
         clock: ch.clock.clone(),
@@ -123,6 +148,10 @@ pub async fn play_file(
         cfg.lyrics_offset_ms,
         true,
     );
+    let engine = match video_fetcher(cfg)? {
+        Some(v) => engine.with_video(v),
+        None => engine,
+    };
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
@@ -167,6 +196,10 @@ pub async fn run_spotify(
         false,
     );
     engine.set_volume(cfg.spotify.initial_volume_percent as f32 / 100.0);
+    let engine = match video_fetcher(cfg)? {
+        Some(v) => engine.with_video(v),
+        None => engine,
+    };
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
