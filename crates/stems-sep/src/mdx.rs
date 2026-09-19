@@ -25,9 +25,7 @@ pub enum Device {
     Cpu,
     Cuda,
     DirectMl,
-    /// Core ML on CPU + GPU. The Neural Engine cannot compile the UVR
-    /// models' unbounded batch dimension, so `All` silently lands on the
-    /// CPU; GPU is the fast path until a static-shape model is shipped.
+    /// Core ML on CPU + GPU (the known-fast path).
     CoreMl,
     /// Core ML choosing between CPU, GPU and Neural Engine.
     CoreMlAll,
@@ -41,13 +39,25 @@ pub struct MdxModel {
     stft: Stft,
     input_name: String,
     provider: &'static str,
-    /// Run `[x, −x]` as one batch of 2 (models with a dynamic batch dim).
+    /// Run `[x, −x]` as one batch of 2 (session loaded with `batch = 2`).
     batch_denoise: bool,
 }
 
 impl MdxModel {
-    pub fn load(path: &Path, params: MdxParams, device: Device, threads: usize) -> Result<Self> {
-        let mut builder = Session::builder().context("ort session builder")?;
+    /// `batch` fixes the model's symbolic batch dimension (1, or 2 when
+    /// the denoise pair is batched). Static shapes let Core ML compile for
+    /// the Neural Engine and let every provider plan memory up front.
+    pub fn load(
+        path: &Path,
+        params: MdxParams,
+        device: Device,
+        threads: usize,
+        batch: usize,
+    ) -> Result<Self> {
+        let mut builder = Session::builder()
+            .context("ort session builder")?
+            .with_dimension_override("batch_size", batch.max(1) as i64)
+            .map_err(|e| anyhow!("dimension override: {e}"))?;
         let mut eps: Vec<ort::ep::ExecutionProviderDispatch> = Vec::new();
         #[allow(unused_mut)]
         let mut provider = "cpu";
@@ -133,7 +143,7 @@ impl MdxModel {
             stft,
             input_name,
             provider,
-            batch_denoise: true,
+            batch_denoise: batch >= 2,
         })
     }
 

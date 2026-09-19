@@ -103,10 +103,11 @@ pub async fn load_models(
         _ => Device::Auto,
     };
     let threads = cfg.threads;
+    let batch = if cfg.denoise { 2 } else { 1 };
     // Loading a 60+ MB model blocks; keep it off the async runtime.
     tokio::task::spawn_blocking(move || {
         (0..count.max(1))
-            .map(|_| MdxModel::load(&path, params.clone(), device, threads))
+            .map(|_| MdxModel::load(&path, params.clone(), device, threads, batch))
             .collect::<Result<Vec<_>>>()
     })
     .await

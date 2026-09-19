@@ -12,7 +12,8 @@ fn main() -> anyhow::Result<()> {
     let name = path.file_stem().unwrap().to_string_lossy().to_string();
     let (_, params) = known_model(&name).expect("known model name");
     let n = params.chunk_size();
-    let mut model = MdxModel::load(&path, params, Device::Auto, 4)?;
+    let denoise = std::env::var_os("DENOISE").is_some();
+    let mut model = MdxModel::load(&path, params, Device::Auto, 4, if denoise { 2 } else { 1 })?;
 
     let chunk: Vec<f32> = match args.get(2) {
         Some(wav) => {
@@ -37,7 +38,6 @@ fn main() -> anyhow::Result<()> {
             .collect(),
     };
 
-    let denoise = std::env::var_os("DENOISE").is_some();
     let started = Instant::now();
     let inst = model.instrumental_for_window_opt(&chunk, denoise)?;
     let secs = started.elapsed().as_secs_f32();
