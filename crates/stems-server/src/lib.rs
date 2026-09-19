@@ -46,10 +46,12 @@ enum Outbound<'a> {
 pub struct Server {
     pub addr: SocketAddr,
     pub web_dir: Option<PathBuf>,
+    /// Downloaded music videos, served at `/media/video/`.
+    pub video_dir: Option<PathBuf>,
 }
 
 impl Server {
-    pub fn router(ch: Channels, web_dir: Option<&Path>) -> Router {
+    pub fn router(ch: Channels, web_dir: Option<&Path>, video_dir: Option<&Path>) -> Router {
         let mut app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .route("/api/state", get(get_state))
@@ -80,12 +82,16 @@ impl Server {
             }
             app = app.route("/", get(|| async { Redirect::temporary("/remote/") }));
         }
+        if let Some(dir) = video_dir {
+            // ServeDir handles Range requests, which <video> seeking needs.
+            app = app.nest_service("/media/video", ServeDir::new(dir));
+        }
         app
     }
 
     /// Bind and serve until the task is dropped / the process exits.
     pub async fn serve(self, ch: Channels) -> Result<()> {
-        let app = Self::router(ch, self.web_dir.as_deref());
+        let app = Self::router(ch, self.web_dir.as_deref(), self.video_dir.as_deref());
         let listener = tokio::net::TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind {}", self.addr))?;
@@ -195,7 +201,7 @@ mod tests {
     async fn state_endpoint_returns_json() {
         let (ch, state_tx, _rx) = channels();
         state_tx.send_modify(|s| s.volume = 0.42);
-        let app = Server::router(ch, None);
+        let app = Server::router(ch, None, None);
         let res = app
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
@@ -212,7 +218,7 @@ mod tests {
     #[tokio::test]
     async fn command_endpoint_forwards_to_engine() {
         let (ch, _state_tx, mut rx) = channels();
-        let app = Server::router(ch, None);
+        let app = Server::router(ch, None, None);
         let res = app
             .oneshot(
                 Request::post("/api/command")
