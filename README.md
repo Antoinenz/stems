@@ -93,6 +93,31 @@ GPU or Apple Silicon, marginal on laptop CPUs, not viable on a Raspberry Pi. GPU
 compile-time features: `cargo build -p stemsd --features cuda` (NVIDIA, CUDA 12 runtime
 required), `--features directml` (any Windows GPU), `--features coreml` (macOS).
 
+### Remote worker
+
+The model can run on another machine — a desktop GPU serving a Raspberry Pi or a laptop:
+
+```sh
+# on the GPU box (uses its own stems.toml [karaoke] model/device/workers)
+cargo run -p stemsd --features cuda -- worker --bind 0.0.0.0:7374
+```
+
+```toml
+# on the player
+[karaoke]
+backend = "remote"
+remote = "192.168.1.50:7374"
+hop_ms = 1000
+lookahead_ms = 1000
+slack_ms = 1500
+denoise = true
+workers = 2          # parallel connections; the worker's own `workers` bounds concurrency
+```
+
+Windows (~2 MB each way) stream over TCP; the worker answers with the instrumental and the
+player blends them exactly as it would locally, so latency and quality knobs are the same.
+`denoise` is applied on the worker. Several players can share one worker.
+
 ## Building
 
 Requires stable Rust (see `rust-toolchain.toml`).
