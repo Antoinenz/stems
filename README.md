@@ -40,7 +40,8 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 - `GET /api/state` — now playing, lyrics, karaoke state, view mode
 - `WS /api/ws` — state on change + clock at 10 Hz; accepts commands
 - `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
-  `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`
+  `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`,
+  `{"cmd":"set_video_offset","offset_ms":1500}`
 
 ### Config and files
 
@@ -48,6 +49,20 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 `lyrics_offset_ms`, Spotify options). Lyrics come from LRCLIB and are cached in SQLite;
 drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
 `<config dir>/lyrics/` named `<Artist> - <Title>.lrc` or `<ISRC>.lrc` to override.
+
+### Music videos
+
+```toml
+[video]
+enabled = true          # off by default
+ytdlp = "yt-dlp"        # executable name or path; ffmpeg must be on PATH too
+max_height = 1080
+```
+
+With this on, every track triggers a `yt-dlp` search (`<artist> - <title> official video`) and a
+one-time download into `<cache dir>/video/`; when it lands the stage's `video` mode plays it
+from `/media/video/…` on the track's timeline. Videos and streams rarely share a timeline
+(intros, edits): `set_video_offset` shifts the video in ms until automatic alignment exists.
 
 ### Karaoke backends
 
