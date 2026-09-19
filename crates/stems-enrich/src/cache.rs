@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS lyrics (
     lyrics     TEXT,                   -- Lyrics as JSON, NULL when not found
     updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS video_offsets (
+    key        TEXT PRIMARY KEY,
+    offset_ms  INTEGER NOT NULL
+);
 "#;
 
 #[derive(Clone)]
@@ -138,6 +142,29 @@ impl Cache {
         Ok(())
     }
 
+    /// Remember how far the music video sits from the track.
+    pub fn set_video_offset(&self, track: &TrackRef, offset_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("cache mutex");
+        conn.execute(
+            "INSERT INTO video_offsets(key, offset_ms) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET offset_ms = excluded.offset_ms",
+            params![track_key(track), offset_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn video_offset(&self, track: &TrackRef) -> Result<Option<i64>> {
+        let conn = self.conn.lock().expect("cache mutex");
+        let v = conn
+            .query_row(
+                "SELECT offset_ms FROM video_offsets WHERE key = ?1",
+                params![track_key(track)],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(v)
+    }
+
     pub fn stats(&self) -> Result<(u64, u64)> {
         let conn = self.conn.lock().expect("cache mutex");
         let tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
@@ -165,6 +192,17 @@ mod tests {
             duration_ms: 1000,
             art: None,
         }
+    }
+
+    #[test]
+    fn video_offset_roundtrip() {
+        let c = Cache::open_in_memory().unwrap();
+        let t = track(Some("x"));
+        assert_eq!(c.video_offset(&t).unwrap(), None);
+        c.set_video_offset(&t, -1500).unwrap();
+        assert_eq!(c.video_offset(&t).unwrap(), Some(-1500));
+        c.set_video_offset(&t, 200).unwrap();
+        assert_eq!(c.video_offset(&t).unwrap(), Some(200));
     }
 
     #[test]
