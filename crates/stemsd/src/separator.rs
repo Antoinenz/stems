@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(feature = "onnx")]
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use stems_core::Separator;
 use stems_sep::CentreCancel;
 
@@ -14,13 +12,79 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
     match cfg.backend.as_str() {
         "dsp" => Ok(Box::new(CentreCancel::default())),
         "mdx" => build_mdx(cfg, models_dir).await,
-        other => Err(anyhow!("unknown karaoke backend `{other}` (dsp, mdx)")),
+        "remote" => build_remote(cfg).await,
+        other => Err(anyhow!(
+            "unknown karaoke backend `{other}` (dsp, mdx, remote)"
+        )),
     }
 }
 
+fn stream_opts(cfg: &KaraokeConfig) -> stems_sep::StreamOpts {
+    let ms = |v: u64| (v * stems_core::SAMPLE_RATE as u64 / 1000) as usize;
+    stems_sep::StreamOpts {
+        hop_frames: ms(cfg.hop_ms),
+        lookahead_frames: ms(cfg.lookahead_ms),
+        slack_frames: ms(cfg.slack_ms),
+        denoise: cfg.denoise,
+        workers: cfg.workers.max(1),
+    }
+}
+
+/// `backend = "remote"`: windows go to a `stemsd worker` on another
+/// machine; one connection per streaming worker.
+async fn build_remote(cfg: &KaraokeConfig) -> Result<Box<dyn Separator>> {
+    use stems_sep::remote::RemoteRunner;
+    use stems_sep::{MdxSeparator, WindowRunner};
+
+    anyhow::ensure!(
+        !cfg.remote.is_empty(),
+        "backend = \"remote\" needs `remote = \"host:port\"` in [karaoke]"
+    );
+    let opts = stream_opts(cfg);
+    let addr = cfg.remote.clone();
+    let n = opts.workers;
+    let conns = tokio::task::spawn_blocking(move || {
+        (0..n)
+            .map(|_| RemoteRunner::connect(addr.as_str()))
+            .collect::<Result<Vec<_>>>()
+    })
+    .await
+    .context("worker connect task")??;
+    let hello = conns[0].hello().clone();
+    tracing::info!(
+        remote = cfg.remote,
+        model = hello.model,
+        provider = hello.provider,
+        connections = n,
+        "remote separation worker"
+    );
+    let denoise = opts.denoise;
+    let runners: Vec<WindowRunner> = conns
+        .into_iter()
+        .map(|mut c| -> WindowRunner { Box::new(move |w: &[f32]| c.run(w, denoise)) })
+        .collect();
+    // the remote already averaged x/−x, so the local wrapper must not
+    let opts = stems_sep::StreamOpts {
+        denoise: false,
+        ..opts
+    };
+    let sep = MdxSeparator::with_runners(hello.params, "remote", runners, opts);
+    tracing::info!(
+        latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
+        "remote separator ready"
+    );
+    Ok(Box::new(sep))
+}
+
+/// Resolve and (if needed) download the configured model; load
+/// `count` sessions.
 #[cfg(feature = "onnx")]
-async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn Separator>> {
-    use stems_sep::mdx::{Device, MdxModel, MdxSeparator, StreamOpts, known_model};
+pub async fn load_models(
+    cfg: &KaraokeConfig,
+    models_dir: PathBuf,
+    count: usize,
+) -> Result<Vec<stems_sep::MdxModel>> {
+    use stems_sep::{Device, MdxModel, known_model};
 
     let (base_url, params) =
         known_model(&cfg.model).ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
@@ -39,24 +103,21 @@ async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         _ => Device::Auto,
     };
     let threads = cfg.threads;
-    let ms = |v: u64| (v * stems_core::SAMPLE_RATE as u64 / 1000) as usize;
-    let opts = StreamOpts {
-        hop_frames: ms(cfg.hop_ms),
-        lookahead_frames: ms(cfg.lookahead_ms),
-        slack_frames: ms(cfg.slack_ms),
-        denoise: cfg.denoise,
-        workers: cfg.workers.max(1),
-    };
     // Loading a 60+ MB model blocks; keep it off the async runtime.
-    let n = opts.workers;
-    let models = tokio::task::spawn_blocking(move || {
-        (0..n)
+    tokio::task::spawn_blocking(move || {
+        (0..count.max(1))
             .map(|_| MdxModel::load(&path, params.clone(), device, threads))
             .collect::<Result<Vec<_>>>()
     })
     .await
-    .context("model load task")??;
-    let sep = MdxSeparator::with_models(models, opts);
+    .context("model load task")?
+}
+
+#[cfg(feature = "onnx")]
+async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn Separator>> {
+    let opts = stream_opts(cfg);
+    let models = load_models(cfg, models_dir, opts.workers).await?;
+    let sep = stems_sep::MdxSeparator::with_models(models, opts);
     tracing::info!(
         latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
         "mdx separator ready"

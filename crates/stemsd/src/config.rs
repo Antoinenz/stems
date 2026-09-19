@@ -28,7 +28,8 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KaraokeConfig {
-    /// `dsp` (centre-cancel, instant) or `mdx` (MDX-Net ONNX model).
+    /// `dsp` (centre-cancel, instant), `mdx` (MDX-Net ONNX model in
+    /// process) or `remote` (windows sent to a `stemsd worker`).
     pub backend: String,
     /// Model name for `mdx`, e.g. `UVR-MDX-NET-Inst_HQ_3` or `Kim_Vocal_2`.
     pub model: String,
@@ -49,6 +50,8 @@ pub struct KaraokeConfig {
     /// Parallel inference sessions. 2 keeps a GPU busy while the CPU side
     /// of the other window runs; costs one extra model copy in memory.
     pub workers: usize,
+    /// `host:port` of a `stemsd worker` for `backend = "remote"`.
+    pub remote: String,
 }
 
 impl Default for KaraokeConfig {
@@ -63,6 +66,7 @@ impl Default for KaraokeConfig {
             lookahead_ms: 0,
             denoise: false,
             workers: 1,
+            remote: String::new(),
         }
     }
 }

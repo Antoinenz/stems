@@ -57,6 +57,13 @@ enum Cmd {
     },
     /// List output devices.
     Devices,
+    /// Serve the configured MDX model to other stems instances
+    /// (`backend = "remote"`). Uses [karaoke] model/device/workers.
+    Worker {
+        /// Address to listen on.
+        #[arg(long, default_value = "0.0.0.0:7374")]
+        bind: String,
+    },
     /// Print the effective configuration and file locations (writes a
     /// default stems.toml if none exists).
     Config,
@@ -116,6 +123,10 @@ fn main() -> Result<()> {
                 );
             }
             Ok(())
+        }
+        Cmd::Worker { bind } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pipeline::run_worker(&cfg, &bind))
         }
         Cmd::Play {
             file,

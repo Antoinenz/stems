@@ -177,3 +177,36 @@ fn parse_device_type(s: &str) -> SpotifyDeviceType {
         SpotifyDeviceType::Tv
     })
 }
+
+/// `stemsd worker`: serve the configured model over TCP.
+#[cfg(feature = "onnx")]
+pub async fn run_worker(cfg: &Config, bind: &str) -> Result<()> {
+    let models_dir = crate::config::paths()?.models_dir;
+    let workers = cfg.karaoke.workers.max(1);
+    let models = crate::separator::load_models(&cfg.karaoke, models_dir, workers).await?;
+    let listener =
+        std::net::TcpListener::bind(bind).map_err(|e| anyhow::anyhow!("bind {bind}: {e}"))?;
+    tracing::info!(
+        bind,
+        model = cfg.karaoke.model,
+        sessions = workers,
+        "separation worker listening"
+    );
+    let name = cfg.karaoke.model.clone();
+    let serve =
+        tokio::task::spawn_blocking(move || stems_sep::remote::serve::run(listener, &name, models));
+    tokio::select! {
+        r = serve => r.map_err(|e| anyhow::anyhow!("worker task: {e}"))?,
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("worker stopping");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(feature = "onnx"))]
+pub async fn run_worker(_cfg: &Config, _bind: &str) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "this build has no ONNX support; rebuild stemsd with `--features onnx`"
+    ))
+}
