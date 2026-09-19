@@ -327,28 +327,30 @@ Native alternatives considered: **wgpu + glyphon/cosmic-text** (write SDF effect
 
 ## 7. MVP roadmap (3 phases)
 
-### Phase 1 — "It plays, it shows lyrics, it has a button" (PoC) — **mostly delivered**
+### Phase 1 — "It plays, it shows lyrics, it has a button" (PoC) — **delivered** (bar the stress demo)
 1. [x] Workspace, `stemsd`, `stems.toml`, logging, CI on Linux/Windows/macOS + web.
 2. [x] Spotify Connect source (librespot discovery) → ring → processor → cpal. Verified on Windows.
 3. [x] Clock (real-frame anchored, ±2 ms), flush on pause/seek, `Source`/`Sink`/`Separator` traits.
 3b. [x] File source, WAV/null sinks for headless verification.
 4. [x] Engine state machine + axum REST/WS on 7373; `ViewMode`, `Media`, commands.
 5. [x] `web/stage`: LRCLIB line lyrics, smooth transform scrolling, word wipe (interpolated or real word timings), modes `lyrics|karaoke|video|canvas`, Spotify Canvas background.
-6. [~] Centre-cancel DSP through the real mixer/crossfade path, toggled over WS/REST. `web/remote` **not started** (deferred by choice).
+6. [x] Centre-cancel DSP through the real mixer/crossfade path, toggled over WS/REST. `web/remote` phone page (karaoke, vocals, volume, stage mode, timing nudges) with QR on the stage (`/api/info`, `/api/remote-qr.svg`).
 7. [x] SQLite cache (tracks, lyrics, negative TTL, per-track offsets); local `.lrc` overrides incl. enhanced word tags.
 8. [ ] Stress-stage rendering demo on M1 + i7.
 9. [x] GPL-3.0-or-later.
 
-Known/open: phone timeline runs ~0.6 s ahead of audible by design (`controller_lead_ms`); libmdns drop-panic worked around at shutdown; LRC timing vs master varies → `lyrics_offset_ms`.
+Known/open: phone timeline runs ahead of audible by design (`controller_lead_ms`, ≈ separator latency + buffers); libmdns drop-panic worked around at shutdown; LRC timing vs master varies → `lyrics_offset_ms`.
+
+Measured (Sep 2026): M1 Air GPU ≈ 0.45 s per 5.9 s window (Core ML MLProgram), Iris Xe DirectML ≈ 2 s, M1 CPU ≈ 4.6 s. Fanless M1 throttles every ~3 min under 6× overlap + denoise; thinning absorbs it.
 
 ### Phase 2 — "Real karaoke" (~6–10 weeks)
-1. `stems-sep::ort` with MDX-Net ONNX; EP auto-select (CUDA/CoreML/DirectML/CPU); model download manifest.
-2. Mode A pre-buffering via librespot prefetch + `NextTrackHint`; stem cache.
-3. Mode B streaming DelayLine with overlap-add; adaptive fallback ladder (MDX → UMX → DSP).
-4. `remote` separator backend (P2000 server as worker) — also unlocks "one GPU box serves the party".
+1. [x] `stems-sep::mdx` with MDX-Net ONNX (UVR weights, download on first use); EPs CUDA/DirectML/CoreML(GPU|ANE|all)/CPU; batch dim fixed at load (ANE-compatible); batched x/−x denoise.
+2. [ ] Mode A pre-buffering via librespot prefetch + `NextTrackHint`; stem cache.
+3. [x] Mode B streaming: overlapping windows, weighted overlap-add, lookahead, parallel sessions (`workers`), dry fallback, and load-adaptive **overlap thinning** (thermal throttling degrades quality, not continuity). Fallback ladder to UMX/DSP still open.
+4. [x] `remote` separator backend: `stemsd worker` serves pooled sessions over a small TCP protocol; players use `backend = "remote"`.
 5. AirPlay via shairport-sync sidecar: display mode with latency-offset compensation (multiroom-correct), then karaoke mode; AirPlay 1 first on Windows, AirPlay 2 + nqptp on macOS/Linux.
 5b. **Rebeam**: `stems-sink-airplay` on OpenAir crates; latency-aligned multi-sink mixer.
-5c. Video prefetch pipeline (yt-dlp, H.264 720p cache) — stage `video` mode and `media.video_url` already exist; only the fetcher is missing.
+5c. [x] Video prefetch pipeline (yt-dlp → `<cache>/video/`, served with Range support at `/media/video/`); per-track `video_offset_ms` nudge persisted. Automatic alignment still open (Phase 3.1).
 5d. Word-level timings by forced alignment on the vocal stem → `LyricLine.words` (model, parser and stage already support them).
 6. Word-level lyrics by forced alignment on the vocal stem (whisper.cpp / CTC via ort).
 7. Tauri 2 shell: stage fullscreen on chosen display, host panel window; installers for macOS/Windows.
