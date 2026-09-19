@@ -108,6 +108,7 @@ fn spawn_server(cfg: &Config, web_dir: Option<PathBuf>, ch: &Channels) {
         .flatten();
     let server = Server {
         addr,
+        device_name: cfg.device_name.clone(),
         web_dir,
         video_dir,
     };
