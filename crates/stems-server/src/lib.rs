@@ -35,6 +35,26 @@ pub struct Channels {
     pub commands: mpsc::Sender<Command>,
 }
 
+/// What a client needs to point other devices at this box.
+#[derive(Serialize)]
+pub struct Info {
+    /// Name this box advertises to Spotify Connect / AirPlay.
+    pub device_name: String,
+    /// Best guess at the LAN address of the server, `host:port`.
+    pub lan_host: Option<String>,
+    pub remote_url: Option<String>,
+    pub stage_url: Option<String>,
+}
+
+/// The LAN interface a default route would use. No packet is sent: a
+/// UDP "connect" only picks the source address.
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?; // TEST-NET; never routed anywhere
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Outbound<'a> {
@@ -45,18 +65,30 @@ enum Outbound<'a> {
 
 pub struct Server {
     pub addr: SocketAddr,
+    pub device_name: String,
     pub web_dir: Option<PathBuf>,
     /// Downloaded music videos, served at `/media/video/`.
     pub video_dir: Option<PathBuf>,
 }
 
 impl Server {
-    pub fn router(ch: Channels, web_dir: Option<&Path>, video_dir: Option<&Path>) -> Router {
+    pub fn router(
+        ch: Channels,
+        device_name: &str,
+        web_dir: Option<&Path>,
+        video_dir: Option<&Path>,
+    ) -> Router {
+        let device_name = std::sync::Arc::new(device_name.to_string());
         let mut app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .route("/api/state", get(get_state))
             .route("/api/command", post(post_command))
             .route("/api/ws", get(ws_upgrade))
+            .route("/api/info", {
+                let name = device_name.clone();
+                get(move |headers| async move { Json(info(&headers, &name)) })
+            })
+            .route("/api/remote-qr.svg", get(get_remote_qr))
             .with_state(ch)
             .layer(CorsLayer::permissive());
 
@@ -91,12 +123,53 @@ impl Server {
 
     /// Bind and serve until the task is dropped / the process exits.
     pub async fn serve(self, ch: Channels) -> Result<()> {
-        let app = Self::router(ch, self.web_dir.as_deref(), self.video_dir.as_deref());
+        let app = Self::router(
+            ch,
+            &self.device_name,
+            self.web_dir.as_deref(),
+            self.video_dir.as_deref(),
+        );
         let listener = tokio::net::TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind {}", self.addr))?;
         tracing::info!(addr = %self.addr, "http server listening");
         axum::serve(listener, app).await.context("http server")
+    }
+}
+
+fn info(headers: &axum::http::HeaderMap, device_name: &str) -> Info {
+    let port = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.rsplit(':').next())
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(80);
+    let lan_host = lan_ip().map(|ip| format!("{ip}:{port}"));
+    Info {
+        device_name: device_name.to_string(),
+        remote_url: lan_host.as_ref().map(|h| format!("http://{h}/remote/")),
+        stage_url: lan_host.as_ref().map(|h| format!("http://{h}/stage/")),
+        lan_host,
+    }
+}
+
+/// QR code of the remote's LAN URL, for the stage to show.
+async fn get_remote_qr(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    let Some(url) = info(&headers, "").remote_url else {
+        return (StatusCode::NOT_FOUND, "no LAN address").into_response();
+    };
+    match qrcode::QrCode::new(url.as_bytes()) {
+        Ok(code) => {
+            let svg = code
+                .render::<qrcode::render::svg::Color>()
+                .min_dimensions(160, 160)
+                .quiet_zone(true)
+                .dark_color(qrcode::render::svg::Color("#000"))
+                .light_color(qrcode::render::svg::Color("#fff"))
+                .build();
+            ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], svg).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -201,7 +274,7 @@ mod tests {
     async fn state_endpoint_returns_json() {
         let (ch, state_tx, _rx) = channels();
         state_tx.send_modify(|s| s.volume = 0.42);
-        let app = Server::router(ch, None, None);
+        let app = Server::router(ch, "test", None, None);
         let res = app
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
@@ -218,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn command_endpoint_forwards_to_engine() {
         let (ch, _state_tx, mut rx) = channels();
-        let app = Server::router(ch, None, None);
+        let app = Server::router(ch, "test", None, None);
         let res = app
             .oneshot(
                 Request::post("/api/command")
