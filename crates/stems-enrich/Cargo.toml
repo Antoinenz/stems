@@ -15,7 +15,7 @@ serde_json.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["process", "fs"] }
 
 [dev-dependencies]
-tokio.workspace = true
 rustls.workspace = true

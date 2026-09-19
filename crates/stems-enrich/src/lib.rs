@@ -7,8 +7,10 @@ pub mod cache;
 pub mod local;
 pub mod lrc;
 pub mod lrclib;
+pub mod video;
 
 pub use cache::{Cache, Cached};
 pub use local::LocalLyrics;
 pub use lrc::parse_lrc;
 pub use lrclib::LrcLib;
+pub use video::VideoFetcher;
