@@ -75,4 +75,5 @@ export type Command =
   | { cmd: 'set_vocal_gain'; gain: number }
   | { cmd: 'set_volume'; level: number }
   | { cmd: 'set_lyrics_offset'; offset_ms: number }
-  | { cmd: 'set_view_mode'; mode: ViewMode };
+  | { cmd: 'set_view_mode'; mode: ViewMode }
+  | { cmd: 'set_video_offset'; offset_ms: number };

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { StemsClient } from './lib/client.svelte';
+  import { StemsClient } from '../../shared/client.svelte';
   import { activeLine } from './lib/lyrics';
-  import type { ViewMode } from './lib/types';
+  import type { ViewMode } from '../../shared/types';
   import Background from './Background.svelte';
   import LyricsView from './LyricsView.svelte';
   import NowPlaying from './NowPlaying.svelte';

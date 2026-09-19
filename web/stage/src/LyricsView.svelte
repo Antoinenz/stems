@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { lineProgress, lineWordSpans } from './lib/lyrics';
-  import type { Lyrics } from './lib/types';
+  import type { Lyrics } from '../../shared/types';
 
   let {
     lyrics,

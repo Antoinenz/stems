@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { KaraokeState, PlaybackStatus, TrackRef } from './lib/types';
+  import type { KaraokeState, PlaybackStatus, TrackRef } from '../../shared/types';
 
   let {
     track,

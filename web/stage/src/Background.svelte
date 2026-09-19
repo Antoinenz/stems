@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Media, TrackRef, ViewMode } from './lib/types';
+  import type { Media, TrackRef, ViewMode } from '../../shared/types';
 
   let {
     track,

@@ -1,4 +1,4 @@
-import type { Lyrics } from './types';
+import type { Lyrics } from '../../../shared/types';
 
 /** Longest a line stays "in progress" when the next timestamp is far away. */
 const MAX_LINE_MS = 6000;
