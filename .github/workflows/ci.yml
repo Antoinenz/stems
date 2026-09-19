@@ -57,3 +57,9 @@ jobs:
         working-directory: web/stage
       - run: pnpm build
         working-directory: web/stage
+      - run: pnpm install --frozen-lockfile
+        working-directory: web/remote
+      - run: pnpm check
+        working-directory: web/remote
+      - run: pnpm build
+        working-directory: web/remote

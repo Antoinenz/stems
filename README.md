@@ -22,12 +22,17 @@ Full design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Running (pre-alpha)
 
 ```sh
-cd web/stage && pnpm install && pnpm build && cd ../..   # the TV page
+cd web/stage && pnpm install && pnpm build && cd ../..    # the TV page
+cd web/remote && pnpm install && pnpm build && cd ../..   # the phone remote
 cargo run -p stemsd -- spotify --name "stems"             # Spotify Connect receiver
 ```
 
-Pick **stems** in the Spotify app, then open `http://<host>:7373/stage/`.
-Other commands: `stemsd play <file> [--title … --artist …]`, `stemsd devices`, `stemsd config`.
+Pick **stems** in the Spotify app, then open `http://<host>:7373/stage/` on the TV. Guests
+control it from `http://<host>:7373/remote/` on their phones — the stage shows a QR code for
+it while idle and a small one in the corner while playing (`/stage/?qr=0` hides it). The
+remote has the karaoke toggle, vocal level, volume, stage mode, and lyric/video timing nudges.
+Other commands: `stemsd play <file> [--title … --artist …]`, `stemsd devices`, `stemsd config`,
+`stemsd worker`.
 
 ### Stage view modes
 
@@ -38,6 +43,7 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 ### API (port 7373)
 
 - `GET /api/state` — now playing, lyrics, karaoke state, view mode
+- `GET /api/info` — LAN URLs of the stage and remote; `GET /api/remote-qr.svg` — QR of the latter
 - `WS /api/ws` — state on change + clock at 10 Hz; accepts commands
 - `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
   `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`,
