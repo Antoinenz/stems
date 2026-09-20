@@ -107,7 +107,11 @@ pub async fn load_models(
     // Loading a 60+ MB model blocks; keep it off the async runtime.
     tokio::task::spawn_blocking(move || {
         (0..count.max(1))
-            .map(|_| MdxModel::load(&path, params.clone(), device, threads, batch))
+            .map(|_| {
+                let mut m = MdxModel::load(&path, params.clone(), device, threads, batch)?;
+                m.warm_up()?;
+                Ok(m)
+            })
             .collect::<Result<Vec<_>>>()
     })
     .await

@@ -147,6 +147,21 @@ impl MdxModel {
         })
     }
 
+    /// Run one silent window so provider compilation (Core ML builds its
+    /// program on first inference, DirectML/CUDA warm their kernels)
+    /// happens now rather than on the first real window.
+    pub fn warm_up(&mut self) -> Result<()> {
+        let zeros = vec![0.0f32; self.params.chunk_size() * 2];
+        let started = Instant::now();
+        self.run_window(&zeros, self.batch_denoise)?;
+        tracing::info!(
+            ms = started.elapsed().as_millis() as u64,
+            provider = self.provider,
+            "mdx session warmed up"
+        );
+        Ok(())
+    }
+
     pub fn params(&self) -> &MdxParams {
         &self.params
     }
