@@ -27,6 +27,7 @@ fn stream_opts(cfg: &KaraokeConfig) -> stems_sep::StreamOpts {
         slack_frames: ms(cfg.slack_ms),
         denoise: cfg.denoise,
         workers: cfg.workers.max(1),
+        realtime: true,
     }
 }
 

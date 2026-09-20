@@ -33,6 +33,9 @@ pub struct StreamOpts {
     /// processed concurrently so the accelerator is not idle while one
     /// window's CPU-side STFT/iSTFT and transfers run.
     pub workers: usize,
+    /// `true` (playback): never block, thin or drop windows when late.
+    /// `false` (offline): block for results and process every window.
+    pub realtime: bool,
 }
 
 impl Default for StreamOpts {
@@ -43,6 +46,7 @@ impl Default for StreamOpts {
             slack_frames: 44_100 * 2,
             denoise: false,
             workers: 1,
+            realtime: true,
         }
     }
 }
@@ -114,6 +118,7 @@ pub struct MdxSeparator {
     since_thin: u32,
     thinning: bool,
     starved: bool,
+    realtime: bool,
     provider: &'static str,
 }
 
@@ -271,6 +276,7 @@ impl MdxSeparator {
             since_thin: 0,
             thinning: false,
             starved: false,
+            realtime: opts.realtime,
             provider,
         };
         s.prime();
@@ -367,6 +373,14 @@ impl MdxSeparator {
             let end = self.next_window_end;
             let start = end - chunk;
             self.next_window_end += self.hop as i64;
+            if !self.realtime {
+                // offline: bounded queue, every window processed
+                while self.in_flight >= self.max_in_flight && self.collect_blocking() {}
+                if !self.dispatch(start, end) {
+                    break;
+                }
+                continue;
+            }
             if self.should_thin(end) {
                 // Predicted late: thin the overlap instead of queueing.
                 // Neighbouring windows still cover these frames.
@@ -401,54 +415,87 @@ impl MdxSeparator {
                 self.thinning = false;
                 self.thinned_episode = 0;
             }
-            let mut window = vec![0.0f32; chunk as usize * 2];
-            for f in start.max(self.history_start)..end {
-                let src = ((f - self.history_start) as usize) * 2;
-                let dst = ((f - start) as usize) * 2;
-                window[dst] = self.history[src];
-                window[dst + 1] = self.history[src + 1];
-            }
-            let job = Job {
-                generation: self.generation,
-                seq: self.dispatch_seq,
-                start,
-                window,
-            };
-            if self.to_worker.send(job).is_err() {
+            if !self.dispatch(start, end) {
                 break;
             }
-            self.dispatch_seq += 1;
-            self.in_flight += 1;
-            self.last_dispatched_end = end;
         }
     }
 
-    fn collect_results(&mut self) {
-        while let Ok(done) = self.from_worker.try_recv() {
-            if done.generation != self.generation {
-                continue;
-            }
-            self.in_flight = self.in_flight.saturating_sub(1);
-            self.pred_ms = if self.pred_ms <= 0.0 {
-                done.elapsed_ms
-            } else {
-                // fast attack, slow decay: react to a throttle quickly,
-                // ease back to full overlap once it clears
-                let a = if done.elapsed_ms > self.pred_ms {
-                    0.5
-                } else {
-                    0.1
-                };
-                self.pred_ms + a * (done.elapsed_ms - self.pred_ms)
-            };
-            self.pending.insert(done.seq, done);
+    /// Send the window `[start, end)` to the workers.
+    fn dispatch(&mut self, start: i64, end: i64) -> bool {
+        let chunk = self.params.chunk_size() as i64;
+        let mut window = vec![0.0f32; chunk as usize * 2];
+        for f in start.max(self.history_start)..end {
+            let src = ((f - self.history_start) as usize) * 2;
+            let dst = ((f - start) as usize) * 2;
+            window[dst] = self.history[src];
+            window[dst + 1] = self.history[src + 1];
         }
+        let job = Job {
+            generation: self.generation,
+            seq: self.dispatch_seq,
+            start,
+            window,
+        };
+        if self.to_worker.send(job).is_err() {
+            return false;
+        }
+        self.dispatch_seq += 1;
+        self.in_flight += 1;
+        self.last_dispatched_end = end;
+        true
+    }
+
+    /// Block for one result (offline mode). `false` when the workers are gone
+    /// or nothing is in flight.
+    fn collect_blocking(&mut self) -> bool {
+        if self.in_flight == 0 {
+            return false;
+        }
+        match self.from_worker.recv() {
+            Ok(done) => {
+                self.on_result(done);
+                self.drain_pending();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn on_result(&mut self, done: Done) {
+        if done.generation != self.generation {
+            return;
+        }
+        self.in_flight = self.in_flight.saturating_sub(1);
+        self.pred_ms = if self.pred_ms <= 0.0 {
+            done.elapsed_ms
+        } else {
+            // fast attack, slow decay: react to a throttle quickly,
+            // ease back to full overlap once it clears
+            let a = if done.elapsed_ms > self.pred_ms {
+                0.5
+            } else {
+                0.1
+            };
+            self.pred_ms + a * (done.elapsed_ms - self.pred_ms)
+        };
+        self.pending.insert(done.seq, done);
+    }
+
+    fn drain_pending(&mut self) {
         while let Some(done) = self.pending.remove(&self.next_seq) {
             self.next_seq += 1;
             self.accumulate(done.start, &done.inst);
             let end = done.start + self.params.chunk_size() as i64;
             self.finalize_upto(end - self.lookahead as i64);
         }
+    }
+
+    fn collect_results(&mut self) {
+        while let Ok(done) = self.from_worker.try_recv() {
+            self.on_result(done);
+        }
+        self.drain_pending();
     }
 
     fn accumulate(&mut self, start: i64, inst: &[f32]) {
@@ -505,6 +552,9 @@ impl Separator for MdxSeparator {
         self.dispatch_windows();
         self.collect_results();
         let frames = instrumental.len() / 2;
+        if !self.realtime {
+            while self.ready_valid.len() < frames && self.collect_blocking() {}
+        }
         if self.ready_valid.len() < frames {
             if !self.starved {
                 tracing::warn!("mdx separator starved: inference slower than real time");
@@ -615,6 +665,7 @@ mod tests {
             slack_frames: 1536,
             denoise: false,
             workers: 1,
+            realtime: true,
         };
         assert_eq!(params.chunk_size(), 4096);
         check_identity(opts);
@@ -628,6 +679,7 @@ mod tests {
             slack_frames: 1536,
             denoise: false,
             workers: 3,
+            realtime: true,
         });
     }
 
@@ -642,6 +694,7 @@ mod tests {
             slack_frames: 8192,
             denoise: false,
             workers: 1,
+            realtime: true,
         };
         let r = run_stream(opts, 120_000, 35, 2902);
         assert!(r.thinned > 5, "thinned {}", r.thinned);
