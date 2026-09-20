@@ -204,12 +204,23 @@ pub mod serve {
         stream.write_all(hello_json)?;
         stream.flush()?;
         loop {
-            let mut flag = [0u8; 1];
-            if stream.read_exact(&mut flag).is_err() {
+            let mut head = [0u8; 5];
+            if stream.read_exact(&mut head).is_err() {
                 return Ok(()); // client closed
             }
-            let denoise = flag[0] != 0;
-            let n = read_u32(&mut stream)?;
+            // A browser pointed at this port: say so instead of failing.
+            if head.starts_with(b"GET ") || head.starts_with(b"HEAD") {
+                let body = "stems separation worker: this is a raw TCP port for stemsd \
+                            (backend = \"remote\"), not a web page.\n";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                return Ok(());
+            }
+            let denoise = head[0] != 0;
+            let n = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
             let window = read_samples(&mut stream, n)?;
             // borrow a runner; the receiver lock is only held while waiting
             let mut runner = {
