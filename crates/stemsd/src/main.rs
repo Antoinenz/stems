@@ -7,6 +7,7 @@ mod config;
 mod engine;
 mod pipeline;
 mod separator;
+mod web;
 
 use std::path::PathBuf;
 
@@ -92,6 +93,11 @@ fn main() -> Result<()> {
         let d = PathBuf::from("web");
         d.is_dir().then_some(d)
     });
+    if let Some(d) = &web_dir {
+        if std::env::var_os("STEMS_NO_WEB_BUILD").is_none() {
+            web::ensure_built(d);
+        }
+    }
     let mut cfg = match &cli.config {
         Some(p) => Config::load_from(p)?,
         None => Config::load()?,
