@@ -72,11 +72,19 @@ enum Cmd {
 
 fn main() -> Result<()> {
     // User filter (RUST_LOG) or `info`, but always mute libmdns' per-packet
-    // parse warnings: other devices' NSEC queries trip it constantly.
+    // parse warnings (other devices' NSEC queries trip it constantly) and
+    // symphonia's per-frame "skipping junk" spam when librespot feeds it
+    // an undecryptable stream after a session drop.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".into())
         .add_directive("libmdns=error".parse().expect("valid directive"))
-        .add_directive("librespot_discovery=warn".parse().expect("valid directive"));
+        .add_directive("librespot_discovery=warn".parse().expect("valid directive"))
+        .add_directive(
+            "symphonia_bundle_mp3=error"
+                .parse()
+                .expect("valid directive"),
+        )
+        .add_directive("symphonia_core=error".parse().expect("valid directive"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
