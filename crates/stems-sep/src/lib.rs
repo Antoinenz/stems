@@ -4,6 +4,8 @@
 //! in-process, sidecar, remote worker) implement the same trait with a
 //! non-zero `latency_frames()` that the pipeline turns into a delay line.
 
+#[cfg(feature = "onnx")]
+pub mod align;
 pub mod dsp;
 #[cfg(feature = "onnx")]
 pub mod mdx;

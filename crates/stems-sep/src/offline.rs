@@ -189,6 +189,25 @@ impl StemBuffer {
         (best.1 > 0.0).then_some(best)
     }
 
+    /// Mono vocals (mix − instrumental) for `[from, to)`, or `None` while
+    /// that region is not computed yet.
+    pub fn read_vocals_mono(&self, from: usize, to: usize) -> Option<Vec<f32>> {
+        let to = to.min(self.total_frames);
+        if from >= to || !self.is_covered(from, to) {
+            return None;
+        }
+        let ch = CHANNELS as usize;
+        let d = self.data.lock().expect("stem data");
+        Some(
+            (from..to)
+                .map(|i| {
+                    let inst = 0.5 * (d[i * ch] + d[i * ch + 1]);
+                    self.mix_mono[i] - inst
+                })
+                .collect(),
+        )
+    }
+
     /// Copy `out.len() / 2` frames starting at `frame`; `false` if not
     /// (yet) available.
     pub fn read(&self, frame: u64, out: &mut [f32]) -> bool {

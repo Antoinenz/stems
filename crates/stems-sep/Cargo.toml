@@ -35,3 +35,7 @@ tracing-subscriber.workspace = true
 [[example]]
 name = "mdx_window"
 required-features = ["onnx"]
+
+[[example]]
+name = "align_smoke"
+required-features = ["onnx"]
