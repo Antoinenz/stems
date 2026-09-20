@@ -70,7 +70,8 @@ max_height = 1080
 
 With this on, every track triggers a `yt-dlp` search (`<artist> - <title> official video`) and a
 one-time download into `<cache dir>/video/`; when it lands the stage's `video` mode plays it
-from `/media/video/…` on the track's timeline. Videos and streams rarely share a timeline
+from `/media/video/…` on the track's timeline. The download for the announced next track
+starts as soon as Spotify names it, so it is usually on disk before the track begins. Videos and streams rarely share a timeline
 (intros, edits): `set_video_offset` shifts the video in ms until automatic alignment exists.
 
 ### Karaoke backends

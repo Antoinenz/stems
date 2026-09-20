@@ -91,6 +91,8 @@ pub struct Engine {
     /// Music video downloads (`[video] enabled`), resolved per track.
     video: Option<VideoFetcher>,
     video_task: Option<JoinHandle<()>>,
+    /// Download for the announced next track, started ahead of time.
+    video_next: Option<(TrackId, JoinHandle<()>)>,
     video_tx: mpsc::Sender<(TrackId, Option<String>)>,
     video_rx: mpsc::Receiver<(TrackId, Option<String>)>,
     /// Pre-buffered separation (`mode = "prebuffer"`): whole tracks are
@@ -152,6 +154,7 @@ impl Engine {
             lyrics_rx,
             video: None,
             video_task: None,
+            video_next: None,
             video_tx,
             video_rx,
             prebuffer: None,
@@ -410,6 +413,7 @@ impl Engine {
                     }
                 }
                 self.spawn_next_lyrics(track.clone());
+                self.spawn_next_video(track.clone());
                 self.state_tx.send_modify(|s| {
                     s.next_track = Some(track);
                     s.revision += 1;
@@ -767,6 +771,44 @@ impl Engine {
         }
     }
 
+    /// Start downloading the next track's video now so it is on disk
+    /// when the track starts.
+    fn spawn_next_video(&mut self, track: TrackRef) {
+        let Some(fetcher) = self.video.clone() else {
+            return;
+        };
+        // Spotify sometimes announces the playing track as "next"; its
+        // download (if any) is already under way.
+        if self.state_tx.borrow().track.as_ref().map(|t| &t.id) == Some(&track.id) {
+            return;
+        }
+        if let Some((id, t)) = self.video_next.as_ref() {
+            if *id == track.id && !t.is_finished() {
+                return;
+            }
+        }
+        if let Some((_, t)) = self.video_next.take() {
+            t.abort();
+        }
+        if fetcher.cached(&track).is_some() {
+            return;
+        }
+        tracing::info!(title = %track.title, "pre-fetching music video for next track");
+        let id = track.id.clone();
+        let task = tokio::spawn(async move {
+            match fetcher.fetch(&track).await {
+                Ok(Some(_)) => {
+                    tracing::info!(title = %track.title, "music video ready for next track")
+                }
+                Ok(None) => {
+                    tracing::info!(title = %track.title, "no music video found for next track")
+                }
+                Err(e) => tracing::warn!("music video (next track): {e:#}"),
+            }
+        });
+        self.video_next = Some((id, task));
+    }
+
     fn spawn_video_fetch(&mut self, track: TrackRef) {
         let Some(fetcher) = self.video.clone() else {
             return;
@@ -774,8 +816,21 @@ impl Engine {
         if let Some(t) = self.video_task.take() {
             t.abort();
         }
+        // A pre-fetch for this very track keeps running; the fetch below
+        // resolves from disk once it lands (or immediately if it's done).
+        let prefetch = match self.video_next.take() {
+            Some((id, t)) if id == track.id => Some(t),
+            Some((_, t)) => {
+                t.abort();
+                None
+            }
+            None => None,
+        };
         let tx = self.video_tx.clone();
         self.video_task = Some(tokio::spawn(async move {
+            if let Some(t) = prefetch {
+                let _ = t.await;
+            }
             let id = track.id.clone();
             let url = match fetcher.fetch(&track).await {
                 Ok(Some(path)) => path
