@@ -134,6 +134,22 @@ async fn build_runners(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Runne
     }
 }
 
+/// Load the word-alignment model, downloading it on first use.
+#[cfg(feature = "onnx")]
+pub async fn build_aligner(
+    models_dir: PathBuf,
+    threads: usize,
+) -> Result<stems_sep::align::Aligner> {
+    use stems_sep::align::{Aligner, MODEL_NAME, MODEL_URL};
+    let path = models_dir.join(format!("{MODEL_NAME}.onnx"));
+    if !path.is_file() {
+        download(MODEL_URL, &path).await?;
+    }
+    tokio::task::spawn_blocking(move || Aligner::load(&path, threads))
+        .await
+        .context("aligner load task")?
+}
+
 /// Resolve and (if needed) download the configured model; load
 /// `count` sessions.
 #[cfg(feature = "onnx")]

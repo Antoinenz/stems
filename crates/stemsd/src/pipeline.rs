@@ -54,23 +54,41 @@ fn build_chain(
 struct Separation {
     audio: Box<dyn Separator>,
     offline: Option<stems_sep::OfflineSeparator>,
+    #[cfg(feature = "onnx")]
+    aligner: Option<stems_sep::align::Aligner>,
 }
 
 async fn separator(cfg: &Config) -> Result<Separation> {
     let models_dir = crate::config::paths()?.models_dir;
     match cfg.karaoke.mode.as_str() {
         "prebuffer" => {
-            let offline = crate::separator::build_offline(&cfg.karaoke, models_dir).await?;
+            let offline = crate::separator::build_offline(&cfg.karaoke, models_dir.clone()).await?;
             let audio = Box::new(stems_sep::CachedStemSeparator::new(offline.store()));
             tracing::info!("karaoke mode: prebuffer (zero-latency, stems computed ahead)");
+            #[cfg(feature = "onnx")]
+            let aligner = if cfg.lyrics.align {
+                match crate::separator::build_aligner(models_dir, cfg.karaoke.threads).await {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        tracing::warn!("word alignment unavailable: {e:#}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             Ok(Separation {
                 audio,
                 offline: Some(offline),
+                #[cfg(feature = "onnx")]
+                aligner,
             })
         }
         "streaming" => Ok(Separation {
             audio: crate::separator::build(&cfg.karaoke, models_dir).await?,
             offline: None,
+            #[cfg(feature = "onnx")]
+            aligner: None,
         }),
         other => Err(anyhow::anyhow!(
             "unknown karaoke mode `{other}` (streaming, prebuffer)"
@@ -228,6 +246,11 @@ pub async fn play_file(
         Some(off) => engine.with_prebuffer(off, std::sync::Arc::new(FileFetcher)),
         None => engine,
     };
+    #[cfg(feature = "onnx")]
+    let engine = match sep.aligner {
+        Some(a) => engine.with_aligner(a),
+        None => engine,
+    };
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
@@ -284,6 +307,11 @@ pub async fn run_spotify(
     };
     let engine = match sep.offline {
         Some(off) => engine.with_prebuffer(off, std::sync::Arc::new(SpotifyFetcher(fetcher))),
+        None => engine,
+    };
+    #[cfg(feature = "onnx")]
+    let engine = match sep.aligner {
+        Some(a) => engine.with_aligner(a),
         None => engine,
     };
     spawn_server(cfg, web_dir, &ch);

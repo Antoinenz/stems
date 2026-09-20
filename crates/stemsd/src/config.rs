@@ -24,6 +24,22 @@ pub struct Config {
     pub spotify: SpotifyConfig,
     pub karaoke: KaraokeConfig,
     pub video: VideoConfig,
+    pub lyrics: LyricsConfig,
+}
+
+/// Lyric enrichment beyond the provider's line timings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricsConfig {
+    /// Word-level timing by forced alignment on the separated vocals
+    /// (`mode = "prebuffer"` only; downloads a ~95 MB speech model once).
+    pub align: bool,
+}
+
+impl Default for LyricsConfig {
+    fn default() -> Self {
+        Self { align: true }
+    }
 }
 
 /// Music videos for the stage's `video` mode, fetched with yt-dlp.
@@ -124,6 +140,7 @@ impl Default for Config {
             spotify: SpotifyConfig::default(),
             karaoke: KaraokeConfig::default(),
             video: VideoConfig::default(),
+            lyrics: LyricsConfig::default(),
         }
     }
 }

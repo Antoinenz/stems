@@ -29,6 +29,36 @@ struct Prebuffer {
     tasks: HashMap<TrackId, JoinHandle<()>>,
     tx: mpsc::Sender<(TrackId, Arc<Vec<f32>>, u64, bool)>,
     rx: mpsc::Receiver<(TrackId, Arc<Vec<f32>>, u64, bool)>,
+    /// Word-level lyric alignment on the separated vocals.
+    align: Option<align::AlignWorker>,
+    /// Track whose lyrics are being (or have been) aligned.
+    aligning: Option<TrackId>,
+}
+
+#[cfg(feature = "onnx")]
+mod align {
+    pub use stems_sep::align::worker::{AlignWorker, Aligned};
+}
+
+#[cfg(not(feature = "onnx"))]
+mod align {
+    use std::sync::Arc;
+    use stems_core::{LyricLine, LyricWord, TrackId};
+    use stems_sep::StemBuffer;
+
+    pub struct Aligned {
+        pub track: TrackId,
+        pub line: usize,
+        pub words: Vec<LyricWord>,
+    }
+
+    /// No ONNX in this build: alignment is unavailable.
+    pub struct AlignWorker;
+
+    impl AlignWorker {
+        pub fn submit(&self, _t: TrackId, _b: Arc<StemBuffer>, _l: Vec<LyricLine>) {}
+        pub fn cancel(&self) {}
+    }
 }
 
 pub struct Channels {
@@ -62,6 +92,9 @@ pub struct Engine {
     /// Pre-buffered separation (`mode = "prebuffer"`): whole tracks are
     /// fetched and separated ahead of the playhead.
     prebuffer: Option<Prebuffer>,
+    #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+    align_tx: mpsc::Sender<align::Aligned>,
+    align_rx: mpsc::Receiver<align::Aligned>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -92,6 +125,7 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
         let (video_tx, video_rx) = mpsc::channel(8);
+        let (align_tx, align_rx) = mpsc::channel(64);
         let mut clock = Clock::new();
         clock.set_delay(Duration::from_secs_f64(
             processor.latency_frames() as f64 / stems_core::SAMPLE_RATE as f64,
@@ -117,6 +151,8 @@ impl Engine {
             video_tx,
             video_rx,
             prebuffer: None,
+            align_tx,
+            align_rx,
             exit_on_end,
             tick_count: 0,
         };
@@ -154,7 +190,25 @@ impl Engine {
             tasks: HashMap::new(),
             tx,
             rx,
+            align: None,
+            aligning: None,
         });
+        self
+    }
+
+    /// Enable word-level lyric alignment (needs pre-buffering).
+    #[cfg(feature = "onnx")]
+    pub fn with_aligner(mut self, aligner: stems_sep::align::Aligner) -> Self {
+        if let Some(p) = self.prebuffer.as_mut() {
+            let tx = self.align_tx.clone();
+            let worker = align::AlignWorker::new(
+                aligner,
+                Box::new(move |a| {
+                    let _ = tx.blocking_send(a);
+                }),
+            );
+            p.align = Some(worker);
+        }
         self
     }
 
@@ -191,6 +245,7 @@ impl Engine {
                         None => std::future::pending().await,
                     }
                 } => self.on_pcm(id, pcm, wanted, urgent),
+                Some(a) = self.align_rx.recv() => self.on_aligned(a),
                 _ = ticker.tick() => self.tick(),
             }
         }
@@ -230,6 +285,14 @@ impl Engine {
                 self.set_anchor(&track.id, position_ms, at_frame);
                 self.focus_stems(&track.id);
                 self.ensure_stems(&track.id, position_ms, true);
+                if let Some(p) = self.prebuffer.as_mut() {
+                    if p.aligning.as_ref() != Some(&track.id) {
+                        p.aligning = None;
+                        if let Some(w) = p.align.as_ref() {
+                            w.cancel();
+                        }
+                    }
+                }
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
@@ -270,6 +333,7 @@ impl Engine {
                     Cached::Miss => self.spawn_lyrics_lookup(track.clone()),
                 }
                 self.spawn_video_fetch(track);
+                self.maybe_align();
             }
             SourceEvent::Playing {
                 position_ms,
@@ -439,6 +503,7 @@ impl Engine {
                 false
             }
         });
+        self.maybe_align();
     }
 
     fn spawn_lyrics_lookup(&mut self, track: TrackRef) {
@@ -550,6 +615,67 @@ impl Engine {
             wanted
         };
         p.offline.submit(id, pcm, wanted, urgent);
+        self.maybe_align();
+    }
+
+    /// Start word alignment once the playing track has both a stem buffer
+    /// and synced lyrics (whichever arrives last triggers it).
+    fn maybe_align(&mut self) {
+        let Some(p) = self.prebuffer.as_mut() else {
+            return;
+        };
+        let Some(worker) = p.align.as_ref() else {
+            return;
+        };
+        let (track, lyrics) = {
+            let s = self.state_tx.borrow();
+            (s.track.clone(), s.lyrics.clone())
+        };
+        let Some(track) = track else { return };
+        if p.aligning.as_ref() == Some(&track.id) {
+            return;
+        }
+        let Some(lyrics) = lyrics.filter(|l| l.is_synced()) else {
+            return;
+        };
+        if lyrics.lines.iter().all(|l| !l.words.is_empty()) {
+            return; // already word-timed (enhanced LRC or a previous run)
+        }
+        let Some(buf) = p.offline.store().get(&track.id) else {
+            return;
+        };
+        tracing::info!(title = %track.title, lines = lyrics.lines.len(), "aligning lyrics to vocals");
+        p.aligning = Some(track.id.clone());
+        worker.submit(track.id.clone(), buf, lyrics.lines);
+    }
+
+    fn on_aligned(&mut self, a: align::Aligned) {
+        let global = self.lyrics_offset_ms;
+        let mut persisted: Option<(TrackRef, Lyrics)> = None;
+        self.state_tx.send_if_modified(|s| {
+            let Some(t) = s.track.as_ref().filter(|t| t.id == a.track) else {
+                return false;
+            };
+            let t = t.clone();
+            let Some(l) = s.lyrics.as_mut() else {
+                return false;
+            };
+            let Some(line) = l.lines.get_mut(a.line) else {
+                return false;
+            };
+            line.words = a.words;
+            s.revision += 1;
+            // the cache holds provider timings without the global offset
+            let mut raw = l.clone();
+            raw.offset_ms -= global;
+            persisted = Some((t, raw));
+            true
+        });
+        if let Some((t, l)) = persisted {
+            if let Err(e) = self.cache.put_lyrics(&t, Some(&l)) {
+                tracing::warn!("cache: {e:#}");
+            }
+        }
     }
 
     fn spawn_video_fetch(&mut self, track: TrackRef) {
