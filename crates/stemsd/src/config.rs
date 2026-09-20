@@ -103,6 +103,10 @@ pub struct KaraokeConfig {
     /// leaving headroom for the OS, lyric alignment and video downloads at
     /// the cost of stems taking longer to prepare.
     pub gpu_limit: f32,
+    /// Finished stems are kept on disk (`<cache dir>/stems/`, 16-bit WAV,
+    /// ≈40 MB per 4-minute track) up to this many MB, oldest evicted
+    /// first, so a replayed track costs nothing. 0 disables.
+    pub stem_cache_mb: u64,
 }
 
 impl Default for KaraokeConfig {
@@ -121,6 +125,7 @@ impl Default for KaraokeConfig {
             mode: "streaming".into(),
             fade_ms: 400,
             gpu_limit: 1.0,
+            stem_cache_mb: 4096,
         }
     }
 }
@@ -168,6 +173,7 @@ pub struct Paths {
     pub cache_dir: PathBuf,
     pub models_dir: PathBuf,
     pub video_dir: PathBuf,
+    pub stems_dir: PathBuf,
 }
 
 pub fn paths() -> Result<Paths> {
@@ -177,6 +183,7 @@ pub fn paths() -> Result<Paths> {
         cache_dir: dirs.cache_dir().to_path_buf(),
         models_dir: dirs.cache_dir().join("models"),
         video_dir: dirs.cache_dir().join("video"),
+        stems_dir: dirs.cache_dir().join("stems"),
     })
 }
 

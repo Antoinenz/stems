@@ -6,6 +6,7 @@
 
 #[cfg(feature = "onnx")]
 pub mod align;
+pub mod disk;
 pub mod dsp;
 #[cfg(feature = "onnx")]
 pub mod mdx;

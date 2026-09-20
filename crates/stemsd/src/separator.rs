@@ -30,6 +30,7 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
 pub async fn build_offline(
     cfg: &KaraokeConfig,
     models_dir: PathBuf,
+    stems_dir: PathBuf,
 ) -> Result<stems_sep::OfflineSeparator> {
     anyhow::ensure!(
         cfg.backend != "dsp",

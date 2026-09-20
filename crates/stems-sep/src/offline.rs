@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use stems_core::{CHANNELS, Separator, TrackId, TrackPos};
 
+use crate::disk::StemDisk;
 use crate::params::MdxParams;
 use crate::stream::{MdxSeparator, StreamOpts, WindowRunner};
 
@@ -286,6 +287,7 @@ struct Queue {
 pub struct OfflineSeparator {
     queue: Arc<(Mutex<Queue>, Condvar)>,
     store: Arc<StemStore>,
+    disk: Option<Arc<StemDisk>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -296,6 +298,20 @@ impl OfflineSeparator {
         runners: Vec<WindowRunner>,
         opts: StreamOpts,
     ) -> Self {
+        Self::with_disk(params, provider, runners, opts, None)
+    }
+
+    /// As [`new`](Self::new), persisting finished stems to `disk` and
+    /// serving cached tracks from it without a job.
+    pub fn with_disk(
+        params: MdxParams,
+        provider: &'static str,
+        runners: Vec<WindowRunner>,
+        opts: StreamOpts,
+        disk: Option<StemDisk>,
+    ) -> Self {
+        let disk = disk.map(Arc::new);
+        let disk_w = disk.clone();
         let store = Arc::new(StemStore::default());
         let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
         let opts = StreamOpts {
@@ -328,6 +344,13 @@ impl OfflineSeparator {
                     }
                     let started = Instant::now();
                     run_job(&mut sep, &job);
+                    if let Some(d) = disk_w.as_ref().filter(|_| job.buf.is_done()) {
+                        let data = job.buf.data.lock().expect("stem data");
+                        match d.save(&job.id, &data) {
+                            Ok(()) => tracing::debug!(track = ?job.id, "stems saved to disk"),
+                            Err(e) => tracing::warn!("saving stems: {e:#}"),
+                        }
+                    }
                     tracing::info!(
                         track = ?job.id,
                         frames = job.buf.ready_frames(),
@@ -347,6 +370,7 @@ impl OfflineSeparator {
         Self {
             queue,
             store,
+            disk,
             thread: Some(thread),
         }
     }
@@ -368,6 +392,21 @@ impl OfflineSeparator {
         if let Some(b) = self.store.get(&id) {
             b.set_wanted(wanted_frame);
             return b;
+        }
+        if let Some(cached) = self.disk.as_ref().and_then(|d| d.load(&id)) {
+            let buf = Arc::new(StemBuffer::new(&pcm));
+            if cached.len() == pcm.len() {
+                buf.write(0, &cached);
+                tracing::info!(track = ?id, "stems loaded from disk");
+                self.store.insert(id, Arc::clone(&buf));
+                return buf;
+            }
+            tracing::warn!(
+                track = ?id,
+                cached = cached.len(),
+                track_len = pcm.len(),
+                "cached stems do not match the track; recomputing"
+            );
         }
         let buf = Arc::new(StemBuffer::new(&pcm));
         buf.set_wanted(wanted_frame);
