@@ -13,7 +13,7 @@ pub mod state;
 pub mod track;
 
 pub use clock::Clock;
-pub use separator::Separator;
+pub use separator::{Separator, TrackPos};
 pub use sink::Sink;
 pub use source::{Source, SourceEvent};
 pub use state::{
