@@ -31,10 +31,18 @@ export interface Lyrics {
   offset_ms: number;
 }
 
+export interface StemsProgress {
+  ready_ms: number;
+  total_ms: number;
+  done: boolean;
+}
+
 export interface KaraokeState {
   enabled: boolean;
   vocal_gain: number;
   backend: string | null;
+  /** Pre-buffered stems for the current track (prebuffer mode only). */
+  stems?: StemsProgress | null;
 }
 
 export type ViewMode = 'lyrics' | 'karaoke' | 'video' | 'canvas';

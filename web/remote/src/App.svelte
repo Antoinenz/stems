@@ -84,7 +84,14 @@
   <section class="card">
     <button class="big" class:on={ps.karaoke.enabled} onclick={toggleKaraoke}>
       {ps.karaoke.enabled ? 'Karaoke on' : 'Karaoke off'}
-      <small>{ps.karaoke.backend ?? ''}</small>
+      <small>
+        {ps.karaoke.backend ?? ''}
+        {#if ps.karaoke.stems}
+          · {ps.karaoke.stems.done
+            ? 'stems ready'
+            : `preparing ${Math.round((100 * ps.karaoke.stems.ready_ms) / Math.max(1, ps.karaoke.stems.total_ms))}%`}
+        {/if}
+      </small>
     </button>
     <Slider
       label="Vocals"
