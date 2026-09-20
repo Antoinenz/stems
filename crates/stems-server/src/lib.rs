@@ -35,6 +35,86 @@ pub struct Channels {
     pub commands: mpsc::Sender<Command>,
 }
 
+/// Host load, for the remote's status line. Sampled at most every 2 s.
+#[derive(Serialize, Clone, Default)]
+pub struct SystemStats {
+    pub cpu_percent: f32,
+    pub mem_used_mb: u64,
+    pub mem_total_mb: u64,
+    /// Temperature sensors the OS exposes (none on some platforms).
+    pub temps: Vec<Temp>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct Temp {
+    pub label: String,
+    pub celsius: f32,
+}
+
+struct SysMon {
+    sys: sysinfo::System,
+    components: sysinfo::Components,
+    last: Option<std::time::Instant>,
+    stats: SystemStats,
+}
+
+impl SysMon {
+    fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        Self {
+            sys,
+            components: sysinfo::Components::new_with_refreshed_list(),
+            last: None,
+            stats: SystemStats::default(),
+        }
+    }
+
+    fn sample(&mut self) -> SystemStats {
+        let fresh = self
+            .last
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+        if fresh {
+            return self.stats.clone();
+        }
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        self.components.refresh(false);
+        let mut temps: Vec<Temp> = self
+            .components
+            .iter()
+            .filter_map(|c| {
+                c.temperature().map(|t| Temp {
+                    label: c.label().to_string(),
+                    celsius: t,
+                })
+            })
+            .filter(|t| t.celsius > 0.0 && t.celsius < 150.0)
+            .collect();
+        // keep the interesting ones: CPU/GPU/SoC-ish, hottest first
+        let keyword = |l: &str| {
+            let l = l.to_ascii_lowercase();
+            ["cpu", "gpu", "soc", "core", "package", "thermal", "pmu", "die"]
+                .iter()
+                .any(|k| l.contains(k))
+        };
+        if temps.iter().any(|t| keyword(&t.label)) {
+            temps.retain(|t| keyword(&t.label));
+        }
+        temps.sort_by(|a, b| b.celsius.total_cmp(&a.celsius));
+        temps.truncate(4);
+        self.stats = SystemStats {
+            cpu_percent: self.sys.global_cpu_usage(),
+            mem_used_mb: self.sys.used_memory() / (1024 * 1024),
+            mem_total_mb: self.sys.total_memory() / (1024 * 1024),
+            temps,
+        };
+        self.last = Some(std::time::Instant::now());
+        self.stats.clone()
+    }
+}
+
 /// What a client needs to point other devices at this box.
 #[derive(Serialize)]
 pub struct Info {
@@ -79,6 +159,7 @@ impl Server {
         video_dir: Option<&Path>,
     ) -> Router {
         let device_name = std::sync::Arc::new(device_name.to_string());
+        let sysmon = std::sync::Arc::new(std::sync::Mutex::new(SysMon::new()));
         let mut app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .route("/api/state", get(get_state))
@@ -89,6 +170,10 @@ impl Server {
                 get(move |headers| async move { Json(info(&headers, &name)) })
             })
             .route("/api/remote-qr.svg", get(get_remote_qr))
+            .route("/api/system", {
+                let m = sysmon.clone();
+                get(move || async move { Json(m.lock().expect("sysmon").sample()) })
+            })
             .with_state(ch)
             .layer(CorsLayer::permissive());
 
