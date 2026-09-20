@@ -35,6 +35,8 @@ export interface StemsProgress {
   ready_ms: number;
   total_ms: number;
   done: boolean;
+  /** Separation speed as a multiple of real time. */
+  speed?: number;
 }
 
 export interface KaraokeState {

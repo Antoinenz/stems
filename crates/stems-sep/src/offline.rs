@@ -4,7 +4,7 @@
 //! zero latency. Frames the job has not reached yet fall back to dry.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -29,6 +29,8 @@ pub struct StemBuffer {
     cancel: AtomicBool,
     /// Where playback is; the job works from here first.
     wanted: AtomicUsize,
+    /// Recent processing speed as a multiple of real time (f32 bits).
+    speed_bits: AtomicU32,
 }
 
 impl StemBuffer {
@@ -48,7 +50,17 @@ impl StemBuffer {
             done: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             wanted: AtomicUsize::new(0),
+            speed_bits: AtomicU32::new(0),
         }
+    }
+
+    /// Processing speed as a multiple of real time (0 until measured).
+    pub fn speed(&self) -> f32 {
+        f32::from_bits(self.speed_bits.load(Ordering::Relaxed))
+    }
+
+    fn set_speed(&self, x: f32) {
+        self.speed_bits.store(x.to_bits(), Ordering::Relaxed);
     }
 
     /// Frames computed so far (not necessarily contiguous).
@@ -471,6 +483,7 @@ fn run_segment(sep: &mut MdxSeparator, job: &Job, from: usize, to: usize, last_w
         };
     let zeros = vec![0.0f32; BLOCK * ch];
     let mut fed = 0;
+    let seg_started = Instant::now();
     while written < len && !job.buf.is_cancelled() {
         let block: &[f32] = if fed < pcm.len() {
             let end = (fed + BLOCK * ch).min(pcm.len());
@@ -481,6 +494,10 @@ fn run_segment(sep: &mut MdxSeparator, job: &Job, from: usize, to: usize, last_w
             &zeros
         };
         feed(block, sep, &mut produced, &mut written);
+        let secs = seg_started.elapsed().as_secs_f32();
+        if secs > 0.5 {
+            job.buf.set_speed(written as f32 / 44_100.0 / secs);
+        }
         // Re-target on seek: the wanted region is neither done nor about
         // to be reached by this segment.
         let wanted = job.buf.wanted();

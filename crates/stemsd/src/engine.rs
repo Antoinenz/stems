@@ -636,10 +636,15 @@ impl Engine {
                     ready_ms: stems_core::frames_to_ms(b.ready_frames() as u64),
                     total_ms: stems_core::frames_to_ms(b.total_frames() as u64),
                     done: b.is_done(),
+                    speed: b.speed(),
                 });
         self.state_tx.send_if_modified(|s| {
             let changed = match (&s.karaoke.stems, &progress) {
-                (Some(a), Some(b)) => a.done != b.done || a.ready_ms.abs_diff(b.ready_ms) >= 1000,
+                (Some(a), Some(b)) => {
+                    a.done != b.done
+                        || a.ready_ms.abs_diff(b.ready_ms) >= 1000
+                        || (a.speed - b.speed).abs() >= 0.2
+                }
                 (None, None) => false,
                 _ => true,
             };

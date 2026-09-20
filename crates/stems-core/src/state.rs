@@ -38,6 +38,9 @@ pub struct StemsProgress {
     pub ready_ms: u64,
     pub total_ms: u64,
     pub done: bool,
+    /// Separation speed as a multiple of real time (0 until measured).
+    #[serde(default)]
+    pub speed: f32,
 }
 
 impl Default for KaraokeState {
