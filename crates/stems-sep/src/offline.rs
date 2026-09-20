@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -14,27 +14,35 @@ use stems_core::{CHANNELS, Separator, TrackId, TrackPos};
 use crate::params::MdxParams;
 use crate::stream::{MdxSeparator, StreamOpts, WindowRunner};
 
-/// Instrumental for one track, filled progressively from the start.
+/// Instrumental for one track. Pre-allocated; regions are marked as
+/// they are computed, starting wherever the playhead is (`wanted`).
 pub struct StemBuffer {
     data: Mutex<Vec<f32>>,
-    /// Frames of `data` that are final.
+    /// Computed frame ranges, sorted and merged.
+    covered: Mutex<Vec<(usize, usize)>>,
+    /// Frames covered in total (for progress).
     ready: AtomicUsize,
     total_frames: usize,
     done: AtomicBool,
     cancel: AtomicBool,
+    /// Where playback is; the job works from here first.
+    wanted: AtomicUsize,
 }
 
 impl StemBuffer {
     pub fn new(total_frames: usize) -> Self {
         Self {
-            data: Mutex::new(Vec::with_capacity(total_frames * CHANNELS as usize)),
+            data: Mutex::new(vec![0.0; total_frames * CHANNELS as usize]),
+            covered: Mutex::new(Vec::new()),
             ready: AtomicUsize::new(0),
             total_frames,
             done: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            wanted: AtomicUsize::new(0),
         }
     }
 
+    /// Frames computed so far (not necessarily contiguous).
     pub fn ready_frames(&self) -> usize {
         self.ready.load(Ordering::Acquire)
     }
@@ -55,16 +63,72 @@ impl StemBuffer {
         self.cancel.load(Ordering::Acquire)
     }
 
-    fn append(&self, samples: &[f32]) {
-        let mut d = self.data.lock().expect("stem data");
-        d.extend_from_slice(samples);
-        let frames = d.len() / CHANNELS as usize;
-        drop(d);
-        self.ready.store(frames, Ordering::Release);
+    /// Tell the job where playback is so it computes that region first.
+    pub fn set_wanted(&self, frame: u64) {
+        self.wanted
+            .store((frame as usize).min(self.total_frames), Ordering::Release);
     }
 
-    fn finish(&self) {
-        self.done.store(true, Ordering::Release);
+    pub fn wanted(&self) -> usize {
+        self.wanted.load(Ordering::Acquire)
+    }
+
+    fn write(&self, from: usize, samples: &[f32]) {
+        let ch = CHANNELS as usize;
+        let frames = samples.len() / ch;
+        let to = (from + frames).min(self.total_frames);
+        if to <= from {
+            return;
+        }
+        {
+            let mut d = self.data.lock().expect("stem data");
+            d[from * ch..to * ch].copy_from_slice(&samples[..(to - from) * ch]);
+        }
+        let mut c = self.covered.lock().expect("stem ranges");
+        c.push((from, to));
+        c.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(c.len());
+        for &(a, b) in c.iter() {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        *c = merged;
+        let sum: usize = c.iter().map(|(a, b)| b - a).sum();
+        self.ready.store(sum, Ordering::Release);
+        if sum >= self.total_frames {
+            self.done.store(true, Ordering::Release);
+        }
+    }
+
+    fn is_covered(&self, from: usize, to: usize) -> bool {
+        let c = self.covered.lock().expect("stem ranges");
+        c.iter().any(|&(a, b)| a <= from && to <= b)
+    }
+
+    /// The uncovered range to work on next: the one containing `wanted`
+    /// (from `wanted` on), else the first one after it, else the first.
+    fn next_gap(&self, wanted: usize) -> Option<(usize, usize)> {
+        let c = self.covered.lock().expect("stem ranges");
+        let mut gaps: Vec<(usize, usize)> = Vec::new();
+        let mut cursor = 0;
+        for &(a, b) in c.iter() {
+            if a > cursor {
+                gaps.push((cursor, a));
+            }
+            cursor = cursor.max(b);
+        }
+        if cursor < self.total_frames {
+            gaps.push((cursor, self.total_frames));
+        }
+        if let Some(&(a, b)) = gaps.iter().find(|(a, b)| *a <= wanted && wanted < *b) {
+            return Some((wanted.max(a), b));
+        }
+        gaps.iter()
+            .find(|(a, _)| *a > wanted)
+            .or(gaps.first())
+            .copied()
     }
 
     /// Copy `out.len() / 2` frames starting at `frame`; `false` if not
@@ -73,7 +137,7 @@ impl StemBuffer {
         let ch = CHANNELS as usize;
         let frames = out.len() / ch;
         let start = frame as usize;
-        if start + frames > self.ready_frames() {
+        if start + frames > self.total_frames || !self.is_covered(start, start + frames) {
             return false;
         }
         let d = self.data.lock().expect("stem data");
@@ -119,6 +183,12 @@ impl StemStore {
     pub fn contains(&self, id: &TrackId) -> bool {
         self.inner.lock().expect("stem store").map.contains_key(id)
     }
+
+    pub fn remove(&self, id: &TrackId) -> Option<Arc<StemBuffer>> {
+        let mut g = self.inner.lock().expect("stem store");
+        g.order.retain(|k| k != id);
+        g.map.remove(id)
+    }
 }
 
 struct Job {
@@ -127,10 +197,16 @@ struct Job {
     buf: Arc<StemBuffer>,
 }
 
-/// One thread that separates whole tracks, one at a time, in submission
-/// order, writing into the store. Model sessions live in its runners.
+#[derive(Default)]
+struct Queue {
+    jobs: VecDeque<Job>,
+    closed: bool,
+}
+
+/// One thread that separates whole tracks in priority order, writing into
+/// the store. Model sessions live in its runners.
 pub struct OfflineSeparator {
-    tx: mpsc::Sender<Job>,
+    queue: Arc<(Mutex<Queue>, Condvar)>,
     store: Arc<StemStore>,
     thread: Option<JoinHandle<()>>,
 }
@@ -143,18 +219,32 @@ impl OfflineSeparator {
         opts: StreamOpts,
     ) -> Self {
         let store = Arc::new(StemStore::default());
-        let (tx, rx) = mpsc::channel::<Job>();
+        let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
         let opts = StreamOpts {
             realtime: false,
             // just enough slack for hop granularity; we block for results
             slack_frames: opts.hop_frames.max(1024),
             ..opts
         };
+        let q = Arc::clone(&queue);
         let thread = thread::Builder::new()
             .name("stems-offline".into())
             .spawn(move || {
                 let mut sep = MdxSeparator::with_runners(params, provider, runners, opts);
-                for job in rx {
+                loop {
+                    let job = {
+                        let (lock, cv) = &*q;
+                        let mut g = lock.lock().expect("job queue");
+                        loop {
+                            if let Some(j) = g.jobs.pop_front() {
+                                break j;
+                            }
+                            if g.closed {
+                                return;
+                            }
+                            g = cv.wait(g).expect("job queue");
+                        }
+                    };
                     if job.buf.is_cancelled() {
                         continue;
                     }
@@ -166,7 +256,9 @@ impl OfflineSeparator {
                         secs = format!("{:.1}", started.elapsed().as_secs_f32()),
                         speed = format!(
                             "{:.1}x",
-                            job.buf.ready_frames() as f32 / 44_100.0 / started.elapsed().as_secs_f32().max(1e-3)
+                            job.buf.ready_frames() as f32
+                                / 44_100.0
+                                / started.elapsed().as_secs_f32().max(1e-3)
                         ),
                         cancelled = job.buf.is_cancelled(),
                         "stems ready"
@@ -175,7 +267,7 @@ impl OfflineSeparator {
             })
             .expect("spawn offline separator");
         Self {
-            tx,
+            queue,
             store,
             thread: Some(thread),
         }
@@ -185,79 +277,181 @@ impl OfflineSeparator {
         Arc::clone(&self.store)
     }
 
-    /// Queue a whole-track separation; `pcm` is interleaved stereo 44.1 kHz.
-    /// No-op if the track already has stems.
-    pub fn submit(&self, id: TrackId, pcm: Arc<Vec<f32>>) -> Arc<StemBuffer> {
+    /// Queue a whole-track separation starting around `wanted_frame`.
+    /// `urgent` (the playing track) goes to the front. No-op if the track
+    /// already has stems.
+    pub fn submit(
+        &self,
+        id: TrackId,
+        pcm: Arc<Vec<f32>>,
+        wanted_frame: u64,
+        urgent: bool,
+    ) -> Arc<StemBuffer> {
         if let Some(b) = self.store.get(&id) {
+            b.set_wanted(wanted_frame);
             return b;
         }
         let buf = Arc::new(StemBuffer::new(pcm.len() / CHANNELS as usize));
+        buf.set_wanted(wanted_frame);
         self.store.insert(id.clone(), Arc::clone(&buf));
-        let _ = self.tx.send(Job {
+        let job = Job {
             id,
             pcm,
             buf: Arc::clone(&buf),
-        });
+        };
+        let (lock, cv) = &*self.queue;
+        let mut g = lock.lock().expect("job queue");
+        if urgent {
+            g.jobs.push_front(job);
+        } else {
+            g.jobs.push_back(job);
+        }
+        cv.notify_one();
         buf
+    }
+
+    /// Where playback is on `id`; the job (re)targets that region.
+    pub fn set_wanted(&self, id: &TrackId, frame: u64) {
+        if let Some(b) = self.store.get(id) {
+            b.set_wanted(frame);
+        }
+    }
+
+    /// Cancel and forget every track not in `keep` (queued or running),
+    /// so the playing and upcoming tracks get the device.
+    pub fn focus(&self, keep: &[&TrackId]) {
+        let (lock, _) = &*self.queue;
+        let mut g = lock.lock().expect("job queue");
+        g.jobs.retain(|j| {
+            let k = keep.contains(&&j.id);
+            if !k {
+                j.buf.cancel();
+            }
+            k
+        });
+        drop(g);
+        // finished stems stay cached (LRU); unfinished ones are dropped
+        let ids: Vec<TrackId> = {
+            let inner = self.store.inner.lock().expect("stem store");
+            inner
+                .map
+                .iter()
+                .filter(|(id, b)| !keep.contains(id) && !b.is_done())
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in ids {
+            if let Some(b) = self.store.remove(&id) {
+                b.cancel();
+                tracing::info!(track = ?id, "stems job dropped");
+            }
+        }
     }
 }
 
 impl Drop for OfflineSeparator {
     fn drop(&mut self) {
-        let (tx, _) = mpsc::channel();
-        self.tx = tx;
+        let (lock, cv) = &*self.queue;
+        if let Ok(mut g) = lock.lock() {
+            g.closed = true;
+            for j in &g.jobs {
+                j.buf.cancel();
+            }
+        }
+        cv.notify_all();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
 }
 
-/// Push the track through the streaming wrapper in blocks, discarding its
-/// priming delay, then flush with silence so the tail comes out.
+/// Work through the track in segments, always starting at the region the
+/// playhead wants; a seek re-targets after the current window.
 fn run_job(sep: &mut MdxSeparator, job: &Job) {
+    let total = job.pcm.len() / CHANNELS as usize;
+    let mut last_wanted = job.buf.wanted();
+    while !job.buf.is_cancelled() {
+        let wanted = job.buf.wanted();
+        let Some((from, to)) = job.buf.next_gap(wanted) else {
+            break;
+        };
+        // segment boundaries on the hop grid keep window edges consistent
+        let from = if from == wanted {
+            from
+        } else {
+            from.min(total)
+        };
+        run_segment(sep, job, from, to, &mut last_wanted);
+    }
+    if job.buf.ready_frames() >= total {
+        job.buf.done.store(true, Ordering::Release);
+    }
+}
+
+/// Separate `[from, to)`, writing as it goes. Returns early (leaving the
+/// rest uncovered) when the playhead jumps somewhere this segment will
+/// not reach soon.
+fn run_segment(sep: &mut MdxSeparator, job: &Job, from: usize, to: usize, last_wanted: &mut usize) {
     const BLOCK: usize = 4096;
     let ch = CHANNELS as usize;
     sep.reset();
     let latency = sep.latency_frames();
-    let total = job.pcm.len() / ch;
+    let len = to - from;
     let mut out = vec![0.0f32; BLOCK * ch];
     let mut produced: usize = 0; // frames popped from the separator
-    let mut written: usize = 0; // frames appended to the buffer
+    let mut written: usize = 0; // frames written to the buffer
+    let pcm = &job.pcm[from * ch..to * ch];
     let mut feed =
         |input: &[f32], sep: &mut MdxSeparator, produced: &mut usize, written: &mut usize| {
             let frames = input.len() / ch;
             let o = &mut out[..input.len()];
-            // offline mode blocks until the block is available
-            let valid = sep.process(input, o);
-            // output frame k corresponds to input frame k - latency
+            let valid = sep.process(input, o); // blocks until available
             let first = *produced;
             *produced += frames;
+            // output frame k is input frame k - latency
             let keep_from = latency.saturating_sub(first).min(frames);
-            let keep_to = frames.min(latency + total - first);
+            let keep_to = frames.min((latency + len).saturating_sub(first));
             if keep_from < keep_to {
-                let slice = &o[keep_from * ch..keep_to * ch];
+                let dst = from + first + keep_from - latency;
                 if valid {
-                    job.buf.append(slice);
+                    job.buf.write(dst, &o[keep_from * ch..keep_to * ch]);
                 } else {
                     // should not happen offline; keep alignment with dry audio
-                    let src_from = first + keep_from - latency;
                     job.buf
-                        .append(&job.pcm[src_from * ch..(src_from + keep_to - keep_from) * ch]);
+                        .write(dst, &job.pcm[dst * ch..(dst + keep_to - keep_from) * ch]);
                 }
                 *written += keep_to - keep_from;
             }
         };
-    for block in job.pcm.chunks(BLOCK * ch) {
-        if job.buf.is_cancelled() {
-            return;
-        }
-        feed(block, sep, &mut produced, &mut written);
-    }
     let zeros = vec![0.0f32; BLOCK * ch];
-    while written < total && !job.buf.is_cancelled() {
-        feed(&zeros, sep, &mut produced, &mut written);
+    let mut fed = 0;
+    while written < len && !job.buf.is_cancelled() {
+        let block: &[f32] = if fed < pcm.len() {
+            let end = (fed + BLOCK * ch).min(pcm.len());
+            let b = &pcm[fed..end];
+            fed = end;
+            b
+        } else {
+            &zeros
+        };
+        feed(block, sep, &mut produced, &mut written);
+        // Re-target on seek: the wanted region is neither done nor about
+        // to be reached by this segment.
+        let wanted = job.buf.wanted();
+        if wanted != *last_wanted {
+            *last_wanted = wanted;
+            let ahead = from + written;
+            let soon = wanted >= ahead && wanted < ahead + 5 * 44_100;
+            if !soon
+                && !job
+                    .buf
+                    .is_covered(wanted, (wanted + BLOCK).min(job.buf.total_frames))
+            {
+                tracing::debug!(wanted, at = ahead, "stems job re-targeting to playhead");
+                return;
+            }
+        }
     }
-    job.buf.finish();
 }
 
 /// Zero-latency backend reading pre-computed stems by track position.
@@ -367,6 +561,53 @@ mod tests {
     }
 
     #[test]
+    fn seek_retargets_the_running_job() {
+        let runners: Vec<WindowRunner> = (0..1)
+            .map(|_| -> WindowRunner {
+                Box::new(|w: &[f32]| {
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                    Ok(w.to_vec())
+                })
+            })
+            .collect();
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 0,
+            denoise: false,
+            workers: 1,
+            realtime: false,
+        };
+        let off = OfflineSeparator::new(params(), "test", runners, opts);
+        let frames = 400_000; // ~390 windows × 3 ms ≈ 1.2 s of work
+        let pcm: Arc<Vec<f32>> = Arc::new(vec![0.25; frames * 2]);
+        let id = TrackId::Spotify("t2".into());
+        let buf = off.submit(id.clone(), Arc::clone(&pcm), 0, true);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        off.set_wanted(&id, 300_000);
+        let t0 = Instant::now();
+        let mut out = vec![0.0f32; 512 * 2];
+        while !buf.read(300_000, &mut out) {
+            assert!(t0.elapsed().as_secs() < 20, "never reached the seek target");
+            assert!(
+                !buf.is_done(),
+                "finished the whole track before the seek target"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            buf.ready_frames() < frames - 50_000,
+            "seek target reached only after nearly everything: {}",
+            buf.ready_frames()
+        );
+        while !buf.is_done() {
+            assert!(t0.elapsed().as_secs() < 30);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(buf.ready_frames(), frames);
+    }
+
+    #[test]
     fn offline_job_reproduces_track_and_serves_by_position() {
         let runners: Vec<WindowRunner> = (0..2)
             .map(|_| -> WindowRunner {
@@ -389,7 +630,7 @@ mod tests {
                 .collect(),
         );
         let id = TrackId::Spotify("t1".into());
-        let buf = off.submit(id.clone(), Arc::clone(&pcm));
+        let buf = off.submit(id.clone(), Arc::clone(&pcm), 20_000, true);
         let t0 = Instant::now();
         while !buf.is_done() {
             assert!(t0.elapsed().as_secs() < 30, "job did not finish");
@@ -408,6 +649,13 @@ mod tests {
             let expect = pcm[(10_000 + k) * 2] * 0.5;
             assert!((out[k * 2] - expect).abs() < 1e-4, "frame {k}");
         }
+        // the segment before `wanted` was filled in afterwards
+        let early = TrackPos {
+            track: pos.track.clone(),
+            frame: 1_000,
+        };
+        assert!(sep.process_at(Some(&early), &[], &mut out));
+        assert!((out[0] - pcm[1_000 * 2] * 0.5).abs() < 1e-4);
         // past the end → miss
         let late = TrackPos {
             track: pos.track.clone(),
