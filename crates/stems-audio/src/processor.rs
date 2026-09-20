@@ -5,12 +5,12 @@
 //! only adds a bounded amount of buffering.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use stems_core::{CHANNELS, Separator};
+use stems_core::{CHANNELS, Separator, TrackId, TrackPos};
 
 use crate::ring::{drain, pop_or_silence, push_available};
 use crate::{Consumer, FlushSignal, Mixer, Producer};
@@ -18,14 +18,33 @@ use crate::{Consumer, FlushSignal, Mixer, Producer};
 /// Frames per processing block (~11.6 ms at 44.1 kHz).
 const BLOCK_FRAMES: usize = 512;
 
+/// Maps the processor's running frame count onto a track timeline: frame
+/// `at_frame` of the source stream is track frame `track_frame`.
+#[derive(Debug, Clone)]
+pub struct Anchor {
+    pub track: Arc<TrackId>,
+    pub at_frame: u64,
+    pub track_frame: u64,
+}
+
 /// Shared knobs, safe to poke from any thread.
 #[derive(Clone, Default)]
 pub struct ProcessorControl {
     enabled: Arc<AtomicBool>,
     vocal_gain_bits: Arc<AtomicU32>,
+    anchor: Arc<Mutex<Option<Anchor>>>,
 }
 
 impl ProcessorControl {
+    /// Tell position-aware backends where the stream is on the track.
+    pub fn set_anchor(&self, anchor: Option<Anchor>) {
+        *self.anchor.lock().expect("anchor mutex") = anchor;
+    }
+
+    fn anchor(&self) -> Option<Anchor> {
+        self.anchor.lock().expect("anchor mutex").clone()
+    }
+
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
     }
@@ -90,10 +109,13 @@ impl Processor {
                     let mut delayed = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut delay_line: VecDeque<f32> = VecDeque::new();
                     delay_line.resize(latency_frames * ch, 0.0);
+                    // Source frames consumed (popped or drained) so far:
+                    // tracks the source's `frames_pushed` for anchors.
+                    let mut consumed: u64 = 0;
 
                     while !stop.load(Ordering::Relaxed) {
                         if in_flush.take(&mut flush_seen) {
-                            drain(&mut input);
+                            consumed += (drain(&mut input) / ch) as u64;
                             separator.reset();
                             delay_line.clear();
                             delay_line.resize(latency_frames * ch, 0.0);
@@ -105,6 +127,18 @@ impl Processor {
                             continue;
                         }
                         pop_or_silence(&mut input, &mut original);
+                        let block_start = consumed;
+                        consumed += BLOCK_FRAMES as u64;
+                        let pos = control.anchor().and_then(|a| {
+                            let frame = (a.track_frame as i64
+                                + (block_start as i64 - a.at_frame as i64))
+                                .max(0) as u64;
+                            (block_start >= a.at_frame || a.at_frame - block_start < a.track_frame)
+                                .then_some(TrackPos {
+                                    track: a.track,
+                                    frame,
+                                })
+                        });
 
                         let enabled = control.enabled();
                         mixer.set_processed(enabled);
@@ -118,7 +152,7 @@ impl Processor {
                             &original
                         };
                         if streaming || enabled || mixer.is_fading() {
-                            let valid = separator.process(&original, &mut inst);
+                            let valid = separator.process_at(pos.as_ref(), &original, &mut inst);
                             if !valid {
                                 // No usable instrumental for this block (priming
                                 // after a seek, or inference behind): keep the
