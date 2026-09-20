@@ -80,6 +80,8 @@ pub struct KaraokeConfig {
     /// early), separate it ahead of playback and play with zero delay;
     /// vocals stay until the job overtakes the playhead.
     pub mode: String,
+    /// Crossfade when karaoke is switched on or off, milliseconds.
+    pub fade_ms: u64,
 }
 
 impl Default for KaraokeConfig {
@@ -96,6 +98,7 @@ impl Default for KaraokeConfig {
             workers: 1,
             remote: String::new(),
             mode: "streaming".into(),
+            fade_ms: 400,
         }
     }
 }

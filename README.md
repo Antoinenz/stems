@@ -88,6 +88,7 @@ hop_ms = 0                         # new audio per inference; 0 = full window (~
 lookahead_ms = 0                   # future context before output; 0 = model minimum
 denoise = false                    # run x and -x, average: fewer artefacts, 2x cost
 workers = 1                        # parallel model sessions; 2 keeps a GPU busy
+fade_ms = 400                      # crossfade when karaoke is toggled
 ```
 
 Latency ≈ `lookahead + hop + slack`. Smaller `hop_ms` blends overlapping windows (better

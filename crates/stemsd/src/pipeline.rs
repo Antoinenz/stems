@@ -31,6 +31,7 @@ fn build_chain(
     ring_seconds: f32,
     sink_kind: &SinkKind,
     separator: Box<dyn Separator>,
+    fade_ms: f32,
 ) -> Result<(stems_audio::Producer, FlushSignal, Processor, Box<dyn Sink>)> {
     let (src_producer, src_consumer) = AudioRing::with_seconds(ring_seconds);
     let (out_producer, out_consumer) = AudioRing::with_seconds(OUT_RING_SECONDS);
@@ -43,6 +44,7 @@ fn build_chain(
         separator,
         src_flush.clone(),
         out_flush,
+        fade_ms,
     );
     Ok((src_producer, src_flush, processor, sink))
 }
@@ -197,7 +199,12 @@ pub async fn play_file(
     artist: Option<String>,
 ) -> Result<()> {
     let sep = separator(cfg).await?;
-    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind, sep.audio)?;
+    let (producer, _flush, processor, sink) = build_chain(
+        RING_SECONDS,
+        sink_kind,
+        sep.audio,
+        cfg.karaoke.fade_ms as f32,
+    )?;
     let mut source = FileSource::open(file, producer)?;
     source.set_metadata(title, artist);
     let track = source.track();
@@ -231,7 +238,12 @@ pub async fn run_spotify(
     sink_kind: &SinkKind,
 ) -> Result<()> {
     let sep = separator(cfg).await?;
-    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind, sep.audio)?;
+    let (producer, flush, processor, sink) = build_chain(
+        LIVE_RING_SECONDS,
+        sink_kind,
+        sep.audio,
+        cfg.karaoke.fade_ms as f32,
+    )?;
 
     let paths = crate::config::paths()?;
     let cache_dir = paths.cache_dir.join("spotify");

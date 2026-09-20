@@ -35,6 +35,8 @@ pub struct ProcessorControl {
     enabled: Arc<AtomicBool>,
     vocal_gain_bits: Arc<AtomicU32>,
     anchor: Arc<Mutex<Option<Anchor>>>,
+    /// Karaoke on/off crossfade, ms (read when the processor starts).
+    fade_ms_bits: Arc<AtomicU32>,
 }
 
 impl ProcessorControl {
@@ -45,6 +47,11 @@ impl ProcessorControl {
 
     fn anchor(&self) -> Option<Anchor> {
         self.anchor.lock().expect("anchor mutex").clone()
+    }
+
+    /// Crossfade length for karaoke on/off (default 50 ms).
+    pub fn set_fade_ms(&self, ms: f32) {
+        self.fade_ms_bits.store(ms.to_bits(), Ordering::Relaxed);
     }
 
     pub fn set_enabled(&self, on: bool) {
@@ -84,8 +91,10 @@ impl Processor {
         mut separator: Box<dyn Separator>,
         in_flush: FlushSignal,
         out_flush: FlushSignal,
+        fade_ms: f32,
     ) -> Self {
         let control = ProcessorControl::default();
+        control.set_fade_ms(fade_ms);
         let stop = Arc::new(AtomicBool::new(false));
         let backend_name = separator.name();
         let latency_frames = separator.latency_frames();
@@ -101,7 +110,9 @@ impl Processor {
                     let mut inst = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut processed = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut out = vec![0.0f32; BLOCK_FRAMES * ch];
-                    let mut mixer = Mixer::new();
+                    let mut mixer = Mixer::with_fade_ms(f32::from_bits(
+                        control.fade_ms_bits.load(Ordering::Relaxed),
+                    ));
                     let mut flush_seen = 0;
                     // Backends with lookahead return the instrumental
                     // `latency_frames` late; delay the original to match so
@@ -262,6 +273,7 @@ mod tests {
             Box::new(Mute),
             FlushSignal::new(),
             FlushSignal::new(),
+            50.0,
         );
         proc.control().set_enabled(enabled);
         let input = vec![0.5f32; BLOCK_FRAMES * 2 * 8];
@@ -324,6 +336,7 @@ mod tests {
             Box::new(Delayed::new(lat)),
             FlushSignal::new(),
             FlushSignal::new(),
+            50.0,
         );
         proc.control().set_enabled(false);
         let frames = BLOCK_FRAMES * 8;

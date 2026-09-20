@@ -28,11 +28,16 @@ impl Default for Mixer {
 
 impl Mixer {
     pub fn new() -> Self {
+        Self::with_fade_ms(DEFAULT_FADE_MS)
+    }
+
+    /// Crossfade length for karaoke on/off, milliseconds.
+    pub fn with_fade_ms(ms: f32) -> Self {
         Self {
             volume: 1.0,
             mix: 0.0,
             target_mix: 0.0,
-            step: 1.0 / (DEFAULT_FADE_MS / 1000.0 * SAMPLE_RATE as f32),
+            step: 1.0 / (ms.max(1.0) / 1000.0 * SAMPLE_RATE as f32),
         }
     }
 

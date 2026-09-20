@@ -95,9 +95,11 @@ impl SysMon {
         // keep the interesting ones: CPU/GPU/SoC-ish, hottest first
         let keyword = |l: &str| {
             let l = l.to_ascii_lowercase();
-            ["cpu", "gpu", "soc", "core", "package", "thermal", "pmu", "die"]
-                .iter()
-                .any(|k| l.contains(k))
+            [
+                "cpu", "gpu", "soc", "core", "package", "thermal", "pmu", "die",
+            ]
+            .iter()
+            .any(|k| l.contains(k))
         };
         if temps.iter().any(|t| keyword(&t.label)) {
             temps.retain(|t| keyword(&t.label));
