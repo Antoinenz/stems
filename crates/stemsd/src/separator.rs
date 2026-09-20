@@ -1,6 +1,8 @@
 //! Build the configured [`Separator`] backend.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use stems_core::Separator;
@@ -37,16 +39,18 @@ pub async fn build_offline(
     let r = build_runners(cfg, models_dir).await?;
     let limit = cfg.gpu_limit.clamp(0.1, 1.0);
     let runners: Vec<stems_sep::WindowRunner> = if limit < 1.0 {
-        // Duty-cycle throttle: after each window, idle long enough that
-        // busy / (busy + idle) == limit.
+        // One governor shared by every worker: it caps the fraction of
+        // wall time during which *any* window is being computed, so two
+        // workers cannot keep the GPU saturated by taking turns sleeping.
+        let gov = Arc::new(Governor::new(limit));
         r.runners
             .into_iter()
             .map(|mut run| -> stems_sep::WindowRunner {
+                let gov = gov.clone();
                 Box::new(move |w: &[f32]| {
-                    let t = std::time::Instant::now();
+                    gov.acquire();
                     let out = run(w);
-                    let busy = t.elapsed();
-                    std::thread::sleep(busy.mul_f32(1.0 / limit - 1.0));
+                    gov.release();
                     out
                 })
             })
@@ -54,15 +58,102 @@ pub async fn build_offline(
     } else {
         r.runners
     };
+    let disk = if cfg.stem_cache_mb > 0 {
+        match stems_sep::disk::StemDisk::new(&stems_dir, cfg.stem_cache_mb * 1024 * 1024) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("stem cache disabled: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     tracing::info!(
         backend = cfg.backend,
         provider = r.provider,
         gpu_limit = limit,
+        stem_cache = disk.as_ref().map(|d| d.dir().display().to_string()),
         "offline separator ready"
     );
-    Ok(stems_sep::OfflineSeparator::new(
-        r.params, r.provider, runners, opts,
+    Ok(stems_sep::OfflineSeparator::with_disk(
+        r.params, r.provider, runners, opts, disk,
     ))
+}
+
+/// Utilisation cap for the offline job: busy / elapsed <= limit, where
+/// "busy" is the time at least one window inference is running.
+/// History decays so the cap follows recent load rather than the
+/// lifetime average.
+struct Governor {
+    limit: f32,
+    inner: Mutex<GovState>,
+}
+
+struct GovState {
+    active: usize,
+    busy_since: Instant,
+    busy: Duration,
+    epoch: Instant,
+}
+
+impl Governor {
+    const WINDOW: Duration = Duration::from_secs(20);
+
+    fn new(limit: f32) -> Self {
+        let now = Instant::now();
+        Self {
+            limit,
+            inner: Mutex::new(GovState {
+                active: 0,
+                busy_since: now,
+                busy: Duration::ZERO,
+                epoch: now,
+            }),
+        }
+    }
+
+    /// Block until running one more window keeps utilisation under the
+    /// limit, then count this caller as active.
+    fn acquire(&self) {
+        loop {
+            let wait = {
+                let mut g = self.inner.lock().unwrap();
+                let now = Instant::now();
+                let mut busy = g.busy;
+                if g.active > 0 {
+                    busy += now - g.busy_since;
+                }
+                let elapsed = now - g.epoch;
+                let need = busy.div_f32(self.limit);
+                if need <= elapsed {
+                    if g.active == 0 {
+                        g.busy_since = now;
+                    }
+                    g.active += 1;
+                    return;
+                }
+                need - elapsed
+            };
+            std::thread::sleep(wait.min(Duration::from_millis(250)));
+        }
+    }
+
+    fn release(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let now = Instant::now();
+        g.active = g.active.saturating_sub(1);
+        if g.active == 0 {
+            let span = now - g.busy_since;
+            g.busy += span;
+        }
+        let elapsed = now - g.epoch;
+        if elapsed > Self::WINDOW {
+            // keep the ratio, forget the older half
+            g.busy /= 2;
+            g.epoch = now - elapsed / 2;
+        }
+    }
 }
 
 fn stream_opts(cfg: &KaraokeConfig) -> stems_sep::StreamOpts {
@@ -250,4 +341,42 @@ async fn download(url: &str, path: &std::path::Path) -> Result<()> {
     tokio::fs::rename(&tmp, path).await?;
     tracing::info!(bytes = done, "model downloaded");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two threads hammering the GPU stand-in must still leave the
+    /// configured idle fraction, measured as "time nobody is running".
+    #[test]
+    fn governor_caps_any_active_time() {
+        let gov = Arc::new(Governor::new(0.5));
+        let start = Instant::now();
+        let busy = Arc::new(Mutex::new(Duration::ZERO));
+        let hs: Vec<_> = (0..2)
+            .map(|_| {
+                let gov = gov.clone();
+                let busy = busy.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..8 {
+                        gov.acquire();
+                        let t = Instant::now();
+                        std::thread::sleep(Duration::from_millis(20));
+                        *busy.lock().unwrap() += t.elapsed();
+                        gov.release();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let elapsed = start.elapsed();
+        // 16 × 20 ms of work; with perfect overlap that is 160 ms of
+        // "any active" time, so the wall clock must reach ≥ 320 ms.
+        assert!(elapsed >= Duration::from_millis(300), "elapsed {elapsed:?}");
+        // and the governor must not serialise everything either
+        assert!(elapsed < Duration::from_millis(1500), "elapsed {elapsed:?}");
+    }
 }

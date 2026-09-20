@@ -89,7 +89,8 @@ lookahead_ms = 0                   # future context before output; 0 = model min
 denoise = false                    # run x and -x, average: fewer artefacts, 2x cost
 workers = 1                        # parallel model sessions; 2 keeps a GPU busy
 fade_ms = 400                      # crossfade when karaoke is toggled
-gpu_limit = 1.0                    # prebuffer duty cycle; 0.85 leaves headroom for the OS etc.
+gpu_limit = 1.0                    # prebuffer utilisation cap; 0.7 leaves headroom for the OS etc.
+stem_cache_mb = 4096               # finished stems kept on disk (0 = off)
 ```
 
 Latency ≈ `lookahead + hop + slack`. Smaller `hop_ms` blends overlapping windows (better
@@ -132,10 +133,15 @@ over the whole song as fast as the device allows, and plays with **no added dela
 stems computed ahead of the playhead. On an M1 Air a song is done in ~10–20 s; until the job
 overtakes the playhead the vocals simply stay in (the remote shows `preparing 37%` → `stems
 ready`). Tracks that were announced ahead of time are fully ready before they start. Skips
-and seeks are instant. `gpu_limit = 0.85` keeps the job from saturating the accelerator
-(each window is followed by a proportional pause), which avoids glitches on machines that
-share the GPU with the display and leaves room for lyric alignment and video downloads. The streaming mode remains for machines that cannot separate faster
-than real time.
+and seeks are instant. `gpu_limit = 0.7` caps the fraction of time the job keeps the
+accelerator busy (counted across all workers, so two workers cannot take turns filling the
+gap), which avoids glitches on machines that share the GPU with the display and leaves room
+for lyric alignment and video downloads. On a fanless laptop 0.6–0.7 is a good start; the
+`stems ready … speed` line shows what it costs. Finished stems are written to
+`<cache dir>/stems/<id>.wav` (16-bit, ≈40 MB per 4-minute track) and pruned oldest-first to
+`stem_cache_mb`, so a track that has been separated once is ready instantly the next time
+(`stems loaded from disk`). The streaming mode remains for machines that
+cannot separate faster than real time.
 
 ### Word-level lyric timing
 
