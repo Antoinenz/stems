@@ -52,10 +52,16 @@ impl TrackFetcher {
         let encrypted = AudioFile::open(&session, file_id, bytes_per_second)
             .await
             .map_err(|e| anyhow!("open audio file: {e}"))?;
-        let len = encrypted
+        let controller = encrypted
             .get_stream_loader_controller()
-            .map_err(|e| anyhow!("stream controller: {e}"))?
-            .len() as u64;
+            .map_err(|e| anyhow!("stream controller: {e}"))?;
+        let len = controller.len() as u64;
+        // Ask for the whole file up front so the download runs flat out
+        // while the decoder works through it, instead of trickling behind
+        // the read position.
+        controller
+            .fetch_next_and_wait(len as usize, 0)
+            .map_err(|e| anyhow!("prefetch: {e}"))?;
         let key = match session.audio_key().request(track_id, file_id).await {
             Ok(k) => Some(k),
             Err(e) => {

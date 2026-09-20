@@ -362,7 +362,13 @@ impl Engine {
     }
 
     fn on_command(&mut self, cmd: Command) {
-        tracing::info!(?cmd, "command");
+        // sliders send a stream of these; keep them out of the info log
+        match cmd {
+            Command::SetVocalGain { .. } | Command::SetVolume { .. } => {
+                tracing::debug!(?cmd, "command")
+            }
+            _ => tracing::info!(?cmd, "command"),
+        }
         match cmd {
             Command::SetVolume { level } => self.set_volume(level.clamp(0.0, 1.0)),
             Command::SetKaraoke { enabled } => {
