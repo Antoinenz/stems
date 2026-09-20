@@ -75,6 +75,11 @@ pub struct KaraokeConfig {
     pub workers: usize,
     /// `host:port` of a `stemsd worker` for `backend = "remote"`.
     pub remote: String,
+    /// `streaming`: separate the live stream with a few seconds of delay.
+    /// `prebuffer`: download each track as it starts (and the next one
+    /// early), separate it ahead of playback and play with zero delay;
+    /// vocals stay until the job overtakes the playhead.
+    pub mode: String,
 }
 
 impl Default for KaraokeConfig {
@@ -90,6 +95,7 @@ impl Default for KaraokeConfig {
             denoise: false,
             workers: 1,
             remote: String::new(),
+            mode: "streaming".into(),
         }
     }
 }

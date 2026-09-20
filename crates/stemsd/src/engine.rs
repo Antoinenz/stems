@@ -5,19 +5,31 @@
 //! server forwards to clients. Lyrics lookups run as background tasks keyed
 //! by track so a slow provider never blocks playback events.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use stems_audio::Processor;
+use stems_audio::processor::Anchor;
 use stems_core::{
-    Clock, ClockTick, Command, Lyrics, PlaybackState, PlaybackStatus, Sink, Source, SourceEvent,
-    TrackId, TrackRef,
+    Clock, ClockTick, Command, Lyrics, PcmFetcher, PlaybackState, PlaybackStatus, Sink, Source,
+    SourceEvent, TrackId, TrackRef,
 };
 use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib, VideoFetcher};
+use stems_sep::OfflineSeparator;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 const TICK: Duration = Duration::from_millis(100);
+
+struct Prebuffer {
+    offline: OfflineSeparator,
+    fetcher: Arc<dyn PcmFetcher>,
+    tasks: HashMap<TrackId, JoinHandle<()>>,
+    tx: mpsc::Sender<(TrackId, Arc<Vec<f32>>)>,
+    rx: mpsc::Receiver<(TrackId, Arc<Vec<f32>>)>,
+}
 
 pub struct Channels {
     pub state: watch::Receiver<PlaybackState>,
@@ -47,6 +59,9 @@ pub struct Engine {
     video_task: Option<JoinHandle<()>>,
     video_tx: mpsc::Sender<(TrackId, Option<String>)>,
     video_rx: mpsc::Receiver<(TrackId, Option<String>)>,
+    /// Pre-buffered separation (`mode = "prebuffer"`): whole tracks are
+    /// fetched and separated ahead of the playhead.
+    prebuffer: Option<Prebuffer>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -69,6 +84,7 @@ impl Engine {
                 enabled: false,
                 vocal_gain: 0.0,
                 backend: Some(processor.backend_name().to_string()),
+                stems: None,
             },
             ..PlaybackState::default()
         });
@@ -100,6 +116,7 @@ impl Engine {
             video_task: None,
             video_tx,
             video_rx,
+            prebuffer: None,
             exit_on_end,
             tick_count: 0,
         };
@@ -121,6 +138,23 @@ impl Engine {
     /// Enable music video lookups.
     pub fn with_video(mut self, fetcher: VideoFetcher) -> Self {
         self.video = Some(fetcher);
+        self
+    }
+
+    /// Enable pre-buffered separation.
+    pub fn with_prebuffer(
+        mut self,
+        offline: OfflineSeparator,
+        fetcher: Arc<dyn PcmFetcher>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(4);
+        self.prebuffer = Some(Prebuffer {
+            offline,
+            fetcher,
+            tasks: HashMap::new(),
+            tx,
+            rx,
+        });
         self
     }
 
@@ -151,6 +185,12 @@ impl Engine {
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd),
                 Some((id, lyrics)) = self.lyrics_rx.recv() => self.on_lyrics(id, lyrics),
                 Some((id, url)) = self.video_rx.recv() => self.on_video(id, url),
+                Some((id, pcm)) = async {
+                    match self.prebuffer.as_mut() {
+                        Some(p) => p.rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.on_pcm(id, pcm),
                 _ = ticker.tick() => self.tick(),
             }
         }
@@ -187,6 +227,8 @@ impl Engine {
                     "track started"
                 );
                 self.clock.anchor(position_ms, at_frame);
+                self.set_anchor(&track.id, position_ms, at_frame);
+                self.ensure_stems(&track.id);
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
@@ -237,6 +279,10 @@ impl Engine {
                 at_frame,
             } => {
                 self.clock.anchor(position_ms, at_frame);
+                let id = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
+                if let Some(id) = id {
+                    self.set_anchor(&id, position_ms, at_frame);
+                }
                 self.set_status(PlaybackStatus::Playing);
             }
             SourceEvent::TrackUpdated { track } => {
@@ -276,6 +322,7 @@ impl Engine {
             }
             SourceEvent::NextTrackHint { track } => {
                 tracing::info!(title = %track.title, "next track hint");
+                self.ensure_stems(&track.id);
                 self.state_tx.send_modify(|s| {
                     s.next_track = Some(track);
                     s.revision += 1;
@@ -406,6 +453,59 @@ impl Engine {
         }));
     }
 
+    fn set_anchor(&mut self, id: &TrackId, position_ms: u64, at_frame: u64) {
+        if self.prebuffer.is_none() {
+            return;
+        }
+        self.processor.control().set_anchor(Some(Anchor {
+            track: Arc::new(id.clone()),
+            at_frame,
+            track_frame: stems_core::ms_to_frames(position_ms),
+        }));
+    }
+
+    /// Start fetching + separating `id` unless stems exist or are underway.
+    fn ensure_stems(&mut self, id: &TrackId) {
+        let Some(p) = self.prebuffer.as_mut() else {
+            return;
+        };
+        if p.offline.store().contains(id) {
+            return;
+        }
+        if let Some(t) = p.tasks.get(id) {
+            if !t.is_finished() {
+                return;
+            }
+        }
+        let fetcher = Arc::clone(&p.fetcher);
+        let tx = p.tx.clone();
+        let id2 = id.clone();
+        let task = tokio::spawn(async move {
+            let started = Instant::now();
+            match fetcher.fetch(&id2).await {
+                Ok(pcm) => {
+                    tracing::info!(
+                        track = ?id2,
+                        secs = format!("{:.1}", pcm.len() as f32 / 2.0 / 44_100.0),
+                        took = format!("{:.1}s", started.elapsed().as_secs_f32()),
+                        "track fetched for pre-buffering"
+                    );
+                    let _ = tx.send((id2, Arc::new(pcm))).await;
+                }
+                Err(e) => tracing::warn!(track = ?id2, "pre-buffer fetch failed: {e:#}"),
+            }
+        });
+        p.tasks.insert(id.clone(), task);
+        // keep the map from growing over a long session
+        p.tasks.retain(|_, t| !t.is_finished());
+    }
+
+    fn on_pcm(&mut self, id: TrackId, pcm: Arc<Vec<f32>>) {
+        if let Some(p) = self.prebuffer.as_mut() {
+            p.offline.submit(id, pcm);
+        }
+    }
+
     fn spawn_video_fetch(&mut self, track: TrackRef) {
         let Some(fetcher) = self.video.clone() else {
             return;
@@ -477,7 +577,43 @@ impl Engine {
         });
     }
 
+    /// Publish how far the pre-buffered stems reach for the current track
+    /// (~1 Hz while a job runs, once when done).
+    fn publish_stems_progress(&mut self) {
+        let Some(p) = self.prebuffer.as_ref() else {
+            return;
+        };
+        let id = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
+        let progress =
+            id.and_then(|id| p.offline.store().get(&id))
+                .map(|b| stems_core::StemsProgress {
+                    ready_ms: stems_core::frames_to_ms(b.ready_frames() as u64),
+                    total_ms: stems_core::frames_to_ms(b.total_frames() as u64),
+                    done: b.is_done(),
+                });
+        self.state_tx.send_if_modified(|s| {
+            let changed = match (&s.karaoke.stems, &progress) {
+                (Some(a), Some(b)) => a.done != b.done || a.ready_ms.abs_diff(b.ready_ms) >= 1000,
+                (None, None) => false,
+                _ => true,
+            };
+            if changed {
+                if progress.as_ref().is_some_and(|p| p.done)
+                    && !s.karaoke.stems.as_ref().is_some_and(|p| p.done)
+                {
+                    tracing::info!("stems complete for the current track");
+                }
+                s.karaoke.stems = progress;
+                s.revision += 1;
+            }
+            changed
+        });
+    }
+
     fn tick(&mut self) {
+        if self.tick_count % 5 == 0 {
+            self.publish_stems_progress();
+        }
         let status = self.state_tx.borrow().status;
         let revision = self.state_tx.borrow().revision;
         let position_ms = self.clock.position_ms(self.sink.frames_emitted());

@@ -9,14 +9,40 @@ use stems_sep::CentreCancel;
 use crate::config::KaraokeConfig;
 
 pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn Separator>> {
-    match cfg.backend.as_str() {
-        "dsp" => Ok(Box::new(CentreCancel::default())),
-        "mdx" => build_mdx(cfg, models_dir).await,
-        "remote" => build_remote(cfg).await,
-        other => Err(anyhow!(
-            "unknown karaoke backend `{other}` (dsp, mdx, remote)"
-        )),
+    if cfg.backend == "dsp" {
+        return Ok(Box::new(CentreCancel::default()));
     }
+    let opts = stream_opts(cfg);
+    let r = build_runners(cfg, models_dir).await?;
+    let sep = stems_sep::MdxSeparator::with_runners(r.params, r.provider, r.runners, opts);
+    tracing::info!(
+        backend = cfg.backend,
+        latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
+        "streaming separator ready"
+    );
+    Ok(Box::new(sep))
+}
+
+/// `mode = "prebuffer"`: whole-track jobs on the same runners; the audio
+/// path reads finished stems with zero latency.
+pub async fn build_offline(
+    cfg: &KaraokeConfig,
+    models_dir: PathBuf,
+) -> Result<stems_sep::OfflineSeparator> {
+    anyhow::ensure!(
+        cfg.backend != "dsp",
+        "mode = \"prebuffer\" needs an ML backend (mdx or remote)"
+    );
+    let opts = stream_opts(cfg);
+    let r = build_runners(cfg, models_dir).await?;
+    tracing::info!(
+        backend = cfg.backend,
+        provider = r.provider,
+        "offline separator ready"
+    );
+    Ok(stems_sep::OfflineSeparator::new(
+        r.params, r.provider, r.runners, opts,
+    ))
 }
 
 fn stream_opts(cfg: &KaraokeConfig) -> stems_sep::StreamOpts {
@@ -25,56 +51,87 @@ fn stream_opts(cfg: &KaraokeConfig) -> stems_sep::StreamOpts {
         hop_frames: ms(cfg.hop_ms),
         lookahead_frames: ms(cfg.lookahead_ms),
         slack_frames: ms(cfg.slack_ms),
-        denoise: cfg.denoise,
+        // model sessions batch x/−x themselves; the remote does it server-side
+        denoise: false,
         workers: cfg.workers.max(1),
         realtime: true,
     }
 }
 
-/// `backend = "remote"`: windows go to a `stemsd worker` on another
-/// machine; one connection per streaming worker.
-async fn build_remote(cfg: &KaraokeConfig) -> Result<Box<dyn Separator>> {
-    use stems_sep::remote::RemoteRunner;
-    use stems_sep::{MdxSeparator, WindowRunner};
+struct Runners {
+    params: stems_sep::MdxParams,
+    provider: &'static str,
+    runners: Vec<stems_sep::WindowRunner>,
+}
 
-    anyhow::ensure!(
-        !cfg.remote.is_empty(),
-        "backend = \"remote\" needs `remote = \"host:port\"` in [karaoke]"
-    );
-    let opts = stream_opts(cfg);
-    let addr = cfg.remote.clone();
-    let n = opts.workers;
-    let conns = tokio::task::spawn_blocking(move || {
-        (0..n)
-            .map(|_| RemoteRunner::connect(addr.as_str()))
-            .collect::<Result<Vec<_>>>()
-    })
-    .await
-    .context("worker connect task")??;
-    let hello = conns[0].hello().clone();
-    tracing::info!(
-        remote = cfg.remote,
-        model = hello.model,
-        provider = hello.provider,
-        connections = n,
-        "remote separation worker"
-    );
-    let denoise = opts.denoise;
-    let runners: Vec<WindowRunner> = conns
-        .into_iter()
-        .map(|mut c| -> WindowRunner { Box::new(move |w: &[f32]| c.run(w, denoise)) })
-        .collect();
-    // the remote already averaged x/−x, so the local wrapper must not
-    let opts = stems_sep::StreamOpts {
-        denoise: false,
-        ..opts
-    };
-    let sep = MdxSeparator::with_runners(hello.params, "remote", runners, opts);
-    tracing::info!(
-        latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
-        "remote separator ready"
-    );
-    Ok(Box::new(sep))
+/// Window runners for the configured backend: in-process model sessions
+/// or connections to a `stemsd worker`.
+async fn build_runners(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Runners> {
+    use stems_sep::WindowRunner;
+    match cfg.backend.as_str() {
+        #[cfg(not(feature = "onnx"))]
+        "mdx" => {
+            let _ = models_dir;
+            Err(anyhow!(
+                "this build has no ONNX support; rebuild stemsd with `--features onnx`"
+            ))
+        }
+        #[cfg(feature = "onnx")]
+        "mdx" => {
+            let models = load_models(cfg, models_dir, cfg.workers.max(1)).await?;
+            let params = models[0].params().clone();
+            let provider = models[0].provider();
+            let denoise = cfg.denoise;
+            let runners = models
+                .into_iter()
+                .map(|mut m| -> WindowRunner {
+                    Box::new(move |w: &[f32]| m.instrumental_for_window_opt(w, denoise))
+                })
+                .collect();
+            Ok(Runners {
+                params,
+                provider,
+                runners,
+            })
+        }
+        "remote" => {
+            use stems_sep::remote::RemoteRunner;
+            anyhow::ensure!(
+                !cfg.remote.is_empty(),
+                "backend = \"remote\" needs `remote = \"host:port\"` in [karaoke]"
+            );
+            let addr = cfg.remote.clone();
+            let n = cfg.workers.max(1);
+            let conns = tokio::task::spawn_blocking(move || {
+                (0..n)
+                    .map(|_| RemoteRunner::connect(addr.as_str()))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .context("worker connect task")??;
+            let hello = conns[0].hello().clone();
+            tracing::info!(
+                remote = cfg.remote,
+                model = hello.model,
+                provider = hello.provider,
+                connections = n,
+                "remote separation worker"
+            );
+            let denoise = cfg.denoise;
+            let runners = conns
+                .into_iter()
+                .map(|mut c| -> WindowRunner { Box::new(move |w: &[f32]| c.run(w, denoise)) })
+                .collect();
+            Ok(Runners {
+                params: hello.params,
+                provider: "remote",
+                runners,
+            })
+        }
+        other => Err(anyhow!(
+            "unknown karaoke backend `{other}` (dsp, mdx, remote)"
+        )),
+    }
 }
 
 /// Resolve and (if needed) download the configured model; load
@@ -117,25 +174,6 @@ pub async fn load_models(
     })
     .await
     .context("model load task")?
-}
-
-#[cfg(feature = "onnx")]
-async fn build_mdx(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn Separator>> {
-    let opts = stream_opts(cfg);
-    let models = load_models(cfg, models_dir, opts.workers).await?;
-    let sep = stems_sep::MdxSeparator::with_models(models, opts);
-    tracing::info!(
-        latency_ms = sep.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64,
-        "mdx separator ready"
-    );
-    Ok(Box::new(sep))
-}
-
-#[cfg(not(feature = "onnx"))]
-async fn build_mdx(_cfg: &KaraokeConfig, _models_dir: PathBuf) -> Result<Box<dyn Separator>> {
-    Err(anyhow!(
-        "this build has no ONNX support; rebuild stemsd with `--features onnx`"
-    ))
 }
 
 #[cfg(feature = "onnx")]

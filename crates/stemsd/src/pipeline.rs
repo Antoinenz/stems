@@ -47,9 +47,73 @@ fn build_chain(
     Ok((src_producer, src_flush, processor, sink))
 }
 
-async fn separator(cfg: &Config) -> Result<Box<dyn Separator>> {
+/// The audio-path separator plus, in `prebuffer` mode, the offline job
+/// runner the engine feeds with whole tracks.
+struct Separation {
+    audio: Box<dyn Separator>,
+    offline: Option<stems_sep::OfflineSeparator>,
+}
+
+async fn separator(cfg: &Config) -> Result<Separation> {
     let models_dir = crate::config::paths()?.models_dir;
-    crate::separator::build(&cfg.karaoke, models_dir).await
+    match cfg.karaoke.mode.as_str() {
+        "prebuffer" => {
+            let offline = crate::separator::build_offline(&cfg.karaoke, models_dir).await?;
+            let audio = Box::new(stems_sep::CachedStemSeparator::new(offline.store()));
+            tracing::info!("karaoke mode: prebuffer (zero-latency, stems computed ahead)");
+            Ok(Separation {
+                audio,
+                offline: Some(offline),
+            })
+        }
+        "streaming" => Ok(Separation {
+            audio: crate::separator::build(&cfg.karaoke, models_dir).await?,
+            offline: None,
+        }),
+        other => Err(anyhow::anyhow!(
+            "unknown karaoke mode `{other}` (streaming, prebuffer)"
+        )),
+    }
+}
+
+/// Whole-file decode for pre-buffering local playback.
+struct FileFetcher;
+
+impl stems_core::PcmFetcher for FileFetcher {
+    fn fetch(
+        &self,
+        id: &stems_core::TrackId,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + '_>> {
+        let id = id.clone();
+        Box::pin(async move {
+            match id {
+                stems_core::TrackId::Local(p) => {
+                    tokio::task::spawn_blocking(move || stems_source_file::decode_file(&p))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("decode task: {e}"))?
+                }
+                other => Err(anyhow::anyhow!("not a local file: {other:?}")),
+            }
+        })
+    }
+}
+
+/// Spotify download + decode for pre-buffering.
+struct SpotifyFetcher(stems_source_spotify::fetch::TrackFetcher);
+
+impl stems_core::PcmFetcher for SpotifyFetcher {
+    fn fetch(
+        &self,
+        id: &stems_core::TrackId,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + '_>> {
+        let id = id.clone();
+        Box::pin(async move {
+            match id {
+                stems_core::TrackId::Spotify(base62) => self.0.fetch(&base62).await,
+                other => Err(anyhow::anyhow!("not a spotify track: {other:?}")),
+            }
+        })
+    }
 }
 
 pub fn build_sink(
@@ -132,8 +196,8 @@ pub async fn play_file(
     title: Option<String>,
     artist: Option<String>,
 ) -> Result<()> {
-    let separator = separator(cfg).await?;
-    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind, separator)?;
+    let sep = separator(cfg).await?;
+    let (producer, _flush, processor, sink) = build_chain(RING_SECONDS, sink_kind, sep.audio)?;
     let mut source = FileSource::open(file, producer)?;
     source.set_metadata(title, artist);
     let track = source.track();
@@ -153,6 +217,10 @@ pub async fn play_file(
         Some(v) => engine.with_video(v),
         None => engine,
     };
+    let engine = match sep.offline {
+        Some(off) => engine.with_prebuffer(off, std::sync::Arc::new(FileFetcher)),
+        None => engine,
+    };
     spawn_server(cfg, web_dir, &ch);
     engine.run().await
 }
@@ -162,8 +230,8 @@ pub async fn run_spotify(
     web_dir: Option<PathBuf>,
     sink_kind: &SinkKind,
 ) -> Result<()> {
-    let separator = separator(cfg).await?;
-    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind, separator)?;
+    let sep = separator(cfg).await?;
+    let (producer, flush, processor, sink) = build_chain(LIVE_RING_SECONDS, sink_kind, sep.audio)?;
 
     let paths = crate::config::paths()?;
     let cache_dir = paths.cache_dir.join("spotify");
@@ -184,6 +252,7 @@ pub async fn run_spotify(
     };
 
     let source = SpotifySource::start(spotify_cfg, producer, flush).await?;
+    let fetcher = source.fetcher();
     tracing::info!(name = %cfg.device_name, sink = sink.name(), "waiting for a Spotify client");
 
     let cache = open_cache()?;
@@ -199,6 +268,10 @@ pub async fn run_spotify(
     engine.set_volume(cfg.spotify.initial_volume_percent as f32 / 100.0);
     let engine = match video_fetcher(cfg)? {
         Some(v) => engine.with_video(v),
+        None => engine,
+    };
+    let engine = match sep.offline {
+        Some(off) => engine.with_prebuffer(off, std::sync::Arc::new(SpotifyFetcher(fetcher))),
         None => engine,
     };
     spawn_server(cfg, web_dir, &ch);
