@@ -15,10 +15,10 @@ pub mod track;
 pub use clock::Clock;
 pub use separator::{Separator, TrackPos};
 pub use sink::Sink;
-pub use source::{Source, SourceEvent};
+pub use source::{PcmFetcher, Source, SourceEvent};
 pub use state::{
     ClockTick, Command, KaraokeState, LyricLine, LyricWord, Lyrics, Media, PlaybackState,
-    PlaybackStatus, ViewMode,
+    PlaybackStatus, StemsProgress, ViewMode,
 };
 pub use track::{TrackId, TrackRef};
 

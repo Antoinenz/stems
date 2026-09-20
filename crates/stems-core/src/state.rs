@@ -26,6 +26,18 @@ pub struct KaraokeState {
     /// Which backend is producing the processed signal, e.g. `"dsp"`,
     /// `"mdx"`, `"remote"`. `None` when no separator is available.
     pub backend: Option<String>,
+    /// Pre-buffered stems for the current track: how far they reach.
+    /// `None` in streaming mode or before a job has started.
+    #[serde(default)]
+    pub stems: Option<StemsProgress>,
+}
+
+/// Progress of pre-buffered separation for the current track.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StemsProgress {
+    pub ready_ms: u64,
+    pub total_ms: u64,
+    pub done: bool,
 }
 
 impl Default for KaraokeState {
@@ -34,6 +46,7 @@ impl Default for KaraokeState {
             enabled: false,
             vocal_gain: 0.0,
             backend: None,
+            stems: None,
         }
     }
 }

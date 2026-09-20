@@ -85,3 +85,12 @@ pub trait Source: Send {
     /// Ask the source to stop and release resources. Idempotent.
     fn shutdown(&mut self);
 }
+
+/// Whole-track audio for pre-buffered separation: interleaved stereo f32
+/// at 44.1 kHz. Implemented per source (Spotify download, local decode).
+pub trait PcmFetcher: Send + Sync {
+    fn fetch(
+        &self,
+        id: &crate::TrackId,
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Vec<f32>>> + Send + '_>>;
+}
