@@ -347,17 +347,14 @@ mod tests {
 
 /// Background word alignment of whole tracks from their stem buffers.
 pub mod worker {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, mpsc};
-
-    /// Receives each aligned line; called from the worker thread.
-    pub type OnAligned = Box<dyn Fn(Aligned) + Send>;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
     use stems_core::{LyricLine, LyricWord, TrackId, frames_to_ms, ms_to_frames};
 
-    use super::{ALIGN_RATE, Aligner, to_16k};
+    use super::{Aligner, to_16k};
     use crate::offline::StemBuffer;
 
     /// One line's alignment result.
@@ -367,102 +364,161 @@ pub mod worker {
         pub words: Vec<LyricWord>,
     }
 
+    /// Receives each aligned line; called from the worker thread.
+    pub type OnAligned = Box<dyn Fn(Aligned) + Send>;
+
     struct Job {
-        generation: u64,
         track: TrackId,
         buf: Arc<StemBuffer>,
         lines: Vec<LyricLine>,
     }
 
-    /// Feeds lines to the aligner as soon as their audio is separated,
-    /// sending word timings back one line at a time. A new job supersedes
-    /// the running one.
+    #[derive(Default)]
+    struct Queue {
+        jobs: VecDeque<Job>,
+        /// Tracks worth aligning (playing + upcoming); anything else is dropped.
+        keep: Vec<TrackId>,
+        closed: bool,
+    }
+
+    /// Aligns tracks one at a time in submission order, sending word
+    /// timings back one line at a time. Lines are grouped into chunks of
+    /// up to [`CHUNK_MS`] so a line's own timestamp only has to be roughly
+    /// right — the model places the words within the chunk.
     pub struct AlignWorker {
-        tx: mpsc::Sender<Job>,
-        generation: Arc<AtomicU64>,
+        queue: Arc<(Mutex<Queue>, Condvar)>,
         thread: Option<JoinHandle<()>>,
     }
 
-    /// Lead-in before a line's timestamp and tail after the next one's.
-    const PRE_MS: u64 = 600;
-    const POST_MS: u64 = 300;
-    /// Longest window handed to the model (last lines, sparse LRC).
-    const MAX_WINDOW_MS: u64 = 15_000;
+    /// Audio before the first line of a chunk and after the next chunk's first line.
+    const PRE_MS: u64 = 1_500;
+    const POST_MS: u64 = 1_000;
+    /// Target chunk length handed to the model.
+    const CHUNK_MS: u64 = 20_000;
     /// Mean letter log-probability below which a line is left unaligned.
     const MIN_SCORE: f32 = -3.0;
 
     impl AlignWorker {
         pub fn new(aligner: Aligner, results: OnAligned) -> Self {
-            let (tx, rx) = mpsc::channel::<Job>();
-            let generation = Arc::new(AtomicU64::new(0));
-            let g = Arc::clone(&generation);
+            let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
+            let q = Arc::clone(&queue);
             let thread = thread::Builder::new()
                 .name("stems-align".into())
                 .spawn(move || {
                     let mut aligner = aligner;
-                    for job in rx {
-                        if job.generation != g.load(Ordering::Acquire) {
-                            continue; // superseded while queued
-                        }
-                        run_job(&mut aligner, &job, &g, &results);
+                    loop {
+                        let job = {
+                            let (lock, cv) = &*q;
+                            let mut g = lock.lock().expect("align queue");
+                            loop {
+                                if let Some(j) = g.jobs.pop_front() {
+                                    break j;
+                                }
+                                if g.closed {
+                                    return;
+                                }
+                                g = cv.wait(g).expect("align queue");
+                            }
+                        };
+                        run_job(&mut aligner, &job, &q, &results);
                     }
                 })
                 .expect("spawn align worker");
             Self {
-                tx,
-                generation,
+                queue,
                 thread: Some(thread),
             }
         }
 
-        /// Align `lines` of `track` from `buf`; replaces any running job.
+        /// Queue `track` for alignment (and keep it).
         pub fn submit(&self, track: TrackId, buf: Arc<StemBuffer>, lines: Vec<LyricLine>) {
-            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-            let _ = self.tx.send(Job {
-                generation,
-                track,
-                buf,
-                lines,
-            });
+            let (lock, cv) = &*self.queue;
+            let mut g = lock.lock().expect("align queue");
+            if !g.keep.contains(&track) {
+                g.keep.push(track.clone());
+            }
+            g.jobs.retain(|j| j.track != track);
+            g.jobs.push_back(Job { track, buf, lines });
+            cv.notify_one();
         }
 
-        /// Stop the running job (e.g. the track changed and has no lyrics).
-        pub fn cancel(&self) {
-            self.generation.fetch_add(1, Ordering::AcqRel);
+        /// Drop queued work and abort the running job for every track not
+        /// in `keep`.
+        pub fn focus(&self, keep: &[&TrackId]) {
+            let (lock, _) = &*self.queue;
+            let mut g = lock.lock().expect("align queue");
+            g.keep = keep.iter().map(|t| (*t).clone()).collect();
+            g.jobs.retain(|j| keep.contains(&&j.track));
         }
     }
 
     impl Drop for AlignWorker {
         fn drop(&mut self) {
-            self.cancel();
-            let (tx, _) = mpsc::channel();
-            self.tx = tx;
+            let (lock, cv) = &*self.queue;
+            if let Ok(mut g) = lock.lock() {
+                g.closed = true;
+                g.keep.clear();
+            }
+            cv.notify_all();
             if let Some(t) = self.thread.take() {
                 let _ = t.join();
             }
         }
     }
 
-    fn run_job(aligner: &mut Aligner, job: &Job, g: &AtomicU64, results: &OnAligned) {
+    fn wanted(q: &Arc<(Mutex<Queue>, Condvar)>, track: &TrackId) -> bool {
+        let (lock, _) = &**q;
+        lock.lock().map(|g| g.keep.contains(track)).unwrap_or(false)
+    }
+
+    /// Consecutive lines grouped so each group spans about `CHUNK_MS`.
+    fn chunks(lines: &[LyricLine]) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start < lines.len() {
+            let t0 = lines[start].time_ms;
+            let mut end = start + 1;
+            while end < lines.len() && lines[end].time_ms.saturating_sub(t0) < CHUNK_MS {
+                end += 1;
+            }
+            out.push((start, end));
+            start = end;
+        }
+        out
+    }
+
+    fn run_job(
+        aligner: &mut Aligner,
+        job: &Job,
+        q: &Arc<(Mutex<Queue>, Condvar)>,
+        results: &OnAligned,
+    ) {
         let total_ms = frames_to_ms(job.buf.total_frames() as u64);
         let n = job.lines.len();
         let mut aligned = 0usize;
-        for i in 0..n {
-            let line = &job.lines[i];
-            let words: Vec<String> = line.text.split_whitespace().map(String::from).collect();
+        for (a, b) in chunks(&job.lines) {
+            // words of the chunk with their line index
+            let mut words: Vec<String> = Vec::new();
+            let mut owner: Vec<usize> = Vec::new();
+            for (i, line) in job.lines[a..b].iter().enumerate() {
+                for w in line.text.split_whitespace() {
+                    words.push(w.to_string());
+                    owner.push(a + i);
+                }
+            }
             if words.is_empty() {
                 continue;
             }
-            let next = job.lines.get(i + 1).map(|l| l.time_ms).unwrap_or(total_ms);
-            let start = line.time_ms.saturating_sub(PRE_MS);
-            let end = (next + POST_MS).min(total_ms).min(start + MAX_WINDOW_MS);
-            if end <= start + 200 {
+            let next = job.lines.get(b).map(|l| l.time_ms).unwrap_or(total_ms);
+            let start = job.lines[a].time_ms.saturating_sub(PRE_MS);
+            let end = (next + POST_MS).min(total_ms);
+            if end <= start + 500 {
                 continue;
             }
             let (from, to) = (ms_to_frames(start) as usize, ms_to_frames(end) as usize);
-            // wait for the stems to reach this line
+            // wait for the stems to reach this chunk
             let vocals = loop {
-                if job.generation != g.load(Ordering::Acquire) || job.buf.is_cancelled() {
+                if !wanted(q, &job.track) || job.buf.is_cancelled() {
                     return;
                 }
                 if let Some(v) = job.buf.read_vocals_mono(from, to) {
@@ -471,36 +527,60 @@ pub mod worker {
                 thread::sleep(Duration::from_millis(200));
             };
             let audio = to_16k(&vocals);
-            match aligner.align(&audio, &words) {
-                Ok(Some(spans)) => {
-                    let mean = spans.iter().map(|s| s.score).sum::<f32>() / spans.len() as f32;
-                    if mean < MIN_SCORE {
-                        tracing::debug!(line = i, score = format!("{mean:.2}"), "line not aligned");
-                        continue;
-                    }
-                    let words_out: Vec<LyricWord> = words
-                        .iter()
-                        .zip(&spans)
-                        .map(|(w, sp)| LyricWord {
-                            time_ms: start + sp.start_ms as u64,
-                            text: w.clone(),
-                        })
-                        .collect();
-                    aligned += 1;
-                    results(Aligned {
-                        track: job.track.clone(),
-                        line: i,
-                        words: words_out,
-                    });
+            let spans = match aligner.align(&audio, &words) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    tracing::debug!(lines = ?(a, b), "chunk not alignable");
+                    continue;
                 }
-                Ok(None) => tracing::debug!(line = i, "line not alignable"),
                 Err(e) => {
                     tracing::warn!("alignment failed: {e:#}");
                     return;
                 }
+            };
+            // hand back each line whose words scored well enough
+            for li in a..b {
+                let idx: Vec<usize> = (0..words.len()).filter(|k| owner[*k] == li).collect();
+                if idx.is_empty() {
+                    continue;
+                }
+                let mean = idx.iter().map(|k| spans[*k].score).sum::<f32>() / idx.len() as f32;
+                if mean < MIN_SCORE {
+                    tracing::debug!(line = li, score = format!("{mean:.2}"), "line not aligned");
+                    continue;
+                }
+                let words_out: Vec<LyricWord> = idx
+                    .iter()
+                    .map(|k| LyricWord {
+                        time_ms: start + spans[*k].start_ms as u64,
+                        text: words[*k].clone(),
+                    })
+                    .collect();
+                aligned += 1;
+                results(Aligned {
+                    track: job.track.clone(),
+                    line: li,
+                    words: words_out,
+                });
             }
         }
         tracing::info!(track = ?job.track, lines = n, aligned, "lyrics aligned to vocals");
-        let _ = ALIGN_RATE;
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn chunks_group_lines_by_duration() {
+            let lines: Vec<LyricLine> = (0..10)
+                .map(|i| LyricLine {
+                    time_ms: i * 6_000,
+                    text: "la".into(),
+                    words: vec![],
+                })
+                .collect();
+            assert_eq!(chunks(&lines), vec![(0, 4), (4, 8), (8, 10)]);
+        }
     }
 }

@@ -31,8 +31,12 @@ struct Prebuffer {
     rx: mpsc::Receiver<(TrackId, Arc<Vec<f32>>, u64, bool)>,
     /// Word-level lyric alignment on the separated vocals.
     align: Option<align::AlignWorker>,
-    /// Track whose lyrics are being (or have been) aligned.
-    aligning: Option<TrackId>,
+    /// Lyrics submitted for alignment (playing and upcoming tracks),
+    /// updated with words as they come back.
+    aligning: HashMap<TrackId, (TrackRef, Lyrics)>,
+    /// Lyrics fetched ahead for the announced next track.
+    next_lyrics: Option<(TrackRef, Lyrics)>,
+    next_task: Option<JoinHandle<()>>,
 }
 
 #[cfg(feature = "onnx")]
@@ -57,7 +61,7 @@ mod align {
 
     impl AlignWorker {
         pub fn submit(&self, _t: TrackId, _b: Arc<StemBuffer>, _l: Vec<LyricLine>) {}
-        pub fn cancel(&self) {}
+        pub fn focus(&self, _keep: &[&TrackId]) {}
     }
 }
 
@@ -191,7 +195,9 @@ impl Engine {
             tx,
             rx,
             align: None,
-            aligning: None,
+            aligning: HashMap::new(),
+            next_lyrics: None,
+            next_task: None,
         });
         self
     }
@@ -285,18 +291,21 @@ impl Engine {
                 self.set_anchor(&track.id, position_ms, at_frame);
                 self.focus_stems(&track.id);
                 self.ensure_stems(&track.id, position_ms, true);
-                if let Some(p) = self.prebuffer.as_mut() {
-                    if p.aligning.as_ref() != Some(&track.id) {
-                        p.aligning = None;
-                        if let Some(w) = p.align.as_ref() {
-                            w.cancel();
-                        }
+                let prealigned = self.prebuffer.as_mut().and_then(|p| {
+                    p.aligning.retain(|id, _| *id == track.id);
+                    if let Some(w) = p.align.as_ref() {
+                        w.focus(&[&track.id]);
                     }
-                }
+                    p.next_lyrics
+                        .take()
+                        .filter(|(t, _)| t.id == track.id)
+                        .map(|(_, l)| l)
+                });
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
-                // Precedence: local override file → cache → provider.
+                // Precedence: local override file → lyrics fetched (and
+                // maybe word-aligned) ahead for this track → cache → provider.
                 let local = match self.local_lyrics.lookup(&track) {
                     Ok(l) => l,
                     Err(e) => {
@@ -304,6 +313,7 @@ impl Engine {
                         None
                     }
                 };
+                let local = local.or(prealigned);
                 let cached = match &local {
                     Some(l) => Cached::Hit(l.clone()),
                     None => match self.cache.get_lyrics(&track) {
@@ -395,7 +405,11 @@ impl Engine {
                 let current = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
                 if let (Some(p), Some(cur)) = (self.prebuffer.as_ref(), current) {
                     p.offline.focus(&[&cur, &track.id]);
+                    if let Some(w) = p.align.as_ref() {
+                        w.focus(&[&cur, &track.id]);
+                    }
                 }
+                self.spawn_next_lyrics(track.clone());
                 self.state_tx.send_modify(|s| {
                     s.next_track = Some(track);
                     s.revision += 1;
@@ -488,6 +502,21 @@ impl Engine {
 
     fn on_lyrics(&mut self, id: TrackId, lyrics: Option<Lyrics>) {
         let current = self.state_tx.borrow().track.clone();
+        if current.as_ref().map(|t| &t.id) != Some(&id) {
+            // lyrics fetched ahead for the next track
+            let next = self.state_tx.borrow().next_track.clone();
+            if let (Some(p), Some(nt), Some(l)) = (self.prebuffer.as_mut(), next, lyrics) {
+                if nt.id == id {
+                    if let Err(e) = self.cache.put_lyrics(&nt, Some(&l)) {
+                        tracing::warn!("cache: {e:#}");
+                    }
+                    tracing::info!(title = %nt.title, lines = l.lines.len(), "lyrics ready for next track");
+                    p.next_lyrics = Some((nt, l));
+                    self.maybe_align_next();
+                }
+            }
+            return;
+        }
         if let Some(t) = current.as_ref().filter(|t| t.id == id) {
             if let Err(e) = self.cache.put_lyrics(t, lyrics.as_ref()) {
                 tracing::warn!("cache: {e:#}");
@@ -616,64 +645,124 @@ impl Engine {
         };
         p.offline.submit(id, pcm, wanted, urgent);
         self.maybe_align();
+        self.maybe_align_next();
     }
 
     /// Start word alignment once the playing track has both a stem buffer
     /// and synced lyrics (whichever arrives last triggers it).
     fn maybe_align(&mut self) {
+        let (track, lyrics) = {
+            let s = self.state_tx.borrow();
+            (s.track.clone(), s.lyrics.clone())
+        };
+        let (Some(track), Some(mut lyrics)) = (track, lyrics) else {
+            return;
+        };
+        // stored without the global offset, like the cache
+        lyrics.offset_ms -= self.lyrics_offset_ms;
+        self.submit_alignment(track, lyrics);
+    }
+
+    /// Same for the announced next track, so it is word-timed before it
+    /// starts.
+    fn maybe_align_next(&mut self) {
+        let next = self.prebuffer.as_ref().and_then(|p| p.next_lyrics.clone());
+        if let Some((track, lyrics)) = next {
+            self.submit_alignment(track, lyrics);
+        }
+    }
+
+    fn submit_alignment(&mut self, track: TrackRef, lyrics: Lyrics) {
         let Some(p) = self.prebuffer.as_mut() else {
             return;
         };
         let Some(worker) = p.align.as_ref() else {
             return;
         };
-        let (track, lyrics) = {
-            let s = self.state_tx.borrow();
-            (s.track.clone(), s.lyrics.clone())
-        };
-        let Some(track) = track else { return };
-        if p.aligning.as_ref() == Some(&track.id) {
+        if !lyrics.is_synced()
+            || p.aligning.contains_key(&track.id)
+            || lyrics.lines.iter().all(|l| !l.words.is_empty())
+        {
             return;
-        }
-        let Some(lyrics) = lyrics.filter(|l| l.is_synced()) else {
-            return;
-        };
-        if lyrics.lines.iter().all(|l| !l.words.is_empty()) {
-            return; // already word-timed (enhanced LRC or a previous run)
         }
         let Some(buf) = p.offline.store().get(&track.id) else {
             return;
         };
         tracing::info!(title = %track.title, lines = lyrics.lines.len(), "aligning lyrics to vocals");
-        p.aligning = Some(track.id.clone());
-        worker.submit(track.id.clone(), buf, lyrics.lines);
+        worker.submit(track.id.clone(), buf, lyrics.lines.clone());
+        p.aligning.insert(track.id.clone(), (track, lyrics));
+    }
+
+    /// Lyrics for the upcoming track: cache, then provider (in the background).
+    fn spawn_next_lyrics(&mut self, track: TrackRef) {
+        let Some(p) = self.prebuffer.as_mut() else {
+            return;
+        };
+        if p.next_lyrics
+            .as_ref()
+            .is_some_and(|(t, _)| t.id == track.id)
+        {
+            return;
+        }
+        p.next_lyrics = None;
+        if let Some(t) = p.next_task.take() {
+            t.abort();
+        }
+        if let Ok(Cached::Hit(l)) = self.cache.get_lyrics(&track) {
+            p.next_lyrics = Some((track, l));
+            self.maybe_align_next();
+            return;
+        }
+        let client = self.lyrics.clone();
+        let tx = self.lyrics_tx.clone();
+        p.next_task = Some(tokio::spawn(async move {
+            match client.lookup(&track).await {
+                Ok(Some(l)) => {
+                    let _ = tx.send((track.id.clone(), Some(l))).await;
+                }
+                Ok(None) => tracing::info!(title = %track.title, "no lyrics for next track"),
+                Err(e) => tracing::warn!("next track lyrics: {e:#}"),
+            }
+        }));
     }
 
     fn on_aligned(&mut self, a: align::Aligned) {
         let global = self.lyrics_offset_ms;
-        let mut persisted: Option<(TrackRef, Lyrics)> = None;
+        // live state, when it is the playing track
         self.state_tx.send_if_modified(|s| {
-            let Some(t) = s.track.as_ref().filter(|t| t.id == a.track) else {
+            if s.track.as_ref().map(|t| &t.id) != Some(&a.track) {
+                return false;
+            }
+            let Some(line) = s.lyrics.as_mut().and_then(|l| l.lines.get_mut(a.line)) else {
                 return false;
             };
-            let t = t.clone();
-            let Some(l) = s.lyrics.as_mut() else {
-                return false;
-            };
-            let Some(line) = l.lines.get_mut(a.line) else {
-                return false;
-            };
-            line.words = a.words;
+            line.words = a.words.clone();
             s.revision += 1;
-            // the cache holds provider timings without the global offset
-            let mut raw = l.clone();
-            raw.offset_ms -= global;
-            persisted = Some((t, raw));
             true
         });
-        if let Some((t, l)) = persisted {
-            if let Err(e) = self.cache.put_lyrics(&t, Some(&l)) {
+        // the copy being aligned (playing or upcoming), persisted each time
+        let Some(p) = self.prebuffer.as_mut() else {
+            return;
+        };
+        let Some((track, lyrics)) = p.aligning.get_mut(&a.track) else {
+            return;
+        };
+        if let Some(line) = lyrics.lines.get_mut(a.line) {
+            line.words = a.words;
+        }
+        let _ = global;
+        // store under the ISRC key and the id-only key: the playing track's
+        // ISRC arrives after it starts, so both lookups must hit
+        let mut by_id = track.clone();
+        by_id.isrc = None;
+        for t in [&*track, &by_id] {
+            if let Err(e) = self.cache.put_lyrics(t, Some(lyrics)) {
                 tracing::warn!("cache: {e:#}");
+            }
+        }
+        if let Some((nt, nl)) = p.next_lyrics.as_mut() {
+            if nt.id == a.track {
+                *nl = lyrics.clone();
             }
         }
     }

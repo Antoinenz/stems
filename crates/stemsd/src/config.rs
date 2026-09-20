@@ -98,6 +98,11 @@ pub struct KaraokeConfig {
     pub mode: String,
     /// Crossfade when karaoke is switched on or off, milliseconds.
     pub fade_ms: u64,
+    /// Share of time the pre-buffer job may keep the accelerator busy
+    /// (0.1–1.0). Below 1.0 each window is followed by a proportional pause,
+    /// leaving headroom for the OS, lyric alignment and video downloads at
+    /// the cost of stems taking longer to prepare.
+    pub gpu_limit: f32,
 }
 
 impl Default for KaraokeConfig {
@@ -115,6 +120,7 @@ impl Default for KaraokeConfig {
             remote: String::new(),
             mode: "streaming".into(),
             fade_ms: 400,
+            gpu_limit: 1.0,
         }
     }
 }
