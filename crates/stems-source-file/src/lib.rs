@@ -179,6 +179,58 @@ struct Ctx<'a> {
     frames_pushed: &'a AtomicU64,
 }
 
+/// Decode a whole file to interleaved stereo f32 at 44.1 kHz (for
+/// pre-buffered separation and tests).
+pub fn decode_file(path: &Path) -> anyhow::Result<Vec<f32>> {
+    let mut o = open(path)?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(
+            o.format
+                .tracks()
+                .iter()
+                .find(|t| t.id == o.track_id)
+                .and_then(|t| t.codec_params.as_ref())
+                .and_then(|p| p.audio())
+                .ok_or_else(|| anyhow!("codec params vanished"))?,
+            &AudioDecoderOptions::default(),
+        )
+        .context("create decoder")?;
+    let mut resampler = StreamResampler::new(o.sample_rate)?;
+    let mut decoded: Vec<f32> = Vec::new();
+    let mut stereo: Vec<f32> = Vec::new();
+    let mut out: Vec<f32> = Vec::new();
+    let mut pcm: Vec<f32> = Vec::new();
+    loop {
+        let packet = match o.format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(SymError::ResetRequired) => {
+                decoder.reset();
+                continue;
+            }
+            Err(e) => return Err(e).context("read packet"),
+        };
+        if packet.track_id != o.track_id {
+            continue;
+        }
+        let buf = match decoder.decode(&packet) {
+            Ok(b) => b,
+            Err(SymError::DecodeError(_)) => continue,
+            Err(e) => return Err(e).context("decode"),
+        };
+        decoded.resize(buf.samples_interleaved(), f32::MID);
+        buf.copy_to_slice_interleaved(&mut decoded);
+        to_stereo(&decoded, o.channels, &mut stereo);
+        out.clear();
+        resampler.push(&stereo, &mut out)?;
+        pcm.extend_from_slice(&out);
+    }
+    out.clear();
+    resampler.finish(&mut out)?;
+    pcm.extend_from_slice(&out);
+    Ok(pcm)
+}
+
 fn decode_loop(mut o: Opened, producer: &mut Producer, ctx: &Ctx) -> anyhow::Result<()> {
     let Ctx {
         events,
