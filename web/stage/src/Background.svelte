@@ -1,22 +1,46 @@
 <script lang="ts">
-  import type { Media, TrackRef, ViewMode } from '../../shared/types';
+  import type { Media, PlaybackStatus, TrackRef, ViewMode } from '../../shared/types';
 
   let {
     track,
     media,
     mode,
-    position
-  }: { track: TrackRef | null; media: Media; mode: ViewMode; position: number } = $props();
+    position,
+    status
+  }: {
+    track: TrackRef | null;
+    media: Media;
+    mode: ViewMode;
+    position: number;
+    status: PlaybackStatus;
+  } = $props();
 
   const canvas = $derived(mode === 'canvas' ? media.canvas_url : null);
   const video = $derived(mode === 'video' ? media.video_url : null);
 
-  // Keep the music video on the track's timeline; the loop (canvas) just plays.
+  // Keep the music video on the track's timeline: pause with playback,
+  // seek when far off, and trim the playback rate to absorb small drift
+  // without visible jumps. The loop (canvas) just plays.
   let videoEl: HTMLVideoElement | undefined = $state();
   $effect(() => {
-    if (!videoEl || !video) return;
+    const el = videoEl;
+    if (!el || !video) return;
     const want = (position + media.video_offset_ms) / 1000;
-    if (Math.abs(videoEl.currentTime - want) > 0.25) videoEl.currentTime = want;
+    if (status !== 'playing' || want < 0) {
+      if (!el.paused) el.pause();
+      if (Math.abs(el.currentTime - Math.max(want, 0)) > 0.25) el.currentTime = Math.max(want, 0);
+      return;
+    }
+    if (el.paused) el.play().catch(() => {});
+    const drift = el.currentTime - want;
+    if (Math.abs(drift) > 0.5) {
+      el.currentTime = want;
+      el.playbackRate = 1;
+    } else if (Math.abs(drift) > 0.04) {
+      el.playbackRate = drift > 0 ? 0.95 : 1.05;
+    } else if (el.playbackRate !== 1) {
+      el.playbackRate = 1;
+    }
   });
 </script>
 

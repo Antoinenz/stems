@@ -44,7 +44,13 @@
 </script>
 
 <div class="stage" data-mode={mode}>
-  <Background {track} media={client.state.media} {mode} position={client.position} />
+  <Background
+    {track}
+    media={client.state.media}
+    {mode}
+    position={client.position}
+    status={client.state.status}
+  />
 
   <main class:video={mode === 'video'}>
     {#if !client.connected}
