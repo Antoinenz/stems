@@ -134,6 +134,20 @@ ready`). Tracks that were announced ahead of time are fully ready before they st
 and seeks are instant. The streaming mode remains for machines that cannot separate faster
 than real time.
 
+### Word-level lyric timing
+
+```toml
+[lyrics]
+align = true        # default; needs mode = "prebuffer"
+```
+
+LRCLIB gives line timings. With pre-buffering the separated vocals exist ahead of the
+playhead, so stemsd runs a small speech model (wav2vec2, ~95 MB, downloaded once) over each
+line's vocals and force-aligns the line's words to it. Word timings stream into the stage as
+lines are processed (`aligning lyrics to vocals` → `lyrics aligned to vocals lines=52
+aligned=49` in the log) and are cached, so a replay is word-timed from the start. Lines the
+model cannot place confidently keep the interpolated wipe.
+
 ### Remote worker
 
 The model can run on another machine — a desktop GPU serving a Raspberry Pi or a laptop:
