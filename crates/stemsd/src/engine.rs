@@ -27,8 +27,8 @@ struct Prebuffer {
     offline: OfflineSeparator,
     fetcher: Arc<dyn PcmFetcher>,
     tasks: HashMap<TrackId, JoinHandle<()>>,
-    tx: mpsc::Sender<(TrackId, Arc<Vec<f32>>)>,
-    rx: mpsc::Receiver<(TrackId, Arc<Vec<f32>>)>,
+    tx: mpsc::Sender<(TrackId, Arc<Vec<f32>>, u64, bool)>,
+    rx: mpsc::Receiver<(TrackId, Arc<Vec<f32>>, u64, bool)>,
 }
 
 pub struct Channels {
@@ -185,12 +185,12 @@ impl Engine {
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd),
                 Some((id, lyrics)) = self.lyrics_rx.recv() => self.on_lyrics(id, lyrics),
                 Some((id, url)) = self.video_rx.recv() => self.on_video(id, url),
-                Some((id, pcm)) = async {
+                Some((id, pcm, wanted, urgent)) = async {
                     match self.prebuffer.as_mut() {
                         Some(p) => p.rx.recv().await,
                         None => std::future::pending().await,
                     }
-                } => self.on_pcm(id, pcm),
+                } => self.on_pcm(id, pcm, wanted, urgent),
                 _ = ticker.tick() => self.tick(),
             }
         }
@@ -228,7 +228,8 @@ impl Engine {
                 );
                 self.clock.anchor(position_ms, at_frame);
                 self.set_anchor(&track.id, position_ms, at_frame);
-                self.ensure_stems(&track.id);
+                self.focus_stems(&track.id);
+                self.ensure_stems(&track.id, position_ms, true);
                 if let Err(e) = self.cache.put_track(&track) {
                     tracing::warn!("cache: {e:#}");
                 }
@@ -282,6 +283,10 @@ impl Engine {
                 let id = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
                 if let Some(id) = id {
                     self.set_anchor(&id, position_ms, at_frame);
+                    if let Some(p) = self.prebuffer.as_ref() {
+                        p.offline
+                            .set_wanted(&id, stems_core::ms_to_frames(position_ms));
+                    }
                 }
                 self.set_status(PlaybackStatus::Playing);
             }
@@ -322,7 +327,11 @@ impl Engine {
             }
             SourceEvent::NextTrackHint { track } => {
                 tracing::info!(title = %track.title, "next track hint");
-                self.ensure_stems(&track.id);
+                self.ensure_stems(&track.id, 0, false);
+                let current = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
+                if let (Some(p), Some(cur)) = (self.prebuffer.as_ref(), current) {
+                    p.offline.focus(&[&cur, &track.id]);
+                }
                 self.state_tx.send_modify(|s| {
                     s.next_track = Some(track);
                     s.revision += 1;
@@ -464,12 +473,32 @@ impl Engine {
         }));
     }
 
+    /// Drop stem jobs for anything but the playing track and the announced
+    /// next one, so the device works on what will be heard.
+    fn focus_stems(&mut self, current: &TrackId) {
+        let next = self
+            .state_tx
+            .borrow()
+            .next_track
+            .as_ref()
+            .map(|t| t.id.clone());
+        if let Some(p) = self.prebuffer.as_ref() {
+            match &next {
+                Some(n) => p.offline.focus(&[current, n]),
+                None => p.offline.focus(&[current]),
+            }
+        }
+    }
+
     /// Start fetching + separating `id` unless stems exist or are underway.
-    fn ensure_stems(&mut self, id: &TrackId) {
+    /// `position_ms` is where playback is, so the job starts there.
+    fn ensure_stems(&mut self, id: &TrackId, position_ms: u64, urgent: bool) {
         let Some(p) = self.prebuffer.as_mut() else {
             return;
         };
         if p.offline.store().contains(id) {
+            p.offline
+                .set_wanted(id, stems_core::ms_to_frames(position_ms));
             return;
         }
         if let Some(t) = p.tasks.get(id) {
@@ -480,6 +509,7 @@ impl Engine {
         let fetcher = Arc::clone(&p.fetcher);
         let tx = p.tx.clone();
         let id2 = id.clone();
+        let wanted = stems_core::ms_to_frames(position_ms);
         let task = tokio::spawn(async move {
             let started = Instant::now();
             match fetcher.fetch(&id2).await {
@@ -490,7 +520,7 @@ impl Engine {
                         took = format!("{:.1}s", started.elapsed().as_secs_f32()),
                         "track fetched for pre-buffering"
                     );
-                    let _ = tx.send((id2, Arc::new(pcm))).await;
+                    let _ = tx.send((id2, Arc::new(pcm), wanted, urgent)).await;
                 }
                 Err(e) => tracing::warn!(track = ?id2, "pre-buffer fetch failed: {e:#}"),
             }
@@ -500,10 +530,20 @@ impl Engine {
         p.tasks.retain(|_, t| !t.is_finished());
     }
 
-    fn on_pcm(&mut self, id: TrackId, pcm: Arc<Vec<f32>>) {
-        if let Some(p) = self.prebuffer.as_mut() {
-            p.offline.submit(id, pcm);
-        }
+    fn on_pcm(&mut self, id: TrackId, pcm: Arc<Vec<f32>>, wanted: u64, urgent: bool) {
+        let Some(p) = self.prebuffer.as_mut() else {
+            return;
+        };
+        // by the time the download finished the playhead moved on; if this
+        // is the playing track, start from where it is now
+        let current = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
+        let wanted = if current.as_ref() == Some(&id) {
+            let pos = self.clock.position_ms(self.sink.frames_emitted());
+            stems_core::ms_to_frames(pos).max(wanted)
+        } else {
+            wanted
+        };
+        p.offline.submit(id, pcm, wanted, urgent);
     }
 
     fn spawn_video_fetch(&mut self, track: TrackRef) {
