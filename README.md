@@ -114,6 +114,22 @@ GPU or Apple Silicon, marginal on laptop CPUs, not viable on a Raspberry Pi. GPU
 compile-time features: `cargo build -p stemsd --features cuda` (NVIDIA, CUDA 12 runtime
 required), `--features directml` (any Windows GPU), `--features coreml` (macOS).
 
+### Pre-buffer mode (zero latency)
+
+```toml
+[karaoke]
+mode = "prebuffer"      # default: "streaming"
+```
+
+Instead of separating the live stream a few seconds behind the phone, `prebuffer` downloads
+each track as it starts (and the *next* track as soon as Spotify announces it), runs the model
+over the whole song as fast as the device allows, and plays with **no added delay** from
+stems computed ahead of the playhead. On an M1 Air a song is done in ~10–20 s; until the job
+overtakes the playhead the vocals simply stay in (the remote shows `preparing 37%` → `stems
+ready`). Tracks that were announced ahead of time are fully ready before they start. Skips
+and seeks are instant. The streaming mode remains for machines that cannot separate faster
+than real time.
+
 ### Remote worker
 
 The model can run on another machine — a desktop GPU serving a Raspberry Pi or a laptop:
