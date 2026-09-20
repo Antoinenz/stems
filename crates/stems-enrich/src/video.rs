@@ -1,8 +1,8 @@
 //! Music videos via `yt-dlp`: search YouTube for the track, download once
 //! into the cache, serve the file from stemsd. The video's timeline
 //! rarely matches the streamed track exactly (intros, different edits);
-//! `video_offset_ms` in the state nudges it and alignment by audio
-//! cross-correlation is a later step.
+//! [`crate::valign`] measures the offset from the audio and
+//! `video_offset_ms` in the state applies it (the remote can nudge it).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

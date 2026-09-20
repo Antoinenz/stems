@@ -5,7 +5,7 @@
 //! server forwards to clients. Lyrics lookups run as background tasks keyed
 //! by track so a slow provider never blocks playback events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -95,6 +95,12 @@ pub struct Engine {
     video_next: Option<(TrackId, JoinHandle<()>)>,
     video_tx: mpsc::Sender<(TrackId, Option<String>)>,
     video_rx: mpsc::Receiver<(TrackId, Option<String>)>,
+    /// Audio-based video alignment (`[video] align`): tracks whose
+    /// video is being matched, and results (track, offset_ms, corr).
+    video_align: bool,
+    valign_pending: HashSet<TrackId>,
+    valign_tx: mpsc::Sender<(TrackRef, Option<(i64, f32)>)>,
+    valign_rx: mpsc::Receiver<(TrackRef, Option<(i64, f32)>)>,
     /// Pre-buffered separation (`mode = "prebuffer"`): whole tracks are
     /// fetched and separated ahead of the playhead.
     prebuffer: Option<Prebuffer>,
@@ -131,6 +137,7 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
         let (video_tx, video_rx) = mpsc::channel(8);
+        let (valign_tx, valign_rx) = mpsc::channel(8);
         let (align_tx, align_rx) = mpsc::channel(64);
         let mut clock = Clock::new();
         clock.set_delay(Duration::from_secs_f64(
@@ -157,6 +164,10 @@ impl Engine {
             video_next: None,
             video_tx,
             video_rx,
+            video_align: false,
+            valign_pending: HashSet::new(),
+            valign_tx,
+            valign_rx,
             prebuffer: None,
             align_tx,
             align_rx,
@@ -179,8 +190,9 @@ impl Engine {
     }
 
     /// Enable music video lookups.
-    pub fn with_video(mut self, fetcher: VideoFetcher) -> Self {
+    pub fn with_video(mut self, fetcher: VideoFetcher, align: bool) -> Self {
         self.video = Some(fetcher);
+        self.video_align = align;
         self
     }
 
@@ -248,6 +260,7 @@ impl Engine {
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd),
                 Some((id, lyrics)) = self.lyrics_rx.recv() => self.on_lyrics(id, lyrics),
                 Some((id, url)) = self.video_rx.recv() => self.on_video(id, url),
+                Some((track, r)) = self.valign_rx.recv() => self.on_video_aligned(track, r),
                 Some((id, pcm, wanted, urgent)) = async {
                     match self.prebuffer.as_mut() {
                         Some(p) => p.rx.recv().await,
@@ -647,9 +660,10 @@ impl Engine {
         } else {
             wanted
         };
-        p.offline.submit(id, pcm, wanted, urgent);
+        p.offline.submit(id.clone(), pcm, wanted, urgent);
         self.maybe_align();
         self.maybe_align_next();
+        self.maybe_align_video(&id);
     }
 
     /// Start word alignment once the playing track has both a stem buffer
@@ -795,16 +809,24 @@ impl Engine {
         }
         tracing::info!(title = %track.title, "pre-fetching music video for next track");
         let id = track.id.clone();
+        let tx = self.video_tx.clone();
         let task = tokio::spawn(async move {
-            match fetcher.fetch(&track).await {
-                Ok(Some(_)) => {
-                    tracing::info!(title = %track.title, "music video ready for next track")
+            let url = match fetcher.fetch(&track).await {
+                Ok(Some(path)) => {
+                    tracing::info!(title = %track.title, "music video ready for next track");
+                    path.file_name()
+                        .map(|f| format!("/media/video/{}", f.to_string_lossy()))
                 }
                 Ok(None) => {
-                    tracing::info!(title = %track.title, "no music video found for next track")
+                    tracing::info!(title = %track.title, "no music video found for next track");
+                    None
                 }
-                Err(e) => tracing::warn!("music video (next track): {e:#}"),
-            }
+                Err(e) => {
+                    tracing::warn!("music video (next track): {e:#}");
+                    None
+                }
+            };
+            let _ = tx.send((track.id.clone(), url)).await;
         });
         self.video_next = Some((id, task));
     }
@@ -850,10 +872,11 @@ impl Engine {
     }
 
     fn on_video(&mut self, id: TrackId, url: Option<String>) {
-        if let Some(u) = &url {
+        let current = self.state_tx.borrow().track.clone();
+        let is_current = current.as_ref().map(|t| &t.id) == Some(&id);
+        if let Some(u) = url.as_ref().filter(|_| is_current) {
             tracing::info!(url = %u, "music video ready");
         }
-        let current = self.state_tx.borrow().track.clone();
         let offset = current
             .as_ref()
             .filter(|t| t.id == id)
@@ -870,6 +893,104 @@ impl Engine {
                 false
             }
         });
+        self.maybe_align_video(&id);
+    }
+
+    /// The track as we know it: playing, announced next, or fetched ahead.
+    fn track_ref(&self, id: &TrackId) -> Option<TrackRef> {
+        let s = self.state_tx.borrow();
+        s.track
+            .iter()
+            .chain(s.next_track.iter())
+            .find(|t| &t.id == id)
+            .cloned()
+            .or_else(|| {
+                self.prebuffer
+                    .as_ref()
+                    .and_then(|p| p.next_lyrics.as_ref())
+                    .filter(|(t, _)| &t.id == id)
+                    .map(|(t, _)| t.clone())
+            })
+    }
+
+    /// Match the video's soundtrack to the track audio once both are
+    /// here (prebuffer mode only: that is where the whole track lives).
+    /// A stored offset — measured earlier or set from the remote — wins.
+    fn maybe_align_video(&mut self, id: &TrackId) {
+        if !self.video_align || self.valign_pending.contains(id) {
+            return;
+        }
+        let (Some(fetcher), Some(p)) = (self.video.as_ref(), self.prebuffer.as_ref()) else {
+            return;
+        };
+        let Some(track) = self.track_ref(id) else {
+            return;
+        };
+        if self.cache.video_offset(&track).ok().flatten().is_some() {
+            return;
+        }
+        let (Some(path), Some(buf)) = (fetcher.cached(&track), p.offline.store().get(id)) else {
+            return;
+        };
+        self.valign_pending.insert(id.clone());
+        let tx = self.valign_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            use stems_enrich::valign;
+            let started = Instant::now();
+            let result = match valign::decode_audio(&path, 8_000) {
+                Ok(pcm) => {
+                    let video_env = valign::envelope(&pcm, 8_000);
+                    let track_env = valign::envelope(buf.mix_mono(), stems_core::SAMPLE_RATE);
+                    valign::align(&track_env, &video_env, 150.0)
+                }
+                Err(e) => {
+                    tracing::warn!(title = %track.title, "video audio: {e:#}");
+                    None
+                }
+            };
+            tracing::debug!(
+                title = %track.title,
+                took = format!("{:.1}s", started.elapsed().as_secs_f32()),
+                "video alignment done"
+            );
+            let _ = tx.blocking_send((track, result));
+        });
+    }
+
+    fn on_video_aligned(&mut self, track: TrackRef, result: Option<(i64, f32)>) {
+        use stems_enrich::valign::MIN_CORR;
+        self.valign_pending.remove(&track.id);
+        match result {
+            Some((offset_ms, corr)) if corr >= MIN_CORR => {
+                tracing::info!(
+                    title = %track.title,
+                    offset_ms,
+                    corr = format!("{corr:.2}"),
+                    "music video aligned to the track"
+                );
+                if let Err(e) = self.cache.set_video_offset(&track, offset_ms) {
+                    tracing::warn!("saving video offset: {e:#}");
+                }
+                self.state_tx.send_if_modified(|s| {
+                    if s.track.as_ref().map(|t| &t.id) == Some(&track.id)
+                        && s.media.video_offset_ms != offset_ms
+                    {
+                        s.media.video_offset_ms = offset_ms;
+                        s.revision += 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            Some((offset_ms, corr)) => tracing::warn!(
+                title = %track.title,
+                best_offset_ms = offset_ms,
+                corr = format!("{corr:.2}"),
+                "music video does not match the track audio (different edit?); offset left at 0"
+            ),
+            None => {}
+        }
     }
 
     fn processor_delay_ms(&self) -> u64 {

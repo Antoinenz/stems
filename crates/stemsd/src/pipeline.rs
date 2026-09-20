@@ -242,7 +242,7 @@ pub async fn play_file(
         true,
     );
     let engine = match video_fetcher(cfg)? {
-        Some(v) => engine.with_video(v),
+        Some(v) => engine.with_video(v, cfg.video.align),
         None => engine,
     };
     let engine = match sep.offline {
@@ -305,7 +305,7 @@ pub async fn run_spotify(
     );
     engine.set_volume(cfg.spotify.initial_volume_percent as f32 / 100.0);
     let engine = match video_fetcher(cfg)? {
-        Some(v) => engine.with_video(v),
+        Some(v) => engine.with_video(v, cfg.video.align),
         None => engine,
     };
     let engine = match sep.offline {

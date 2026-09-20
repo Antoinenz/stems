@@ -66,13 +66,19 @@ drop hand-timed `.lrc` files (plain or enhanced `<mm:ss.xx>` word tags) into
 enabled = true          # off by default
 ytdlp = "yt-dlp"        # executable name or path; ffmpeg must be on PATH too
 max_height = 1080
+align = true            # measure the video's offset from the track audio (needs ffmpeg)
 ```
 
 With this on, every track triggers a `yt-dlp` search (`<artist> - <title> official video`) and a
 one-time download into `<cache dir>/video/`; when it lands the stage's `video` mode plays it
 from `/media/video/…` on the track's timeline. The download for the announced next track
-starts as soon as Spotify names it, so it is usually on disk before the track begins. Videos and streams rarely share a timeline
-(intros, edits): `set_video_offset` shifts the video in ms until automatic alignment exists.
+starts as soon as Spotify names it, so it is usually on disk before the track begins. Videos and
+streams rarely share a timeline (intros, different edits), so in pre-buffer mode the video's
+soundtrack is matched against the track by loudness-envelope cross-correlation and the offset
+is stored per track (`music video aligned to the track offset_ms=… corr=…`). A video whose
+audio does not match (a live version, the wrong upload) is reported and left unshifted;
+`set_video_offset` from the remote overrides either. The stage pauses and resumes the video
+with playback and trims its rate to absorb drift.
 
 ### Karaoke backends
 

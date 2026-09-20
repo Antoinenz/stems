@@ -7,6 +7,7 @@ pub mod cache;
 pub mod local;
 pub mod lrc;
 pub mod lrclib;
+pub mod valign;
 pub mod video;
 
 pub use cache::{Cache, Cached};

@@ -55,6 +55,12 @@ impl StemBuffer {
         }
     }
 
+    /// Mono mix of the source track (44.1 kHz), for matching other
+    /// material against it.
+    pub fn mix_mono(&self) -> &[f32] {
+        &self.mix_mono
+    }
+
     /// Processing speed as a multiple of real time (0 until measured).
     pub fn speed(&self) -> f32 {
         f32::from_bits(self.speed_bits.load(Ordering::Relaxed))

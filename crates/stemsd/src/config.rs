@@ -52,6 +52,9 @@ pub struct VideoConfig {
     pub ytdlp: String,
     /// Largest video height to download.
     pub max_height: u32,
+    /// Measure each video's offset against the track audio (needs
+    /// ffmpeg and `[karaoke] mode = "prebuffer"`); stored per track.
+    pub align: bool,
 }
 
 impl Default for VideoConfig {
@@ -60,6 +63,7 @@ impl Default for VideoConfig {
             enabled: false,
             ytdlp: "yt-dlp".into(),
             max_height: 1080,
+            align: true,
         }
     }
 }
