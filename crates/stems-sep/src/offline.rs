@@ -265,6 +265,7 @@ pub struct CachedStemSeparator {
     store: Arc<StemStore>,
     current: Option<(Arc<TrackId>, Arc<StemBuffer>)>,
     misses: u64,
+    hits: u64,
 }
 
 impl CachedStemSeparator {
@@ -273,6 +274,7 @@ impl CachedStemSeparator {
             store,
             current: None,
             misses: 0,
+            hits: 0,
         }
     }
 }
@@ -298,6 +300,10 @@ impl Separator for CachedStemSeparator {
         instrumental: &mut [f32],
     ) -> bool {
         let Some(pos) = pos else {
+            self.misses += 1;
+            if self.misses % 500 == 1 {
+                tracing::debug!("prebuffer: no track position yet");
+            }
             return false;
         };
         let stale = match &self.current {
@@ -311,9 +317,31 @@ impl Separator for CachedStemSeparator {
                 .map(|b| (Arc::clone(&pos.track), b));
         }
         match &self.current {
-            Some((_, buf)) if buf.read(pos.frame, instrumental) => true,
-            _ => {
+            Some((_, buf)) if buf.read(pos.frame, instrumental) => {
+                self.hits += 1;
+                if self.hits % 2000 == 1 {
+                    tracing::debug!(
+                        frame = pos.frame,
+                        ready = buf.ready_frames(),
+                        "prebuffer: serving stems"
+                    );
+                }
+                true
+            }
+            cur => {
                 self.misses += 1;
+                if self.misses % 500 == 1 {
+                    match cur {
+                        Some((_, buf)) => tracing::debug!(
+                            frame = pos.frame,
+                            ready = buf.ready_frames(),
+                            "prebuffer: stems not ready for this position"
+                        ),
+                        None => {
+                            tracing::debug!(track = ?pos.track, "prebuffer: no stems for track")
+                        }
+                    }
+                }
                 false
             }
         }
