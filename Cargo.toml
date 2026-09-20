@@ -27,6 +27,7 @@ hex = "0.4"
 # spotify
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-playback = { version = "0.8", default-features = false }
+librespot-audio = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-discovery = { version = "0.8", default-features = false, features = ["with-libmdns", "rustls-tls-native-roots"] }
 librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-connect = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }

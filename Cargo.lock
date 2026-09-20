@@ -3410,6 +3410,7 @@ dependencies = [
 name = "stems-core"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3485,6 +3486,7 @@ dependencies = [
  "anyhow",
  "futures",
  "http",
+ "librespot-audio",
  "librespot-connect",
  "librespot-core",
  "librespot-discovery",
@@ -3492,6 +3494,7 @@ dependencies = [
  "librespot-playback",
  "stems-audio",
  "stems-core",
+ "symphonia 0.5.5",
  "tokio",
  "tracing",
 ]

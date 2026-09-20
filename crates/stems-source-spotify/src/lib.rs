@@ -10,6 +10,7 @@
 
 mod canvas;
 mod events;
+pub mod fetch;
 mod mixer;
 mod sink;
 
@@ -31,7 +32,7 @@ use librespot_playback::mixer::Mixer as _;
 use librespot_playback::player::Player;
 use stems_audio::{FlushSignal, Producer};
 use stems_core::{Source, SourceEvent};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 
 pub use librespot_core::config::DeviceType as SpotifyDeviceType;
@@ -77,6 +78,7 @@ pub struct SpotifySource {
     frames_pushed: Arc<AtomicU64>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    fetcher: fetch::TrackFetcher,
 }
 
 impl SpotifySource {
@@ -90,6 +92,7 @@ impl SpotifySource {
         let (events, _) = broadcast::channel(256);
         let frames_pushed = Arc::new(AtomicU64::new(0));
         let (stop_tx, stop_rx) = oneshot::channel();
+        let (session_tx, session_rx) = watch::channel(None);
 
         let session_config = SessionConfig::default();
         let cache = match &config.cache_dir {
@@ -148,6 +151,7 @@ impl SpotifySource {
                 flush,
                 events: events.clone(),
                 frames_pushed: frames_pushed.clone(),
+                session_tx,
             },
             discovery,
             stop_rx,
@@ -158,7 +162,13 @@ impl SpotifySource {
             frames_pushed,
             stop: Some(stop_tx),
             task: Some(task),
+            fetcher: fetch::TrackFetcher::new(session_rx, config.bitrate),
         })
+    }
+
+    /// Out-of-band track download + decode (pre-buffered separation).
+    pub fn fetcher(&self) -> fetch::TrackFetcher {
+        self.fetcher.clone()
     }
 
     /// Wait for the background task to finish (after `shutdown`).
@@ -199,12 +209,15 @@ struct Runtime {
     flush: FlushSignal,
     events: broadcast::Sender<SourceEvent>,
     frames_pushed: Arc<AtomicU64>,
+    /// The live session, for out-of-band track fetches.
+    session_tx: watch::Sender<Option<Session>>,
 }
 
 /// Mirrors librespot's own main loop: wait for credentials from discovery,
 /// build a session + Spirc, reconnect on drop, tear down on stop.
 async fn run(mut rt: Runtime, mut discovery: Discovery, mut stop: oneshot::Receiver<()>) {
     let mut session = Session::new(rt.session_config.clone(), rt.cache.clone());
+    let _ = rt.session_tx.send(Some(session.clone()));
     let mut credentials: Option<Credentials> = rt.cache.as_ref().and_then(|c| c.credentials());
     let mut connecting = credentials.is_some();
     let mut spirc: Option<Spirc> = None;
@@ -262,6 +275,7 @@ async fn run(mut rt: Runtime, mut discovery: Discovery, mut stop: oneshot::Recei
             _ = async {}, if connecting && credentials.is_some() => {
                 if session.is_invalid() {
                     session = Session::new(rt.session_config.clone(), rt.cache.clone());
+                    let _ = rt.session_tx.send(Some(session.clone()));
                     player.set_session(session.clone());
                     event_task.abort();
                     event_task = tokio::spawn(events::pump(

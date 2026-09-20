@@ -15,6 +15,9 @@ librespot-playback.workspace = true
 librespot-discovery.workspace = true
 librespot-metadata.workspace = true
 librespot-connect.workspace = true
+librespot-audio.workspace = true
+# librespot's decoder is built on symphonia 0.5; the file source uses 0.6
+symphonia05 = { package = "symphonia", version = "0.5", default-features = false }
 tokio.workspace = true
 futures.workspace = true
 http = "1"
