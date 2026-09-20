@@ -50,6 +50,36 @@
     }
   });
 
+  // Host stats (CPU, memory, temperatures), polled every 3 s.
+  interface SystemStats {
+    cpu_percent: number;
+    mem_used_mb: number;
+    mem_total_mb: number;
+    temps: { label: string; celsius: number }[];
+  }
+  let sys = $state<SystemStats | null>(null);
+  onMount(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/system');
+        if (r.ok) sys = (await r.json()) as SystemStats;
+      } catch {
+        /* keep the last sample */
+      }
+      if (alive) setTimeout(poll, 3000);
+    };
+    poll();
+    return () => {
+      alive = false;
+    };
+  });
+
+  const stems = $derived(ps.karaoke.stems);
+  const stemsPct = $derived(
+    stems ? Math.round((100 * stems.ready_ms) / Math.max(1, stems.total_ms)) : 0
+  );
+
   function toggleKaraoke() {
     client.send({ cmd: 'set_karaoke', enabled: !ps.karaoke.enabled });
   }
@@ -86,13 +116,15 @@
       {ps.karaoke.enabled ? 'Karaoke on' : 'Karaoke off'}
       <small>
         {ps.karaoke.backend ?? ''}
-        {#if ps.karaoke.stems}
-          · {ps.karaoke.stems.done
-            ? 'stems ready'
-            : `preparing ${Math.round((100 * ps.karaoke.stems.ready_ms) / Math.max(1, ps.karaoke.stems.total_ms))}%`}
+        {#if stems}
+          · {stems.done ? 'stems ready' : `preparing ${stemsPct}%`}
+          {#if !stems.done && stems.speed}· {stems.speed.toFixed(1)}× realtime{/if}
         {/if}
       </small>
     </button>
+    {#if stems && !stems.done}
+      <div class="bar"><div class="fill" style:width="{stemsPct}%"></div></div>
+    {/if}
     <Slider
       label="Vocals"
       value={vocal}
@@ -156,6 +188,15 @@
       Up next: <b>{ps.next_track.title}</b> · {ps.next_track.artists.join(', ')}
     </section>
   {/if}
+
+  {#if sys}
+    <section class="sys">
+      cpu {Math.round(sys.cpu_percent)}% · mem {Math.round(sys.mem_used_mb / 1024)}/{Math.round(sys.mem_total_mb / 1024)} GB
+      {#each sys.temps as t (t.label)}
+        · {t.label.toLowerCase().replace(/temperature|sensor/g, '').trim()} {Math.round(t.celsius)}°
+      {/each}
+    </section>
+  {/if}
 </main>
 
 <style>
@@ -191,4 +232,5 @@
   .modes button { padding: 12px 4px; font-size: 14px; }
   .modes button:disabled { opacity: 0.3; }
   .next { color: var(--dim); font-size: 13px; padding: 0 4px; }
+  .sys { color: var(--dim); font-size: 12px; padding: 0 4px; font-variant-numeric: tabular-nums; }
 </style>
