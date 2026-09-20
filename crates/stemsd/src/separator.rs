@@ -1,8 +1,8 @@
 //! Build the configured [`Separator`] backend.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use stems_core::Separator;
@@ -40,18 +40,18 @@ pub async fn build_offline(
     let r = build_runners(cfg, models_dir).await?;
     let limit = cfg.gpu_limit.clamp(0.1, 1.0);
     let runners: Vec<stems_sep::WindowRunner> = if limit < 1.0 {
-        // One governor shared by every worker: it caps the fraction of
-        // wall time during which *any* window is being computed, so two
-        // workers cannot keep the GPU saturated by taking turns sleeping.
+        // One governor shared by every worker: windows are serialised and
+        // paced, so two workers cannot keep the GPU saturated by taking
+        // turns sleeping.
         let gov = Arc::new(Governor::new(limit));
         r.runners
             .into_iter()
             .map(|mut run| -> stems_sep::WindowRunner {
                 let gov = gov.clone();
                 Box::new(move |w: &[f32]| {
-                    gov.acquire();
+                    let t = gov.acquire();
                     let out = run(w);
-                    gov.release();
+                    gov.release(t);
                     out
                 })
             })
@@ -82,78 +82,61 @@ pub async fn build_offline(
     ))
 }
 
-/// Utilisation cap for the offline job: busy / elapsed <= limit, where
-/// "busy" is the time at least one window inference is running.
-/// History decays so the cap follows recent load rather than the
-/// lifetime average.
+/// Utilisation cap for the offline job. Windows run one at a time and
+/// each is followed by an idle gap of `busy × (1/limit − 1)`, so the
+/// accelerator sees a steady `limit` duty cycle rather than bursts.
+/// Running windows concurrently would not help here: a saturated GPU
+/// just time-slices them, and the concurrency is what starves the
+/// compositor and everything else.
 struct Governor {
     limit: f32,
     inner: Mutex<GovState>,
+    cv: Condvar,
 }
 
 struct GovState {
-    active: usize,
-    busy_since: Instant,
-    busy: Duration,
-    epoch: Instant,
+    active: bool,
+    /// Earliest instant the next window may start.
+    next_start: Instant,
 }
 
 impl Governor {
-    const WINDOW: Duration = Duration::from_secs(20);
-
     fn new(limit: f32) -> Self {
-        let now = Instant::now();
         Self {
             limit,
             inner: Mutex::new(GovState {
-                active: 0,
-                busy_since: now,
-                busy: Duration::ZERO,
-                epoch: now,
+                active: false,
+                next_start: Instant::now(),
             }),
+            cv: Condvar::new(),
         }
     }
 
-    /// Block until running one more window keeps utilisation under the
-    /// limit, then count this caller as active.
-    fn acquire(&self) {
-        loop {
-            let wait = {
-                let mut g = self.inner.lock().unwrap();
-                let now = Instant::now();
-                let mut busy = g.busy;
-                if g.active > 0 {
-                    busy += now - g.busy_since;
-                }
-                let elapsed = now - g.epoch;
-                let need = busy.div_f32(self.limit);
-                if need <= elapsed {
-                    if g.active == 0 {
-                        g.busy_since = now;
-                    }
-                    g.active += 1;
-                    return;
-                }
-                need - elapsed
-            };
-            std::thread::sleep(wait.min(Duration::from_millis(250)));
-        }
-    }
-
-    fn release(&self) {
+    /// Wait for the accelerator to be free and the pacing gap to pass.
+    fn acquire(&self) -> Instant {
         let mut g = self.inner.lock().unwrap();
-        let now = Instant::now();
-        g.active = g.active.saturating_sub(1);
-        if g.active == 0 {
-            let span = now - g.busy_since;
-            g.busy += span;
+        loop {
+            let now = Instant::now();
+            if !g.active && now >= g.next_start {
+                g.active = true;
+                return now;
+            }
+            if g.active {
+                g = self.cv.wait(g).unwrap();
+            } else {
+                let wait = g.next_start - now;
+                g = self.cv.wait_timeout(g, wait).unwrap().0;
+            }
         }
-        let elapsed = now - g.epoch;
-        if elapsed > Self::WINDOW {
-            // keep the ratio, forget the older half
-            g.busy /= 2;
-            g.epoch = now - elapsed / 2;
-        }
+    }
+
+    fn release(&self, started: Instant) {
+        let busy = started.elapsed();
+        let mut g = self.inner.lock().unwrap();
+        g.active = false;
+        g.next_start = Instant::now() + busy.mul_f32(1.0 / self.limit - 1.0);
+        drop(g);
+        self.cv.notify_all();
     }
 }
 
@@ -347,25 +330,32 @@ async fn download(url: &str, path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    /// Two threads hammering the GPU stand-in must still leave the
-    /// configured idle fraction, measured as "time nobody is running".
+    /// Two threads hammering the GPU stand-in never overlap and leave
+    /// the configured idle fraction between windows.
     #[test]
-    fn governor_caps_any_active_time() {
+    fn governor_serialises_and_paces() {
         let gov = Arc::new(Governor::new(0.5));
         let start = Instant::now();
-        let busy = Arc::new(Mutex::new(Duration::ZERO));
+        let overlap = Arc::new(Mutex::new((0usize, false)));
         let hs: Vec<_> = (0..2)
             .map(|_| {
                 let gov = gov.clone();
-                let busy = busy.clone();
+                let overlap = overlap.clone();
                 std::thread::spawn(move || {
                     for _ in 0..8 {
-                        gov.acquire();
-                        let t = Instant::now();
+                        let t = gov.acquire();
+                        {
+                            let mut o = overlap.lock().unwrap();
+                            if o.0 > 0 {
+                                o.1 = true;
+                            }
+                            o.0 += 1;
+                        }
                         std::thread::sleep(Duration::from_millis(20));
-                        *busy.lock().unwrap() += t.elapsed();
-                        gov.release();
+                        overlap.lock().unwrap().0 -= 1;
+                        gov.release(t);
                     }
                 })
             })
@@ -373,12 +363,10 @@ mod tests {
         for h in hs {
             h.join().unwrap();
         }
+        assert!(!overlap.lock().unwrap().1, "windows overlapped");
         let elapsed = start.elapsed();
-        // 16 × 20 ms of work; with perfect overlap that is 160 ms of
-        // "any active" time, so the wall clock must reach ≥ 320 ms.
-        assert!(elapsed >= Duration::from_millis(300), "elapsed {elapsed:?}");
-        // and it must finish (no deadlock); loaded CI runners oversleep
-        // considerably, so only guard against pathological stalls here
+        // 16 × 20 ms of work at a 50 % duty cycle ≈ 640 ms
+        assert!(elapsed >= Duration::from_millis(600), "elapsed {elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "elapsed {elapsed:?}");
     }
 }

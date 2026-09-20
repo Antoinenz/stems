@@ -134,9 +134,9 @@ over the whole song as fast as the device allows, and plays with **no added dela
 stems computed ahead of the playhead. On an M1 Air a song is done in ~10–20 s; until the job
 overtakes the playhead the vocals simply stay in (the remote shows `preparing 37%` → `stems
 ready`). Tracks that were announced ahead of time are fully ready before they start. Skips
-and seeks are instant. `gpu_limit = 0.7` caps the fraction of time the job keeps the
-accelerator busy (counted across all workers, so two workers cannot take turns filling the
-gap), which avoids glitches on machines that share the GPU with the display and leaves room
+and seeks are instant. `gpu_limit = 0.7` runs windows one at a time with an idle gap after
+each so the accelerator sees a steady 70 % duty cycle (two workers would just time-slice a
+saturated GPU and starve the compositor), which avoids glitches on machines that share the GPU with the display and leaves room
 for lyric alignment and video downloads. On a fanless laptop 0.6–0.7 is a good start; the
 `stems ready … speed` line shows what it costs. Finished stems are written to
 `<cache dir>/stems/<id>.wav` (16-bit, ≈40 MB per 4-minute track) and pruned oldest-first to
