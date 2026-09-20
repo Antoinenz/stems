@@ -27,6 +27,8 @@ cd web/remote && pnpm install && pnpm build && cd ../..   # the phone remote
 cargo run -p stemsd -- spotify --name "stems"             # Spotify Connect receiver
 ```
 
+When run from a checkout, stemsd rebuilds `web/stage` and `web/remote` at start if their
+sources are newer than `dist/` (needs `pnpm`; set `STEMS_NO_WEB_BUILD=1` to skip).
 Pick **stems** in the Spotify app, then open `http://<host>:7373/stage/` on the TV. Guests
 control it from `http://<host>:7373/remote/` on their phones — the stage shows a QR code for
 it while idle and a small one in the corner while playing (`/stage/?qr=0` hides it). The
@@ -44,6 +46,7 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 
 - `GET /api/state` — now playing, lyrics, karaoke state, view mode
 - `GET /api/info` — LAN URLs of the stage and remote; `GET /api/remote-qr.svg` — QR of the latter
+- `GET /api/system` — CPU %, memory and temperature sensors of the box (shown on the remote)
 - `WS /api/ws` — state on change + clock at 10 Hz; accepts commands
 - `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
   `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`,
