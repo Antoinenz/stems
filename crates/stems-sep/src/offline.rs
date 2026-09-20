@@ -18,6 +18,8 @@ use crate::stream::{MdxSeparator, StreamOpts, WindowRunner};
 /// they are computed, starting wherever the playhead is (`wanted`).
 pub struct StemBuffer {
     data: Mutex<Vec<f32>>,
+    /// Mono mix, for aligning the live stream to the stems by correlation.
+    mix_mono: Vec<f32>,
     /// Computed frame ranges, sorted and merged.
     covered: Mutex<Vec<(usize, usize)>>,
     /// Frames covered in total (for progress).
@@ -30,9 +32,16 @@ pub struct StemBuffer {
 }
 
 impl StemBuffer {
-    pub fn new(total_frames: usize) -> Self {
+    /// `pcm` is the interleaved stereo mix the stems are computed from.
+    pub fn new(pcm: &[f32]) -> Self {
+        let total_frames = pcm.len() / CHANNELS as usize;
+        let mix_mono = pcm
+            .chunks_exact(CHANNELS as usize)
+            .map(|f| 0.5 * (f[0] + f[1]))
+            .collect();
         Self {
             data: Mutex::new(vec![0.0; total_frames * CHANNELS as usize]),
+            mix_mono,
             covered: Mutex::new(Vec::new()),
             ready: AtomicUsize::new(0),
             total_frames,
@@ -129,6 +138,43 @@ impl StemBuffer {
             .find(|(a, _)| *a > wanted)
             .or(gaps.first())
             .copied()
+    }
+
+    /// Find where `live` (mono) sits in the mix near `guess`: returns the
+    /// offset to add to `guess` and the normalised correlation there.
+    /// Searches ±`max_lag` frames.
+    pub fn align(&self, live: &[f32], guess: u64, max_lag: usize) -> Option<(i64, f32)> {
+        let n = live.len();
+        let mix = &self.mix_mono;
+        let e_live: f32 = live.iter().map(|x| x * x).sum();
+        if n == 0 || e_live < 1e-6 {
+            return None;
+        }
+        let lo = (guess as i64 - max_lag as i64).max(0) as usize;
+        let hi = ((guess as usize) + max_lag).min(mix.len().saturating_sub(n));
+        if lo >= hi {
+            return None;
+        }
+        // running energy of the mix window via prefix sums
+        let mut prefix = Vec::with_capacity(hi + n - lo + 1);
+        prefix.push(0.0f64);
+        for x in &mix[lo..hi + n] {
+            prefix.push(prefix.last().unwrap() + (*x as f64) * (*x as f64));
+        }
+        let mut best = (0i64, -1.0f32);
+        for start in lo..hi {
+            let seg = &mix[start..start + n];
+            let dot: f32 = live.iter().zip(seg).map(|(a, b)| a * b).sum();
+            let e_mix = (prefix[start - lo + n] - prefix[start - lo]) as f32;
+            if e_mix < 1e-6 {
+                continue;
+            }
+            let c = dot / (e_live * e_mix).sqrt();
+            if c > best.1 {
+                best = (start as i64 - guess as i64, c);
+            }
+        }
+        (best.1 > 0.0).then_some(best)
     }
 
     /// Copy `out.len() / 2` frames starting at `frame`; `false` if not
@@ -291,7 +337,7 @@ impl OfflineSeparator {
             b.set_wanted(wanted_frame);
             return b;
         }
-        let buf = Arc::new(StemBuffer::new(pcm.len() / CHANNELS as usize));
+        let buf = Arc::new(StemBuffer::new(&pcm));
         buf.set_wanted(wanted_frame);
         self.store.insert(id.clone(), Arc::clone(&buf));
         let job = Job {
@@ -460,7 +506,22 @@ pub struct CachedStemSeparator {
     current: Option<(Arc<TrackId>, Arc<StemBuffer>)>,
     misses: u64,
     hits: u64,
+    /// Sample offset between the reported track position and where the
+    /// live audio really is in the mix, found by correlation.
+    offset: i64,
+    aligned: bool,
+    align_tries: u32,
+    /// Live mono audio gathered since the last discontinuity.
+    acc: Vec<f32>,
+    acc_start: u64,
+    expected_frame: Option<u64>,
 }
+
+/// Live audio to gather before correlating (~46 ms).
+const ALIGN_FRAMES: usize = 2048;
+/// Search range for the offset, frames (±150 ms).
+const ALIGN_MAX_LAG: usize = 6615;
+const ALIGN_MIN_CORR: f32 = 0.6;
 
 impl CachedStemSeparator {
     pub fn new(store: Arc<StemStore>) -> Self {
@@ -469,6 +530,68 @@ impl CachedStemSeparator {
             current: None,
             misses: 0,
             hits: 0,
+            offset: 0,
+            aligned: false,
+            align_tries: 0,
+            acc: Vec::with_capacity(ALIGN_FRAMES * 2),
+            acc_start: 0,
+            expected_frame: None,
+        }
+    }
+
+    fn start_alignment(&mut self, frame: u64, keep_offset: bool) {
+        self.acc.clear();
+        self.acc_start = frame;
+        self.aligned = false;
+        self.align_tries = 0;
+        if !keep_offset {
+            self.offset = 0;
+        }
+    }
+
+    /// Gather live audio; once enough is there, correlate it against the
+    /// mix and lock the offset.
+    fn feed_alignment(&mut self, input: &[f32]) {
+        if self.aligned || self.align_tries >= 6 {
+            return;
+        }
+        self.acc.extend(
+            input
+                .chunks_exact(CHANNELS as usize)
+                .map(|f| 0.5 * (f[0] + f[1])),
+        );
+        if self.acc.len() < ALIGN_FRAMES {
+            return;
+        }
+        let Some((_, buf)) = &self.current else {
+            return;
+        };
+        let guess = (self.acc_start as i64 + self.offset).max(0) as u64;
+        match buf.align(&self.acc[..ALIGN_FRAMES], guess, ALIGN_MAX_LAG) {
+            Some((lag, corr)) if corr >= ALIGN_MIN_CORR => {
+                let new_offset = self.offset + lag;
+                tracing::debug!(
+                    offset_ms = new_offset as f32 * 1000.0 / 44_100.0,
+                    corr = format!("{corr:.3}"),
+                    "prebuffer: stems aligned to live audio"
+                );
+                self.offset = new_offset;
+                self.aligned = true;
+            }
+            other => {
+                // silence or a bad match: try again with fresher audio
+                self.align_tries += 1;
+                if let Some((lag, corr)) = other {
+                    tracing::debug!(
+                        lag,
+                        corr = format!("{corr:.3}"),
+                        "prebuffer: weak alignment, retrying"
+                    );
+                }
+                let drop = self.acc.len().saturating_sub(ALIGN_FRAMES / 2);
+                self.acc.drain(..drop);
+                self.acc_start += drop as u64;
+            }
         }
     }
 }
@@ -490,14 +613,16 @@ impl Separator for CachedStemSeparator {
     fn process_at(
         &mut self,
         pos: Option<&TrackPos>,
-        _input: &[f32],
+        input: &[f32],
         instrumental: &mut [f32],
     ) -> bool {
+        let frames = instrumental.len() / CHANNELS as usize;
         let Some(pos) = pos else {
             self.misses += 1;
             if self.misses % 500 == 1 {
                 tracing::debug!("prebuffer: no track position yet");
             }
+            self.expected_frame = None;
             return false;
         };
         let stale = match &self.current {
@@ -509,14 +634,28 @@ impl Separator for CachedStemSeparator {
                 .store
                 .get(&pos.track)
                 .map(|b| (Arc::clone(&pos.track), b));
+            self.start_alignment(pos.frame, false);
+        } else if self.expected_frame != Some(pos.frame) {
+            // seek or re-anchor: a small jump keeps the last offset as the
+            // first guess, a large one starts from scratch
+            let small = self
+                .expected_frame
+                .is_some_and(|e| e.abs_diff(pos.frame) < 2 * 44_100);
+            self.start_alignment(pos.frame, small);
         }
+        self.expected_frame = Some(pos.frame + frames as u64);
+        if self.current.is_some() {
+            self.feed_alignment(input);
+        }
+        let frame = (pos.frame as i64 + self.offset).max(0) as u64;
         match &self.current {
-            Some((_, buf)) if buf.read(pos.frame, instrumental) => {
+            Some((_, buf)) if buf.read(frame, instrumental) => {
                 self.hits += 1;
                 if self.hits % 2000 == 1 {
                     tracing::debug!(
-                        frame = pos.frame,
+                        frame,
                         ready = buf.ready_frames(),
+                        aligned = self.aligned,
                         "prebuffer: serving stems"
                     );
                 }
@@ -527,7 +666,7 @@ impl Separator for CachedStemSeparator {
                 if self.misses % 500 == 1 {
                     match cur {
                         Some((_, buf)) => tracing::debug!(
-                            frame = pos.frame,
+                            frame,
                             ready = buf.ready_frames(),
                             "prebuffer: stems not ready for this position"
                         ),
@@ -541,7 +680,9 @@ impl Separator for CachedStemSeparator {
         }
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.expected_frame = None;
+    }
 }
 
 #[cfg(test)]
@@ -644,7 +785,8 @@ mod tests {
             frame: 10_000,
         };
         let mut out = vec![0.0f32; 512 * 2];
-        assert!(sep.process_at(Some(&pos), &[], &mut out));
+        let live = &pcm[10_000 * 2..(10_000 + 512) * 2];
+        assert!(sep.process_at(Some(&pos), live, &mut out));
         for k in 0..512 {
             let expect = pcm[(10_000 + k) * 2] * 0.5;
             assert!((out[k * 2] - expect).abs() < 1e-4, "frame {k}");
@@ -654,19 +796,69 @@ mod tests {
             track: pos.track.clone(),
             frame: 1_000,
         };
-        assert!(sep.process_at(Some(&early), &[], &mut out));
+        assert!(sep.process_at(Some(&early), &pcm[1_000 * 2..1_512 * 2], &mut out));
         assert!((out[0] - pcm[1_000 * 2] * 0.5).abs() < 1e-4);
         // past the end → miss
         let late = TrackPos {
             track: pos.track.clone(),
             frame: frames as u64 - 100,
         };
-        assert!(!sep.process_at(Some(&late), &[], &mut out));
+        assert!(!sep.process_at(Some(&late), &out.clone(), &mut out));
         // unknown track → miss
         let other = TrackPos {
             track: Arc::new(TrackId::Spotify("nope".into())),
             frame: 0,
         };
-        assert!(!sep.process_at(Some(&other), &[], &mut out));
+        assert!(!sep.process_at(Some(&other), &out.clone(), &mut out));
+    }
+
+    #[test]
+    fn live_audio_is_aligned_to_the_stems_by_correlation() {
+        let runners: Vec<WindowRunner> = vec![Box::new(|w: &[f32]| Ok(w.to_vec()))];
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 0,
+            denoise: false,
+            workers: 1,
+            realtime: false,
+        };
+        let off = OfflineSeparator::new(params(), "test", runners, opts);
+        // noise-like signal so correlation has a sharp peak
+        let frames = 60_000;
+        let mut seed = 12345u32;
+        let pcm: Arc<Vec<f32>> = Arc::new(
+            (0..frames * 2)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+                })
+                .collect(),
+        );
+        let id = TrackId::Spotify("t3".into());
+        let buf = off.submit(id.clone(), Arc::clone(&pcm), 0, true);
+        while !buf.is_done() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut sep = CachedStemSeparator::new(off.store());
+        // the reported position is 1000 frames behind where the audio really is
+        let true_start = 20_000usize;
+        let reported = true_start as u64 - 1000;
+        let mut out = vec![0.0f32; 512 * 2];
+        let track = Arc::new(id);
+        let mut frame = reported;
+        for k in 0..8 {
+            let live = &pcm[(true_start + k * 512) * 2..(true_start + (k + 1) * 512) * 2];
+            let pos = TrackPos {
+                track: track.clone(),
+                frame,
+            };
+            assert!(sep.process_at(Some(&pos), live, &mut out));
+            frame += 512;
+        }
+        assert!(sep.aligned, "did not align");
+        assert_eq!(sep.offset, 1000);
+        // once aligned the served stem matches the live audio exactly
+        assert!((out[0] - pcm[(true_start + 7 * 512) * 2]).abs() < 1e-6);
     }
 }
