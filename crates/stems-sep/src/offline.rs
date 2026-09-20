@@ -123,7 +123,8 @@ impl StemBuffer {
         }
     }
 
-    fn is_covered(&self, from: usize, to: usize) -> bool {
+    /// Whether every frame of `[from, to)` has been computed.
+    pub fn is_covered(&self, from: usize, to: usize) -> bool {
         let c = self.covered.lock().expect("stem ranges");
         c.iter().any(|&(a, b)| a <= from && to <= b)
     }

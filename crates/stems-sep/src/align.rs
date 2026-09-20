@@ -396,7 +396,9 @@ pub mod worker {
     /// Target chunk length handed to the model.
     const CHUNK_MS: u64 = 20_000;
     /// Mean letter log-probability below which a line is left unaligned.
-    const MIN_SCORE: f32 = -3.0;
+    /// Rejected lines in field logs sat at −3.1…−5.4; the ones just under
+    /// −3 were usually harmonies or effected vocals that still placed well.
+    const MIN_SCORE: f32 = -3.5;
 
     impl AlignWorker {
         pub fn new(aligner: Aligner, results: OnAligned) -> Self {
@@ -487,17 +489,20 @@ pub mod worker {
         out
     }
 
-    fn run_job(
-        aligner: &mut Aligner,
-        job: &Job,
-        q: &Arc<(Mutex<Queue>, Condvar)>,
-        results: &OnAligned,
-    ) {
+    /// One chunk of consecutive lines with the audio span it is aligned in.
+    struct Chunk {
+        lines: (usize, usize),
+        words: Vec<String>,
+        /// line index each word belongs to
+        owner: Vec<usize>,
+        start_ms: u64,
+        frames: (usize, usize),
+    }
+
+    fn plan(job: &Job) -> Vec<Chunk> {
         let total_ms = frames_to_ms(job.buf.total_frames() as u64);
-        let n = job.lines.len();
-        let mut aligned = 0usize;
+        let mut out = Vec::new();
         for (a, b) in chunks(&job.lines) {
-            // words of the chunk with their line index
             let mut words: Vec<String> = Vec::new();
             let mut owner: Vec<usize> = Vec::new();
             for (i, line) in job.lines[a..b].iter().enumerate() {
@@ -515,56 +520,99 @@ pub mod worker {
             if end <= start + 500 {
                 continue;
             }
-            let (from, to) = (ms_to_frames(start) as usize, ms_to_frames(end) as usize);
-            // wait for the stems to reach this chunk
-            let vocals = loop {
-                if !wanted(q, &job.track) || job.buf.is_cancelled() {
-                    return;
-                }
-                if let Some(v) = job.buf.read_vocals_mono(from, to) {
-                    break v;
-                }
+            out.push(Chunk {
+                lines: (a, b),
+                words,
+                owner,
+                start_ms: start,
+                frames: (ms_to_frames(start) as usize, ms_to_frames(end) as usize),
+            });
+        }
+        out
+    }
+
+    /// Align every chunk whose stems exist, in whatever order they become
+    /// available (the stems job starts at the playhead, so the opening
+    /// chunk may be the last to land), until all are done or the track is
+    /// no longer wanted.
+    fn run_job(
+        aligner: &mut Aligner,
+        job: &Job,
+        q: &Arc<(Mutex<Queue>, Condvar)>,
+        results: &OnAligned,
+    ) {
+        let n = job.lines.len();
+        let mut aligned = 0usize;
+        let mut pending = plan(job);
+        while !pending.is_empty() {
+            if !wanted(q, &job.track) || job.buf.is_cancelled() {
+                return;
+            }
+            let Some(i) = pending
+                .iter()
+                .position(|c| job.buf.is_covered(c.frames.0, c.frames.1))
+            else {
                 thread::sleep(Duration::from_millis(200));
+                continue;
             };
-            let audio = to_16k(&vocals);
-            let spans = match aligner.align(&audio, &words) {
-                Ok(Some(s)) => s,
-                Ok(None) => {
-                    tracing::debug!(lines = ?(a, b), "chunk not alignable");
-                    continue;
-                }
+            let chunk = pending.remove(i);
+            let Some(vocals) = job.buf.read_vocals_mono(chunk.frames.0, chunk.frames.1) else {
+                continue;
+            };
+            match align_chunk(aligner, job, &chunk, &vocals, results) {
+                Ok(k) => aligned += k,
                 Err(e) => {
                     tracing::warn!("alignment failed: {e:#}");
                     return;
                 }
-            };
-            // hand back each line whose words scored well enough
-            for li in a..b {
-                let idx: Vec<usize> = (0..words.len()).filter(|k| owner[*k] == li).collect();
-                if idx.is_empty() {
-                    continue;
-                }
-                let mean = idx.iter().map(|k| spans[*k].score).sum::<f32>() / idx.len() as f32;
-                if mean < MIN_SCORE {
-                    tracing::debug!(line = li, score = format!("{mean:.2}"), "line not aligned");
-                    continue;
-                }
-                let words_out: Vec<LyricWord> = idx
-                    .iter()
-                    .map(|k| LyricWord {
-                        time_ms: start + spans[*k].start_ms as u64,
-                        text: words[*k].clone(),
-                    })
-                    .collect();
-                aligned += 1;
-                results(Aligned {
-                    track: job.track.clone(),
-                    line: li,
-                    words: words_out,
-                });
             }
         }
         tracing::info!(track = ?job.track, lines = n, aligned, "lyrics aligned to vocals");
+    }
+
+    /// Align one chunk and hand back each line whose words scored well
+    /// enough. Returns how many lines were accepted.
+    fn align_chunk(
+        aligner: &mut Aligner,
+        job: &Job,
+        chunk: &Chunk,
+        vocals: &[f32],
+        results: &OnAligned,
+    ) -> anyhow::Result<usize> {
+        let (a, b) = chunk.lines;
+        let audio = to_16k(vocals);
+        let Some(spans) = aligner.align(&audio, &chunk.words)? else {
+            tracing::debug!(lines = ?(a, b), "chunk not alignable");
+            return Ok(0);
+        };
+        let mut accepted = 0;
+        for li in a..b {
+            let idx: Vec<usize> = (0..chunk.words.len())
+                .filter(|k| chunk.owner[*k] == li)
+                .collect();
+            if idx.is_empty() {
+                continue;
+            }
+            let mean = idx.iter().map(|k| spans[*k].score).sum::<f32>() / idx.len() as f32;
+            if mean < MIN_SCORE {
+                tracing::debug!(line = li, score = format!("{mean:.2}"), "line not aligned");
+                continue;
+            }
+            let words_out: Vec<LyricWord> = idx
+                .iter()
+                .map(|k| LyricWord {
+                    time_ms: chunk.start_ms + spans[*k].start_ms as u64,
+                    text: chunk.words[*k].clone(),
+                })
+                .collect();
+            accepted += 1;
+            results(Aligned {
+                track: job.track.clone(),
+                line: li,
+                words: words_out,
+            });
+        }
+        Ok(accepted)
     }
 
     #[cfg(test)]
