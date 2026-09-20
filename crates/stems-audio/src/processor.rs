@@ -17,6 +17,8 @@ use crate::{Consumer, FlushSignal, Mixer, Producer};
 
 /// Frames per processing block (~11.6 ms at 44.1 kHz).
 const BLOCK_FRAMES: usize = 512;
+/// Per-frame step of the linear stem availability fade (50 ms at 44.1 kHz).
+const AVAIL_RAMP: f32 = 1.0 / 2205.0;
 
 /// Maps the processor's running frame count onto a track timeline: frame
 /// `at_frame` of the source stream is track frame `track_frame`.
@@ -109,6 +111,8 @@ impl Processor {
                     let mut delayed = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut delay_line: VecDeque<f32> = VecDeque::new();
                     delay_line.resize(latency_frames * ch, 0.0);
+                    // weight of the separator output vs. dry, smoothed
+                    let mut stem_w: f32 = 0.0;
                     // Source frames consumed (popped or drained) so far:
                     // tracks the source's `frames_pushed` for anchors.
                     let mut consumed: u64 = 0;
@@ -159,9 +163,20 @@ impl Processor {
                                 // music going with the original instead of silence.
                                 inst.copy_from_slice(dry);
                             }
+                            // Stems arriving (or running out) mid-song: ramp
+                            // their weight over ~50 ms instead of cutting.
+                            let target = if valid { 1.0 } else { 0.0 };
                             let g = control.vocal_gain();
-                            for ((p, o), i) in processed.iter_mut().zip(dry).zip(&inst) {
-                                *p = i + g * (o - i);
+                            for ((p, o), i) in processed
+                                .chunks_exact_mut(ch)
+                                .zip(dry.chunks_exact(ch))
+                                .zip(inst.chunks_exact(ch))
+                            {
+                                stem_w += (target - stem_w).clamp(-AVAIL_RAMP, AVAIL_RAMP);
+                                for c in 0..ch {
+                                    let inst_eff = o[c] + stem_w * (i[c] - o[c]);
+                                    p[c] = inst_eff + g * (o[c] - inst_eff);
+                                }
                             }
                             mixer.process(dry, Some(&processed), &mut out);
                         } else {
