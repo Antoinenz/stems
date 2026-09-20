@@ -35,13 +35,33 @@ pub async fn build_offline(
     );
     let opts = stream_opts(cfg);
     let r = build_runners(cfg, models_dir).await?;
+    let limit = cfg.gpu_limit.clamp(0.1, 1.0);
+    let runners: Vec<stems_sep::WindowRunner> = if limit < 1.0 {
+        // Duty-cycle throttle: after each window, idle long enough that
+        // busy / (busy + idle) == limit.
+        r.runners
+            .into_iter()
+            .map(|mut run| -> stems_sep::WindowRunner {
+                Box::new(move |w: &[f32]| {
+                    let t = std::time::Instant::now();
+                    let out = run(w);
+                    let busy = t.elapsed();
+                    std::thread::sleep(busy.mul_f32(1.0 / limit - 1.0));
+                    out
+                })
+            })
+            .collect()
+    } else {
+        r.runners
+    };
     tracing::info!(
         backend = cfg.backend,
         provider = r.provider,
+        gpu_limit = limit,
         "offline separator ready"
     );
     Ok(stems_sep::OfflineSeparator::new(
-        r.params, r.provider, r.runners, opts,
+        r.params, r.provider, runners, opts,
     ))
 }
 
