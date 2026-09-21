@@ -282,9 +282,12 @@ mod tests {
                 "guests": {"volume": true}
             }))
             .unwrap();
+        // keys come back in config (alphabetical) order, not patch order
+        let mut changed = u.changed.clone();
+        changed.sort();
         assert_eq!(
-            u.changed,
-            vec!["karaoke.gpu_limit", "karaoke.workers", "guests.volume"]
+            changed,
+            vec!["guests.volume", "karaoke.gpu_limit", "karaoke.workers"]
         );
         assert_eq!(u.restart_required, vec!["karaoke.workers"]);
         assert!(s.guest_allowed("volume"));
