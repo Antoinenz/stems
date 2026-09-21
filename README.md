@@ -51,6 +51,32 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 - `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
   `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`,
   `{"cmd":"set_video_offset","offset_ms":1500}`
+- `GET /api/me` — the caller's role and permissions
+- `GET|PATCH /api/settings` — the live config (host only); a patch is a partial object such
+  as `{"karaoke":{"gpu_limit":0.6},"guests":{"volume":true}}` and answers with what changed
+  and which keys need a restart
+
+### Host and guests
+
+Whoever holds the **host token** is the host and may do everything; anyone else on the LAN is
+a guest and gets the commands the host allows. The token is generated on first start and
+written to `stems.toml` (`host_token`); the daemon logs it, and the remote remembers it once
+it has been opened as `http://<box>:7373/remote/?token=<token>`. Requests carry it as
+`Authorization: Bearer …`, `X-Stems-Token` or `?token=` (WebSocket). Guest permissions:
+
+```toml
+[guests]
+karaoke = true   # switch karaoke on and off
+vocals = true    # vocal level slider
+volume = false
+stage = true     # stage view
+timing = false   # lyric / video timing nudges
+```
+
+The host remote shows a "Guests may" panel that edits these live. Settings changed through
+the API are written back to `stems.toml` with your comments intact; `gpu_limit`, `fade_ms`,
+the video switches, `lyrics_offset_ms`, the token and the guest policy apply immediately,
+everything else after a restart (the response says which).
 
 ### Config and files
 
