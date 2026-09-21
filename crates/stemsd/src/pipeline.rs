@@ -15,6 +15,7 @@ use stems_source_spotify::{Bitrate, SpotifyConfig, SpotifyDeviceType, SpotifySou
 
 use crate::config::Config;
 use crate::engine::{Channels, Engine};
+use crate::settings::Settings;
 
 /// Ring capacity between source and processor for file playback.
 const RING_SECONDS: f32 = 4.0;
@@ -54,6 +55,8 @@ fn build_chain(
 struct Separation {
     audio: Box<dyn Separator>,
     offline: Option<stems_sep::OfflineSeparator>,
+    /// The pre-buffer governor's limit, adjustable at runtime.
+    gpu_limit: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
     #[cfg(feature = "onnx")]
     aligner: Option<stems_sep::align::Aligner>,
 }
@@ -63,7 +66,7 @@ async fn separator(cfg: &Config) -> Result<Separation> {
     let models_dir = paths.models_dir;
     match cfg.karaoke.mode.as_str() {
         "prebuffer" => {
-            let offline =
+            let (offline, gpu_limit) =
                 crate::separator::build_offline(&cfg.karaoke, models_dir.clone(), paths.stems_dir)
                     .await?;
             let audio = Box::new(stems_sep::CachedStemSeparator::new(offline.store()));
@@ -83,6 +86,7 @@ async fn separator(cfg: &Config) -> Result<Separation> {
             Ok(Separation {
                 audio,
                 offline: Some(offline),
+                gpu_limit: Some(gpu_limit),
                 #[cfg(feature = "onnx")]
                 aligner,
             })
@@ -90,6 +94,7 @@ async fn separator(cfg: &Config) -> Result<Separation> {
         "streaming" => Ok(Separation {
             audio: crate::separator::build(&cfg.karaoke, models_dir).await?,
             offline: None,
+            gpu_limit: None,
             #[cfg(feature = "onnx")]
             aligner: None,
         }),
@@ -184,26 +189,39 @@ fn video_fetcher(cfg: &Config) -> Result<Option<stems_enrich::VideoFetcher>> {
     )))
 }
 
-fn spawn_server(cfg: &Config, web_dir: Option<PathBuf>, ch: &Channels) {
+/// The live settings store: config + where it lives + the video dir the
+/// fetcher writes to. Also the server's notion of who the host is.
+fn settings(cfg: &Config) -> Result<std::sync::Arc<Settings>> {
+    let paths = crate::config::paths()?;
+    let path = cfg.source_path.clone().unwrap_or(paths.config_file);
+    Ok(Settings::new(cfg.clone(), path, paths.video_dir))
+}
+
+fn spawn_server(
+    cfg: &Config,
+    web_dir: Option<PathBuf>,
+    ch: &Channels,
+    settings: std::sync::Arc<Settings>,
+) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
-    let video_dir = cfg
-        .video
-        .enabled
-        .then(|| crate::config::paths().map(|p| p.video_dir))
-        .transpose()
-        .ok()
-        .flatten();
+    // always served: videos can be switched on while running
+    let video_dir = crate::config::paths().map(|p| p.video_dir).ok();
     let server = Server {
         addr,
         device_name: cfg.device_name.clone(),
         web_dir,
         video_dir,
+        access: settings,
     };
     let channels = stems_server::Channels {
         state: ch.state.clone(),
         clock: ch.clock.clone(),
         commands: ch.commands.clone(),
     };
+    tracing::info!(
+        token = cfg.host_token,
+        "host remote: open /remote/?token=<token> (guests: /remote/)"
+    );
     tokio::spawn(async move {
         if let Err(e) = server.serve(channels).await {
             tracing::error!("http server: {e:#}");
@@ -254,7 +272,12 @@ pub async fn play_file(
         Some(a) => engine.with_aligner(a),
         None => engine,
     };
-    spawn_server(cfg, web_dir, &ch);
+    let settings = settings(cfg)?;
+    if let Some(h) = sep.gpu_limit {
+        settings.attach_gpu_limit(h);
+    }
+    let engine = engine.with_live(settings.live());
+    spawn_server(cfg, web_dir, &ch, settings);
     engine.run().await
 }
 
@@ -317,7 +340,12 @@ pub async fn run_spotify(
         Some(a) => engine.with_aligner(a),
         None => engine,
     };
-    spawn_server(cfg, web_dir, &ch);
+    let settings = settings(cfg)?;
+    if let Some(h) = sep.gpu_limit {
+        settings.attach_gpu_limit(h);
+    }
+    let engine = engine.with_live(settings.live());
+    spawn_server(cfg, web_dir, &ch, settings);
     engine.run().await
 }
 

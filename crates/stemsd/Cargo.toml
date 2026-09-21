@@ -38,4 +38,7 @@ stems-sep.workspace = true
 rustls.workspace = true
 serde.workspace = true
 toml.workspace = true
+toml_edit = "0.25"
+serde_json.workspace = true
+rand = "0.9"
 directories.workspace = true

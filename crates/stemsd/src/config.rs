@@ -21,10 +21,59 @@ pub struct Config {
     pub port: u16,
     /// Added to every track's lyric timings (negative = earlier).
     pub lyrics_offset_ms: i64,
+    /// Proves the host to the server (`?token=` / `Authorization: Bearer`).
+    /// Generated and written here on first start when empty.
+    pub host_token: String,
     pub spotify: SpotifyConfig,
     pub karaoke: KaraokeConfig,
     pub video: VideoConfig,
     pub lyrics: LyricsConfig,
+    pub guests: GuestsConfig,
+    /// Where this config was read from (not part of the file).
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+}
+
+/// What anyone on the LAN may do from the guest remote. The host (with
+/// the token) may do everything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuestsConfig {
+    /// Switch karaoke on and off.
+    pub karaoke: bool,
+    /// Move the vocal level slider.
+    pub vocals: bool,
+    /// Change the output volume.
+    pub volume: bool,
+    /// Change the stage view (lyrics / karaoke / video / canvas).
+    pub stage: bool,
+    /// Nudge lyric and video timing.
+    pub timing: bool,
+}
+
+impl Default for GuestsConfig {
+    fn default() -> Self {
+        Self {
+            karaoke: true,
+            vocals: true,
+            volume: false,
+            stage: true,
+            timing: false,
+        }
+    }
+}
+
+impl GuestsConfig {
+    pub fn allows(&self, permission: &str) -> bool {
+        match permission {
+            "karaoke" => self.karaoke,
+            "vocals" => self.vocals,
+            "volume" => self.volume,
+            "stage" => self.stage,
+            "timing" => self.timing,
+            _ => false,
+        }
+    }
 }
 
 /// Lyric enrichment beyond the provider's line timings.
@@ -152,10 +201,13 @@ impl Default for Config {
             sink: "cpal".into(),
             port: DEFAULT_PORT,
             lyrics_offset_ms: 0,
+            host_token: String::new(),
             spotify: SpotifyConfig::default(),
             karaoke: KaraokeConfig::default(),
             video: VideoConfig::default(),
             lyrics: LyricsConfig::default(),
+            guests: GuestsConfig::default(),
+            source_path: None,
         }
     }
 }
@@ -197,15 +249,32 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::ensure_exists()?;
         tracing::info!(path = %path.display(), "config");
-        Self::load_from(&path)
+        let mut cfg = Self::load_from(&path)?;
+        if cfg.host_token.is_empty() {
+            cfg.host_token = new_token();
+            // Top-level keys must precede any table, so prepend; this keeps
+            // the user's file (comments and all) intact otherwise.
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            std::fs::write(
+                &path,
+                format!("host_token = \"{}\"\n{existing}", cfg.host_token),
+            )
+            .with_context(|| format!("write {}", path.display()))?;
+            tracing::info!("generated a host token and saved it to the config");
+        }
+        Ok(cfg)
     }
 
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
-        }
+        let mut cfg: Self = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        cfg.source_path = Some(path.to_path_buf());
+        Ok(cfg)
     }
 
     /// Write defaults if no file exists yet; returns the path.
@@ -221,9 +290,30 @@ impl Config {
     }
 }
 
+/// Six characters, no look-alikes: easy to read off a screen and type.
+pub fn new_token() -> String {
+    use rand::seq::IndexedRandom;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::rng();
+    (0..6)
+        .map(|_| *ALPHABET.choose(&mut rng).expect("non-empty") as char)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_are_short_and_unambiguous() {
+        let t = new_token();
+        assert_eq!(t.len(), 6);
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        );
+        assert!(!t.contains(['0', 'O', '1', 'I']));
+    }
 
     #[test]
     fn defaults_roundtrip() {

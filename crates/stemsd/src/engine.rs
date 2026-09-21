@@ -18,6 +18,8 @@ use stems_core::{
 };
 use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib, VideoFetcher};
 use stems_sep::OfflineSeparator;
+
+use crate::settings::Live;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -107,6 +109,8 @@ pub struct Engine {
     #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
     align_tx: mpsc::Sender<align::Aligned>,
     align_rx: mpsc::Receiver<align::Aligned>,
+    /// Settings changed from the host remote while running.
+    live_rx: Option<watch::Receiver<Live>>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -171,6 +175,7 @@ impl Engine {
             prebuffer: None,
             align_tx,
             align_rx,
+            live_rx: None,
             exit_on_end,
             tick_count: 0,
         };
@@ -214,6 +219,12 @@ impl Engine {
             next_lyrics: None,
             next_task: None,
         });
+        self
+    }
+
+    /// Follow settings changed at runtime.
+    pub fn with_live(mut self, rx: watch::Receiver<Live>) -> Self {
+        self.live_rx = Some(rx);
         self
     }
 
@@ -268,6 +279,15 @@ impl Engine {
                     }
                 } => self.on_pcm(id, pcm, wanted, urgent),
                 Some(a) = self.align_rx.recv() => self.on_aligned(a),
+                Ok(()) = async {
+                    match self.live_rx.as_mut() {
+                        Some(rx) => rx.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let live = self.live_rx.as_ref().expect("live rx").borrow().clone();
+                    self.on_live(live);
+                }
                 _ = ticker.tick() => self.tick(),
             }
         }
@@ -829,6 +849,54 @@ impl Engine {
             let _ = tx.send((track.id.clone(), url)).await;
         });
         self.video_next = Some((id, task));
+    }
+
+    /// Apply settings changed from the host remote.
+    fn on_live(&mut self, live: Live) {
+        self.processor.control().set_fade_ms(live.fade_ms as f32);
+        if live.lyrics_offset_ms != self.lyrics_offset_ms {
+            let delta = live.lyrics_offset_ms - self.lyrics_offset_ms;
+            self.lyrics_offset_ms = live.lyrics_offset_ms;
+            self.state_tx.send_if_modified(|s| match s.lyrics.as_mut() {
+                Some(l) => {
+                    l.offset_ms += delta;
+                    s.revision += 1;
+                    true
+                }
+                None => false,
+            });
+        }
+        self.video_align = live.video_align;
+        let had = self.video.is_some();
+        self.video = live.video;
+        match (had, self.video.is_some()) {
+            (false, true) => {
+                tracing::info!("music videos switched on");
+                let current = self.state_tx.borrow().track.clone();
+                if let Some(t) = current {
+                    self.spawn_video_fetch(t);
+                }
+            }
+            (true, false) => {
+                tracing::info!("music videos switched off");
+                if let Some(t) = self.video_task.take() {
+                    t.abort();
+                }
+                if let Some((_, t)) = self.video_next.take() {
+                    t.abort();
+                }
+                self.state_tx.send_if_modified(|s| {
+                    if s.media.video_url.is_some() {
+                        s.media.video_url = None;
+                        s.revision += 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            _ => {}
+        }
     }
 
     fn spawn_video_fetch(&mut self, track: TrackRef) {

@@ -1,6 +1,7 @@
 //! Build the configured [`Separator`] backend.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -31,7 +32,7 @@ pub async fn build_offline(
     cfg: &KaraokeConfig,
     models_dir: PathBuf,
     stems_dir: PathBuf,
-) -> Result<stems_sep::OfflineSeparator> {
+) -> Result<(stems_sep::OfflineSeparator, Arc<AtomicU32>)> {
     anyhow::ensure!(
         cfg.backend != "dsp",
         "mode = \"prebuffer\" needs an ML backend (mdx or remote)"
@@ -39,26 +40,25 @@ pub async fn build_offline(
     let opts = stream_opts(cfg);
     let r = build_runners(cfg, models_dir).await?;
     let limit = cfg.gpu_limit.clamp(0.1, 1.0);
-    let runners: Vec<stems_sep::WindowRunner> = if limit < 1.0 {
-        // One governor shared by every worker: windows are serialised and
-        // paced, so two workers cannot keep the GPU saturated by taking
-        // turns sleeping.
-        let gov = Arc::new(Governor::new(limit));
-        r.runners
-            .into_iter()
-            .map(|mut run| -> stems_sep::WindowRunner {
-                let gov = gov.clone();
-                Box::new(move |w: &[f32]| {
-                    let t = gov.acquire();
-                    let out = run(w);
-                    gov.release(t);
-                    out
-                })
+    // One governor shared by every worker: windows are serialised and
+    // paced, so two workers cannot keep the GPU saturated by taking turns
+    // sleeping. At a limit of 1.0 it steps aside. The limit can be
+    // changed while running (settings API).
+    let gov = Arc::new(Governor::new(limit));
+    let limit_handle = gov.limit_handle();
+    let runners: Vec<stems_sep::WindowRunner> = r
+        .runners
+        .into_iter()
+        .map(|mut run| -> stems_sep::WindowRunner {
+            let gov = gov.clone();
+            Box::new(move |w: &[f32]| {
+                let t = gov.acquire();
+                let out = run(w);
+                gov.release(t);
+                out
             })
-            .collect()
-    } else {
-        r.runners
-    };
+        })
+        .collect();
     let disk = if cfg.stem_cache_mb > 0 {
         match stems_sep::disk::StemDisk::new(&stems_dir, cfg.stem_cache_mb * 1024 * 1024) {
             Ok(d) => Some(d),
@@ -77,8 +77,9 @@ pub async fn build_offline(
         stem_cache = disk.as_ref().map(|d| d.dir().display().to_string()),
         "offline separator ready"
     );
-    Ok(stems_sep::OfflineSeparator::with_disk(
-        r.params, r.provider, runners, opts, disk,
+    Ok((
+        stems_sep::OfflineSeparator::with_disk(r.params, r.provider, runners, opts, disk),
+        limit_handle,
     ))
 }
 
@@ -89,7 +90,8 @@ pub async fn build_offline(
 /// just time-slices them, and the concurrency is what starves the
 /// compositor and everything else.
 struct Governor {
-    limit: f32,
+    /// f32 bits; ≥ 1.0 disables pacing and serialisation.
+    limit: Arc<AtomicU32>,
     inner: Mutex<GovState>,
     cv: Condvar,
 }
@@ -103,7 +105,7 @@ struct GovState {
 impl Governor {
     fn new(limit: f32) -> Self {
         Self {
-            limit,
+            limit: Arc::new(AtomicU32::new(limit.to_bits())),
             inner: Mutex::new(GovState {
                 active: false,
                 next_start: Instant::now(),
@@ -112,8 +114,19 @@ impl Governor {
         }
     }
 
+    fn limit_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.limit)
+    }
+
+    fn limit(&self) -> f32 {
+        f32::from_bits(self.limit.load(Ordering::Relaxed)).clamp(0.1, 1.0)
+    }
+
     /// Wait for the accelerator to be free and the pacing gap to pass.
     fn acquire(&self) -> Instant {
+        if self.limit() >= 1.0 {
+            return Instant::now();
+        }
         let mut g = self.inner.lock().unwrap();
         loop {
             let now = Instant::now();
@@ -132,9 +145,12 @@ impl Governor {
 
     fn release(&self, started: Instant) {
         let busy = started.elapsed();
+        let limit = self.limit();
         let mut g = self.inner.lock().unwrap();
         g.active = false;
-        g.next_start = Instant::now() + busy.mul_f32(1.0 / self.limit - 1.0);
+        if limit < 1.0 {
+            g.next_start = Instant::now() + busy.mul_f32(1.0 / limit - 1.0);
+        }
         drop(g);
         self.cv.notify_all();
     }
