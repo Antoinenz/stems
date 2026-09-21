@@ -87,3 +87,11 @@ export type Command =
   | { cmd: 'set_lyrics_offset'; offset_ms: number }
   | { cmd: 'set_view_mode'; mode: ViewMode }
   | { cmd: 'set_video_offset'; offset_ms: number };
+
+export type Role = 'host' | 'guest';
+/** Guest-grantable permissions, in UI order. */
+export type Permission = 'karaoke' | 'vocals' | 'volume' | 'stage' | 'timing';
+export interface Me {
+  role: Role;
+  permissions: Permission[];
+}

@@ -1,15 +1,45 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { StemsClient } from '../../shared/client.svelte';
-  import type { ViewMode } from '../../shared/types';
+  import { StemsClient, fetchMe, fetchSettings, patchSettings } from '../../shared/client.svelte';
+  import type { Me, Permission, ViewMode } from '../../shared/types';
   import Slider from './Slider.svelte';
   import Stepper from './Stepper.svelte';
 
   const client = new StemsClient();
+  // Who we are decides what is shown: guests only get what the host allows.
+  let me = $state<Me>({ role: 'guest', permissions: [] });
+  const can = (p: Permission) => me.permissions.includes(p);
   onMount(() => {
     client.start();
+    fetchMe().then((m) => (me = m)).catch(() => {});
     return () => client.stop();
   });
+
+  // Host: which controls guests get. Applied immediately via the settings API.
+  const GUEST_PERMS: { id: Permission; label: string }[] = [
+    { id: 'karaoke', label: 'Karaoke on/off' },
+    { id: 'vocals', label: 'Vocal level' },
+    { id: 'volume', label: 'Volume' },
+    { id: 'stage', label: 'Stage view' },
+    { id: 'timing', label: 'Timing nudges' }
+  ];
+  let guestPerms = $state<Record<Permission, boolean> | null>(null);
+  async function loadGuestPerms() {
+    const s = (await fetchSettings()) as { config: { guests: Record<Permission, boolean> } };
+    guestPerms = { ...s.config.guests };
+  }
+  $effect(() => {
+    if (me.role === 'host' && !guestPerms) loadGuestPerms().catch(() => {});
+  });
+  async function setGuestPerm(id: Permission, on: boolean) {
+    if (!guestPerms) return;
+    guestPerms = { ...guestPerms, [id]: on };
+    try {
+      await patchSettings({ guests: { [id]: on } });
+    } catch (e) {
+      console.warn(e);
+    }
+  }
 
   const ps = $derived(client.state);
   const track = $derived(ps.track);
@@ -89,6 +119,7 @@
   <header>
     <span class="dot" class:live={client.connected}></span>
     <span class="name">stems</span>
+    {#if me.role === 'host'}<span class="role">host</span>{/if}
     <span class="status">
       {client.connected ? ps.status : 'connecting…'}
     </span>
@@ -112,7 +143,12 @@
   </section>
 
   <section class="card">
-    <button class="big" class:on={ps.karaoke.enabled} onclick={toggleKaraoke}>
+    <button
+      class="big"
+      class:on={ps.karaoke.enabled}
+      disabled={!can('karaoke')}
+      onclick={toggleKaraoke}
+    >
       {ps.karaoke.enabled ? 'Karaoke on' : 'Karaoke off'}
       <small>
         {ps.karaoke.backend ?? ''}
@@ -128,7 +164,7 @@
     <Slider
       label="Vocals"
       value={vocal}
-      disabled={!ps.karaoke.enabled}
+      disabled={!ps.karaoke.enabled || !can('vocals')}
       format={(v) => `${Math.round(v * 100)}%`}
       onchange={(v) => {
         vocal = v;
@@ -137,17 +173,19 @@
     />
   </section>
 
-  <section class="card">
-    <Slider
-      label="Volume"
-      value={volume}
-      format={(v) => `${Math.round(v * 100)}%`}
-      onchange={(v) => {
-        volume = v;
-        client.send({ cmd: 'set_volume', level: v });
-      }}
-    />
-  </section>
+  {#if can('volume')}
+    <section class="card">
+      <Slider
+        label="Volume"
+        value={volume}
+        format={(v) => `${Math.round(v * 100)}%`}
+        onchange={(v) => {
+          volume = v;
+          client.send({ cmd: 'set_volume', level: v });
+        }}
+      />
+    </section>
+  {/if}
 
   <section class="card">
     <div class="label">Stage</div>
@@ -155,7 +193,8 @@
       {#each MODES as m (m.id)}
         <button
           class:on={ps.view_mode === m.id}
-          disabled={(m.id === 'video' && !ps.media.video_url) ||
+          disabled={!can('stage') ||
+            (m.id === 'video' && !ps.media.video_url) ||
             (m.id === 'canvas' && !ps.media.canvas_url)}
           onclick={() => client.send({ cmd: 'set_view_mode', mode: m.id })}
         >
@@ -165,27 +204,48 @@
     </div>
   </section>
 
-  <section class="card">
-    <Stepper
-      label="Lyrics timing"
-      value={ps.lyrics?.offset_ms ?? 0}
-      step={100}
-      disabled={!ps.lyrics}
-      onchange={(v) => client.send({ cmd: 'set_lyrics_offset', offset_ms: v })}
-    />
-    {#if ps.media.video_url}
+  {#if can('timing')}
+    <section class="card">
       <Stepper
-        label="Video timing"
-        value={ps.media.video_offset_ms}
-        step={250}
-        onchange={(v) => client.send({ cmd: 'set_video_offset', offset_ms: v })}
+        label="Lyrics timing"
+        value={ps.lyrics?.offset_ms ?? 0}
+        step={100}
+        disabled={!ps.lyrics}
+        onchange={(v) => client.send({ cmd: 'set_lyrics_offset', offset_ms: v })}
       />
-    {/if}
-  </section>
+      {#if ps.media.video_url}
+        <Stepper
+          label="Video timing"
+          value={ps.media.video_offset_ms}
+          step={250}
+          onchange={(v) => client.send({ cmd: 'set_video_offset', offset_ms: v })}
+        />
+      {/if}
+    </section>
+
+  {/if}
 
   {#if ps.next_track}
     <section class="next">
       Up next: <b>{ps.next_track.title}</b> · {ps.next_track.artists.join(', ')}
+    </section>
+  {/if}
+
+  {#if me.role === 'host' && guestPerms}
+    <section class="card">
+      <div class="label">Guests may</div>
+      <div class="perms">
+        {#each GUEST_PERMS as p (p.id)}
+          <label>
+            <input
+              type="checkbox"
+              checked={guestPerms[p.id]}
+              onchange={(e) => setGuestPerm(p.id, (e.currentTarget as HTMLInputElement).checked)}
+            />
+            {p.label}
+          </label>
+        {/each}
+      </div>
     </section>
   {/if}
 
@@ -213,6 +273,10 @@
   .status { margin-left: auto; text-transform: capitalize; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #c33; }
   .dot.live { background: #4c6; }
+  .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 1px 6px; }
+  .perms { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; font-size: 14px; }
+  .perms label { display: flex; align-items: center; gap: 8px; }
+  .perms input { width: 18px; height: 18px; accent-color: var(--accent); }
 
   .now { display: flex; gap: 14px; align-items: center; min-height: 84px; }
   .art { width: 84px; height: 84px; border-radius: 10px; object-fit: cover; }

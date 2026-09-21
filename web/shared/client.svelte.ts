@@ -4,7 +4,62 @@
 // (position - performance.now()) and extrapolate between ticks; small
 // errors are slewed, large ones (seek, track change) snap.
 
-import type { Command, Inbound, PlaybackState, PlaybackStatus } from './types';
+import type { Command, Inbound, Me, PlaybackState, PlaybackStatus } from './types';
+
+const TOKEN_KEY = 'stems.token';
+
+/** Host token: `?token=` in the URL is remembered (and removed from the
+ *  address bar); otherwise whatever was remembered before. */
+export function hostToken(): string | null {
+  try {
+    const url = new URL(location.href);
+    const t = url.searchParams.get('token');
+    if (t) {
+      localStorage.setItem(TOKEN_KEY, t);
+      url.searchParams.delete('token');
+      history.replaceState(null, '', url.toString());
+      return t;
+    }
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setHostToken(t: string | null) {
+  if (t) localStorage.setItem(TOKEN_KEY, t);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+function authHeaders(): HeadersInit {
+  const t = hostToken();
+  return t ? { 'x-stems-token': t } : {};
+}
+
+/** Who the server thinks we are. */
+export async function fetchMe(): Promise<Me> {
+  const res = await fetch('/api/me', { headers: authHeaders() });
+  return (await res.json()) as Me;
+}
+
+export async function fetchSettings(): Promise<unknown> {
+  const res = await fetch('/api/settings', { headers: authHeaders() });
+  if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
+  return res.json();
+}
+
+/** Patch settings; resolves to what changed / what needs a restart. */
+export async function patchSettings(
+  patch: unknown
+): Promise<{ changed: string[]; restart_required: string[] }> {
+  const res = await fetch('/api/settings', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(patch)
+  });
+  if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
+  return res.json();
+}
 
 const SNAP_THRESHOLD_MS = 150;
 const SLEW = 0.15;
@@ -62,7 +117,8 @@ export class StemsClient {
   }
 
   #connect() {
-    const ws = new WebSocket(this.url);
+    const token = hostToken();
+    const ws = new WebSocket(token ? `${this.url}?token=${encodeURIComponent(token)}` : this.url);
     this.#ws = ws;
     ws.onopen = () => {
       this.connected = true;
