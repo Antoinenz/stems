@@ -4,18 +4,25 @@
 //! * `GET  /api/ws`     — WebSocket: `{"type":"state",...}` on connect and on
 //!   every change, `{"type":"clock",...}` at ~10 Hz; accepts [`Command`] JSON
 //! * `POST /api/command` — one [`Command`] as JSON
+//! * `GET  /api/me` — the caller's role and permissions
+//! * `GET|PATCH /api/settings` — live settings (host only)
 //! * `GET  /api/health`
 //! * `/stage`, `/remote`, `/` — static files from the web directory, if present
 //!
-//! The server owns no state: it forwards `watch` channels from the engine and
-//! pushes commands back through an `mpsc`.
+//! Callers are the host (token via `Authorization: Bearer`, `X-Stems-Token`
+//! or `?token=`) or guests, who get the commands the host allows; see
+//! [`access`]. The server owns no state: it forwards `watch` channels from
+//! the engine and pushes commands back through an `mpsc`.
+
+pub mod access;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
@@ -23,6 +30,8 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use stems_core::{ClockTick, Command, PlaybackState};
+
+pub use access::{Access, Open, Role, SettingsUpdate};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -33,6 +42,12 @@ pub struct Channels {
     pub state: watch::Receiver<PlaybackState>,
     pub clock: watch::Receiver<ClockTick>,
     pub commands: mpsc::Sender<Command>,
+}
+
+#[derive(Clone)]
+struct App {
+    ch: Channels,
+    access: Arc<dyn Access>,
 }
 
 /// Host load, for the remote's status line. Sampled at most every 2 s.
@@ -151,21 +166,25 @@ pub struct Server {
     pub web_dir: Option<PathBuf>,
     /// Downloaded music videos, served at `/media/video/`.
     pub video_dir: Option<PathBuf>,
+    pub access: Arc<dyn Access>,
 }
 
 impl Server {
     pub fn router(
         ch: Channels,
+        access: Arc<dyn Access>,
         device_name: &str,
         web_dir: Option<&Path>,
         video_dir: Option<&Path>,
     ) -> Router {
-        let device_name = std::sync::Arc::new(device_name.to_string());
-        let sysmon = std::sync::Arc::new(std::sync::Mutex::new(SysMon::new()));
+        let device_name = Arc::new(device_name.to_string());
+        let sysmon = Arc::new(std::sync::Mutex::new(SysMon::new()));
         let mut app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .route("/api/state", get(get_state))
             .route("/api/command", post(post_command))
+            .route("/api/me", get(get_me))
+            .route("/api/settings", get(get_settings).patch(patch_settings))
             .route("/api/ws", get(ws_upgrade))
             .route("/api/info", {
                 let name = device_name.clone();
@@ -176,7 +195,7 @@ impl Server {
                 let m = sysmon.clone();
                 get(move || async move { Json(m.lock().expect("sysmon").sample()) })
             })
-            .with_state(ch)
+            .with_state(App { ch, access })
             .layer(CorsLayer::permissive());
 
         if let Some(dir) = web_dir {
@@ -212,6 +231,7 @@ impl Server {
     pub async fn serve(self, ch: Channels) -> Result<()> {
         let app = Self::router(
             ch,
+            self.access.clone(),
             &self.device_name,
             self.web_dir.as_deref(),
             self.video_dir.as_deref(),
@@ -260,23 +280,96 @@ async fn get_remote_qr(headers: axum::http::HeaderMap) -> impl IntoResponse {
     }
 }
 
-async fn get_state(State(ch): State<Channels>) -> Json<PlaybackState> {
-    Json(ch.state.borrow().clone())
+async fn get_state(State(app): State<App>) -> Json<PlaybackState> {
+    Json(app.ch.state.borrow().clone())
+}
+
+fn forbidden(permission: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": format!("guests may not change {permission} here"),
+            "permission": permission,
+        })),
+    )
 }
 
 async fn post_command(
-    State(ch): State<Channels>,
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
     Json(cmd): Json<Command>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    ch.commands
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let role = access::role_of(&app.access, &headers, query.as_deref());
+    access::check(&app.access, role, &cmd).map_err(forbidden)?;
+    app.ch
+        .commands
         .send(cmd)
         .await
         .map(|_| StatusCode::ACCEPTED)
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "engine not running".into()))
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "engine not running"})),
+            )
+        })
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(ch): State<Channels>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_session(socket, ch))
+async fn get_me(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Json<access::Me> {
+    let role = access::role_of(&app.access, &headers, query.as_deref());
+    Json(access::me(&app.access, role))
+}
+
+fn host_only(
+    app: &App,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match access::role_of(&app.access, headers, query) {
+        Role::Host => Ok(()),
+        Role::Guest => Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "host token required"})),
+        )),
+    }
+}
+
+async fn get_settings(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    Ok(Json(app.access.settings()))
+}
+
+async fn patch_settings(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    Json(patch): Json<serde_json::Value>,
+) -> Result<Json<SettingsUpdate>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    app.access.update_settings(patch).map(Json).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+    })
+}
+
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> impl IntoResponse {
+    let role = access::role_of(&app.access, &headers, query.as_deref());
+    ws.on_upgrade(move |socket| ws_session(socket, app, role))
 }
 
 async fn send(
@@ -287,7 +380,8 @@ async fn send(
     tx.send(Message::Text(text.into())).await
 }
 
-async fn ws_session(socket: WebSocket, mut ch: Channels) {
+async fn ws_session(socket: WebSocket, app: App, role: Role) {
+    let App { mut ch, access } = app;
     let (mut tx, mut rx) = socket.split();
 
     // Initial snapshot.
@@ -315,9 +409,14 @@ async fn ws_session(socket: WebSocket, mut ch: Channels) {
             incoming = rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<Command>(&text) {
-                        Ok(cmd) => {
-                            if ch.commands.send(cmd).await.is_err() { break; }
-                        }
+                        Ok(cmd) => match access::check(&access, role, &cmd) {
+                            Ok(()) => {
+                                if ch.commands.send(cmd).await.is_err() { break; }
+                            }
+                            Err(p) => {
+                                let _ = send(&mut tx, Outbound::Error { message: format!("guests may not change {p} here") }).await;
+                            }
+                        },
                         Err(e) => {
                             let _ = send(&mut tx, Outbound::Error { message: format!("bad command: {e}") }).await;
                         }
@@ -361,7 +460,7 @@ mod tests {
     async fn state_endpoint_returns_json() {
         let (ch, state_tx, _rx) = channels();
         state_tx.send_modify(|s| s.volume = 0.42);
-        let app = Server::router(ch, "test", None, None);
+        let app = Server::router(ch, Arc::new(Open), "test", None, None);
         let res = app
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
@@ -378,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn command_endpoint_forwards_to_engine() {
         let (ch, _state_tx, mut rx) = channels();
-        let app = Server::router(ch, "test", None, None);
+        let app = Server::router(ch, Arc::new(Open), "test", None, None);
         let res = app
             .oneshot(
                 Request::post("/api/command")
