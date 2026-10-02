@@ -454,6 +454,31 @@ pub mod worker {
         }
     }
 
+    /// Align a whole track on the calling thread and return every line
+    /// that scored well enough. `buf` should be complete (offline import);
+    /// regions without stems are skipped rather than waited for.
+    pub fn align_blocking(
+        aligner: &mut Aligner,
+        track: TrackId,
+        buf: Arc<StemBuffer>,
+        lines: Vec<LyricLine>,
+    ) -> anyhow::Result<Vec<Aligned>> {
+        let job = Job { track, buf, lines };
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&out);
+        let results: OnAligned = Box::new(move |a| sink.lock().expect("aligned").push(a));
+        for chunk in plan(&job) {
+            let Some(vocals) = job.buf.read_vocals_mono(chunk.frames.0, chunk.frames.1) else {
+                continue;
+            };
+            align_chunk(aligner, &job, &chunk, &vocals, &results)?;
+        }
+        drop(results);
+        let mut v = std::mem::take(&mut *out.lock().expect("aligned"));
+        v.sort_by_key(|a| a.line);
+        Ok(v)
+    }
+
     impl Drop for AlignWorker {
         fn drop(&mut self) {
             let (lock, cv) = &*self.queue;

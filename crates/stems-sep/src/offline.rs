@@ -55,6 +55,26 @@ impl StemBuffer {
         }
     }
 
+    /// A finished buffer from a mix and its already computed
+    /// instrumental (e.g. loaded from the library). `None` if the lengths
+    /// differ, which means the instrumental belongs to another decode.
+    pub fn from_parts(mix: &[f32], instrumental: &[f32]) -> Option<Self> {
+        if mix.len() != instrumental.len() {
+            return None;
+        }
+        let buf = Self::new(mix);
+        buf.write(0, instrumental);
+        // an empty track has nothing to cover but is still complete
+        buf.done.store(true, Ordering::Release);
+        Some(buf)
+    }
+
+    /// Copy of the instrumental (interleaved stereo); regions not computed
+    /// yet are silent.
+    pub fn instrumental(&self) -> Vec<f32> {
+        self.data.lock().expect("stem data").clone()
+    }
+
     /// Mono mix of the source track (44.1 kHz), for matching other
     /// material against it.
     pub fn mix_mono(&self) -> &[f32] {
@@ -771,6 +791,19 @@ impl Separator for CachedStemSeparator {
 mod tests {
     use super::*;
     use crate::params::PrimaryStem;
+
+    #[test]
+    fn from_parts_is_complete_and_reads_back() {
+        let mix: Vec<f32> = (0..2000).map(|i| (i as f32 * 0.01).sin()).collect();
+        let inst: Vec<f32> = mix.iter().map(|x| x * 0.5).collect();
+        let buf = StemBuffer::from_parts(&mix, &inst).unwrap();
+        assert!(buf.is_done());
+        assert!(buf.is_covered(0, 1000));
+        assert_eq!(buf.instrumental(), inst);
+        let v = buf.read_vocals_mono(10, 20).unwrap();
+        assert!((v[0] - 0.5 * 0.5 * (mix[20] + mix[21])).abs() < 1e-6);
+        assert!(StemBuffer::from_parts(&mix, &inst[..1000]).is_none());
+    }
 
     fn params() -> MdxParams {
         MdxParams {

@@ -66,9 +66,12 @@ async fn separator(cfg: &Config) -> Result<Separation> {
     let models_dir = paths.models_dir;
     match cfg.karaoke.mode.as_str() {
         "prebuffer" => {
-            let (offline, gpu_limit) =
-                crate::separator::build_offline(&cfg.karaoke, models_dir.clone(), paths.stems_dir)
-                    .await?;
+            let (offline, gpu_limit) = crate::separator::build_offline(
+                &cfg.karaoke,
+                models_dir.clone(),
+                Some(paths.stems_dir),
+            )
+            .await?;
             let audio = Box::new(stems_sep::CachedStemSeparator::new(offline.store()));
             tracing::info!("karaoke mode: prebuffer (zero-latency, stems computed ahead)");
             #[cfg(feature = "onnx")]

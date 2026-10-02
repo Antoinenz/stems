@@ -31,7 +31,7 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
 pub async fn build_offline(
     cfg: &KaraokeConfig,
     models_dir: PathBuf,
-    stems_dir: PathBuf,
+    stems_dir: Option<PathBuf>,
 ) -> Result<(stems_sep::OfflineSeparator, Arc<AtomicU32>)> {
     anyhow::ensure!(
         cfg.backend != "dsp",
@@ -59,16 +59,17 @@ pub async fn build_offline(
             })
         })
         .collect();
-    let disk = if cfg.stem_cache_mb > 0 {
-        match stems_sep::disk::StemDisk::new(&stems_dir, cfg.stem_cache_mb * 1024 * 1024) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!("stem cache disabled: {e:#}");
-                None
+    let disk = match stems_dir.filter(|_| cfg.stem_cache_mb > 0) {
+        Some(stems_dir) => {
+            match stems_sep::disk::StemDisk::new(&stems_dir, cfg.stem_cache_mb * 1024 * 1024) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!("stem cache disabled: {e:#}");
+                    None
+                }
             }
         }
-    } else {
-        None
+        None => None,
     };
     tracing::info!(
         backend = cfg.backend,
