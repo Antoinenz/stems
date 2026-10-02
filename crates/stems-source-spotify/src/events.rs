@@ -172,7 +172,7 @@ fn minimal_track(uri: &SpotifyUri) -> TrackRef {
     }
 }
 
-fn track_ref_from_item(item: &AudioItem) -> TrackRef {
+pub(crate) fn track_ref_from_item(item: &AudioItem) -> TrackRef {
     let (artists, album) = match &item.unique_fields {
         UniqueFields::Track { artists, album, .. } => (
             artists.iter().map(|a| a.name.clone()).collect(),
@@ -197,7 +197,7 @@ fn track_ref_from_item(item: &AudioItem) -> TrackRef {
     }
 }
 
-async fn fetch_isrc(session: &Session, uri: &SpotifyUri) -> Option<String> {
+pub(crate) async fn fetch_isrc(session: &Session, uri: &SpotifyUri) -> Option<String> {
     let track = Track::get(session, uri).await.ok()?;
     track
         .external_ids
@@ -206,7 +206,7 @@ async fn fetch_isrc(session: &Session, uri: &SpotifyUri) -> Option<String> {
         .map(|e| e.id.clone())
 }
 
-async fn fetch_track_ref(session: &Session, uri: &SpotifyUri) -> Option<TrackRef> {
+pub(crate) async fn fetch_track_ref(session: &Session, uri: &SpotifyUri) -> Option<TrackRef> {
     let item = AudioItem::get_file(session, uri.clone()).await.ok()?;
     let mut t = track_ref_from_item(&item);
     t.isrc = fetch_isrc(session, uri).await;

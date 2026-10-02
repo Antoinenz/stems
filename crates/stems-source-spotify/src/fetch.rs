@@ -37,49 +37,18 @@ impl TrackFetcher {
             .borrow()
             .clone()
             .ok_or_else(|| anyhow!("no spotify session"))?;
-        let uri = SpotifyUri::from_uri(&format!("spotify:track:{base62}"))
-            .map_err(|e| anyhow!("track uri: {e}"))?;
-        let track_id: SpotifyId = (&uri).try_into().map_err(|e| anyhow!("track id: {e}"))?;
-
-        let audio_item = AudioItem::get_file(&session, uri)
-            .await
-            .map_err(|e| anyhow!("track metadata: {e}"))?;
-        let (format, file_id) = pick_file(&audio_item.files, self.bitrate)
-            .ok_or_else(|| anyhow!("no playable file for {}", audio_item.name))?;
-
-        // A generous rate makes the loader prefetch far ahead of the reader.
-        let bytes_per_second = 8 * 40_000;
-        let encrypted = AudioFile::open(&session, file_id, bytes_per_second)
-            .await
-            .map_err(|e| anyhow!("open audio file: {e}"))?;
-        let controller = encrypted
-            .get_stream_loader_controller()
-            .map_err(|e| anyhow!("stream controller: {e}"))?;
-        let len = controller.len() as u64;
-        // Ask for the whole file up front so the download runs flat out
-        // while the decoder works through it, instead of trickling behind
-        // the read position.
-        controller
-            .fetch_next_and_wait(len as usize, 0)
-            .map_err(|e| anyhow!("prefetch: {e}"))?;
-        let key = match session.audio_key().request(track_id, file_id).await {
-            Ok(k) => Some(k),
-            Err(e) => {
-                tracing::warn!("audio key unavailable, trying without decryption: {e}");
-                None
-            }
-        };
-        let decrypted = AudioDecrypt::new(key, encrypted);
-        let offset = if AudioFiles::is_ogg_vorbis(format) {
-            SPOTIFY_OGG_HEADER_END
-        } else {
-            0
-        };
+        let opened = open_decrypted(&session, base62, self.bitrate).await?;
         let mut hint = Hint::new();
-        if let Some(mime) = AudioFiles::mime_type(format) {
+        if let Some(mime) = AudioFiles::mime_type(opened.format) {
             hint.mime_type(mime);
         }
-        let name = audio_item.name.clone();
+        let Opened {
+            decrypted,
+            offset,
+            len,
+            name,
+            ..
+        } = opened;
         tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
             let src = Subfile::new(decrypted, offset, len)?;
             let mut decoder =
@@ -102,6 +71,68 @@ impl TrackFetcher {
         .await
         .context("decode task")?
     }
+}
+
+/// A track's audio file, downloaded and wrapped for decryption.
+pub(crate) struct Opened {
+    pub decrypted: AudioDecrypt<AudioFile>,
+    /// Where the codec stream starts (past Spotify's Ogg header).
+    pub offset: u64,
+    pub len: u64,
+    pub format: AudioFileFormat,
+    pub name: String,
+}
+
+/// Metadata → best file for `bitrate` → whole file downloaded → key.
+pub(crate) async fn open_decrypted(
+    session: &Session,
+    base62: &str,
+    bitrate: Bitrate,
+) -> Result<Opened> {
+    let uri = SpotifyUri::from_uri(&format!("spotify:track:{base62}"))
+        .map_err(|e| anyhow!("track uri: {e}"))?;
+    let track_id: SpotifyId = (&uri).try_into().map_err(|e| anyhow!("track id: {e}"))?;
+
+    let audio_item = AudioItem::get_file(session, uri)
+        .await
+        .map_err(|e| anyhow!("track metadata: {e}"))?;
+    let (format, file_id) = pick_file(&audio_item.files, bitrate)
+        .ok_or_else(|| anyhow!("no playable file for {}", audio_item.name))?;
+
+    // A generous rate makes the loader prefetch far ahead of the reader.
+    let bytes_per_second = 8 * 40_000;
+    let encrypted = AudioFile::open(session, file_id, bytes_per_second)
+        .await
+        .map_err(|e| anyhow!("open audio file: {e}"))?;
+    let controller = encrypted
+        .get_stream_loader_controller()
+        .map_err(|e| anyhow!("stream controller: {e}"))?;
+    let len = controller.len() as u64;
+    // Ask for the whole file up front so the download runs flat out
+    // while the decoder works through it, instead of trickling behind
+    // the read position.
+    controller
+        .fetch_next_and_wait(len as usize, 0)
+        .map_err(|e| anyhow!("prefetch: {e}"))?;
+    let key = match session.audio_key().request(track_id, file_id).await {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::warn!("audio key unavailable, trying without decryption: {e}");
+            None
+        }
+    };
+    let offset = if AudioFiles::is_ogg_vorbis(format) {
+        SPOTIFY_OGG_HEADER_END
+    } else {
+        0
+    };
+    Ok(Opened {
+        decrypted: AudioDecrypt::new(key, encrypted),
+        offset,
+        len,
+        format,
+        name: audio_item.name,
+    })
 }
 
 fn pick_file(

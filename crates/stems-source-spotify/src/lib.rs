@@ -11,6 +11,7 @@
 mod canvas;
 mod events;
 pub mod fetch;
+pub mod import;
 mod mixer;
 mod sink;
 
