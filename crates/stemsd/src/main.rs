@@ -5,6 +5,7 @@
 
 mod config;
 mod engine;
+mod import;
 mod pipeline;
 mod separator;
 mod settings;
@@ -56,6 +57,13 @@ enum Cmd {
         /// Override the artist (used for the lyrics lookup).
         #[arg(long)]
         artist: Option<String>,
+    },
+    /// Add tracks to the offline library: Spotify track/album/playlist
+    /// links, audio files or folders. Re-running resumes unfinished
+    /// tracks and retries failed steps.
+    Import {
+        #[arg(required = true)]
+        sources: Vec<String>,
     },
     /// List output devices.
     Devices,
@@ -139,6 +147,13 @@ fn main() -> Result<()> {
                 );
             }
             Ok(())
+        }
+        Cmd::Import { sources } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(import::run(&cfg, &sources));
+            // librespot's session tasks can panic while the runtime is torn down
+            std::mem::forget(rt);
+            result
         }
         Cmd::Worker { bind } => {
             let rt = tokio::runtime::Runtime::new()?;

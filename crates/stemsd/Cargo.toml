@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = ["onnx"]
-onnx = ["stems-sep/onnx", "dep:reqwest", "dep:futures"]
+onnx = ["stems-sep/onnx", "dep:futures"]
 # load libonnxruntime at runtime from ORT_DYLIB_PATH (see stems-sep)
 onnx-dylib = ["onnx", "stems-sep/onnx-dylib"]
 cuda = ["onnx", "stems-sep/cuda"]
@@ -22,7 +22,7 @@ coreml = ["onnx", "stems-sep/coreml"]
 
 [dependencies]
 stems-core.workspace = true
-reqwest = { workspace = true, optional = true }
+reqwest.workspace = true
 futures = { workspace = true, optional = true }
 stems-audio.workspace = true
 stems-source-file.workspace = true
@@ -34,6 +34,8 @@ anyhow.workspace = true
 stems-source-spotify.workspace = true
 stems-server.workspace = true
 stems-enrich.workspace = true
+stems-library.workspace = true
+ebur128 = "0.1"
 stems-sep.workspace = true
 rustls.workspace = true
 serde.workspace = true
