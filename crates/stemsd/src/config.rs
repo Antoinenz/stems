@@ -29,6 +29,7 @@ pub struct Config {
     pub video: VideoConfig,
     pub lyrics: LyricsConfig,
     pub guests: GuestsConfig,
+    pub library: LibraryConfig,
     /// Where this config was read from (not part of the file).
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -72,6 +73,28 @@ impl GuestsConfig {
             "stage" => self.stage,
             "timing" => self.timing,
             _ => false,
+        }
+    }
+}
+
+/// The offline track library (`stemsd import`, `stemsd library`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibraryConfig {
+    /// Library folder, e.g. `/Volumes/Party/stems-library` on an external
+    /// drive. Empty = `library/` in the platform data dir. Its parent must
+    /// exist, so an unplugged drive is reported instead of silently
+    /// starting an empty library on the system disk.
+    pub dir: String,
+    /// Loudness the player levels every track to (EBU R128 LUFS).
+    pub target_lufs: f32,
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            target_lufs: -14.0,
         }
     }
 }
@@ -207,6 +230,7 @@ impl Default for Config {
             video: VideoConfig::default(),
             lyrics: LyricsConfig::default(),
             guests: GuestsConfig::default(),
+            library: LibraryConfig::default(),
             source_path: None,
         }
     }
@@ -230,6 +254,8 @@ pub struct Paths {
     pub models_dir: PathBuf,
     pub video_dir: PathBuf,
     pub stems_dir: PathBuf,
+    /// Default library location when `[library] dir` is empty.
+    pub library_dir: PathBuf,
 }
 
 pub fn paths() -> Result<Paths> {
@@ -240,10 +266,20 @@ pub fn paths() -> Result<Paths> {
         models_dir: dirs.cache_dir().join("models"),
         video_dir: dirs.cache_dir().join("video"),
         stems_dir: dirs.cache_dir().join("stems"),
+        library_dir: dirs.data_dir().join("library"),
     })
 }
 
 impl Config {
+    /// Where the track library lives: `[library] dir`, else the default.
+    pub fn library_dir(&self) -> Result<PathBuf> {
+        let dir = self.library.dir.trim();
+        if dir.is_empty() {
+            return Ok(paths()?.library_dir);
+        }
+        Ok(expand_home(dir))
+    }
+
     /// Load from the default location, writing a default file first if
     /// there is none so users can find and edit it.
     pub fn load() -> Result<Self> {
@@ -290,6 +326,16 @@ impl Config {
     }
 }
 
+/// `~/…` → the home directory.
+fn expand_home(p: &str) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => directories::BaseDirs::new()
+            .map(|b| b.home_dir().join(rest))
+            .unwrap_or_else(|| PathBuf::from(p)),
+        None => PathBuf::from(p),
+    }
+}
+
 /// Six characters, no look-alikes: easy to read off a screen and type.
 pub fn new_token() -> String {
     use rand::seq::IndexedRandom;
@@ -331,5 +377,20 @@ mod tests {
         assert_eq!(c.spotify.bitrate, 160);
         assert_eq!(c.sink, "cpal");
         assert!(c.spotify.enabled);
+    }
+
+    #[test]
+    fn library_dir_defaults_and_expands_home() {
+        let mut c = Config::default();
+        assert!(c.library_dir().unwrap().ends_with("library"));
+        assert_eq!(c.library.target_lufs, -14.0);
+        c.library.dir = "/Volumes/Party/stems-library".into();
+        assert_eq!(
+            c.library_dir().unwrap(),
+            PathBuf::from("/Volumes/Party/stems-library")
+        );
+        c.library.dir = "~/Music/stems".into();
+        let d = c.library_dir().unwrap();
+        assert!(d.is_absolute() && d.ends_with("Music/stems"), "{d:?}");
     }
 }

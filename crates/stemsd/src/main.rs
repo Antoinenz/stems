@@ -122,6 +122,7 @@ fn main() -> Result<()> {
             let created = Config::ensure_exists()?;
             println!("config file: {} ", created.display());
             println!("cache dir:   {}", p.cache_dir.display());
+            println!("library:     {}", cfg.library_dir()?.display());
             println!();
             print!("{}", toml::to_string_pretty(&cfg)?);
             Ok(())

@@ -201,6 +201,9 @@ fn validate(cfg: &Config) -> std::result::Result<(), String> {
     if cfg.port == 0 {
         return Err("port must be set".into());
     }
+    if !(-30.0..=-5.0).contains(&cfg.library.target_lufs) {
+        return Err("library.target_lufs must be between -30 and -5".into());
+    }
     Ok(())
 }
 
@@ -318,6 +321,11 @@ mod tests {
         assert!(
             s.update_settings(serde_json::json!({"port": "abc"}))
                 .is_err()
+        );
+        assert!(
+            s.update_settings(serde_json::json!({"library": {"target_lufs": 0.0}}))
+                .unwrap_err()
+                .contains("target_lufs")
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
