@@ -221,7 +221,10 @@ impl Callback {
     fn fill(&mut self, data: &mut [f32], info: &cpal::OutputCallbackInfo) {
         self.record_latency(info);
         if self.flush.take(&mut self.flush_seen) {
-            drain(&mut self.consumer);
+            // Dropped audio still counts as passed: the source's counter
+            // includes it, and the clock compares the two.
+            let dropped = drain(&mut self.consumer) / CHANNELS as usize;
+            self.frames.fetch_add(dropped as u64, Ordering::Relaxed);
         }
         let volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
         let missing = if self.resampler.is_identity() {

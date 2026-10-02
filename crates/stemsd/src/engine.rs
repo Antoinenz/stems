@@ -431,8 +431,7 @@ impl Engine {
             }
             SourceEvent::Ended => {
                 tracing::info!("track ended");
-                self.clock
-                    .pause(self.clock.position_ms(self.sink.frames_emitted()));
+                self.clock.pause(self.clock.position_ms(self.emitted()));
                 self.set_status(PlaybackStatus::Idle);
             }
             SourceEvent::NextTrackHint { track } => {
@@ -668,6 +667,7 @@ impl Engine {
     }
 
     fn on_pcm(&mut self, id: TrackId, pcm: Arc<Vec<f32>>, wanted: u64, urgent: bool) {
+        let emitted = self.emitted();
         let Some(p) = self.prebuffer.as_mut() else {
             return;
         };
@@ -675,7 +675,7 @@ impl Engine {
         // is the playing track, start from where it is now
         let current = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
         let wanted = if current.as_ref() == Some(&id) {
-            let pos = self.clock.position_ms(self.sink.frames_emitted());
+            let pos = self.clock.position_ms(emitted);
             stems_core::ms_to_frames(pos).max(wanted)
         } else {
             wanted
@@ -1061,6 +1061,14 @@ impl Engine {
         }
     }
 
+    /// Source frames that have passed the sink: played, or dropped by a
+    /// flush (pause, seek, track change) in the processor or the sink.
+    /// Shares its origin with the source's `frames_pushed`, which is what
+    /// the clock's anchors are expressed in.
+    fn emitted(&self) -> u64 {
+        self.sink.frames_emitted() + self.processor.skipped_frames()
+    }
+
     fn processor_delay_ms(&self) -> u64 {
         self.processor.latency_frames() as u64 * 1000 / stems_core::SAMPLE_RATE as u64
     }
@@ -1126,7 +1134,7 @@ impl Engine {
         }
         let status = self.state_tx.borrow().status;
         let revision = self.state_tx.borrow().revision;
-        let position_ms = self.clock.position_ms(self.sink.frames_emitted());
+        let position_ms = self.clock.position_ms(self.emitted());
         let _ = self.clock_tx.send(ClockTick {
             revision,
             status,
@@ -1138,7 +1146,7 @@ impl Engine {
         self.tick_count += 1;
         if status == PlaybackStatus::Playing && self.tick_count % 50 == 0 {
             let pushed = self.source.frames_pushed();
-            let emitted = self.sink.frames_emitted();
+            let emitted = self.emitted();
             let buffered_ms = stems_core::frames_to_ms(pushed.saturating_sub(emitted));
             let sink_latency_ms = self.sink.latency().as_millis() as u64;
             tracing::debug!(

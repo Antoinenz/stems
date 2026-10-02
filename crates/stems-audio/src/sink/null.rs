@@ -38,7 +38,8 @@ impl NullSink {
                     let mut flush_seen = 0;
                     while !stop.load(Ordering::Relaxed) {
                         if flush.take(&mut flush_seen) {
-                            drain(&mut consumer);
+                            let dropped = drain(&mut consumer) / CHANNELS as usize;
+                            frames.fetch_add(dropped as u64, Ordering::Relaxed);
                         }
                         let missing = pop_or_silence(&mut consumer, &mut buf);
                         frames.fetch_add(frames_per_tick as u64, Ordering::Relaxed);

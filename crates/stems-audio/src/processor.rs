@@ -5,7 +5,7 @@
 //! only adds a bounded amount of buffering.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -75,6 +75,9 @@ impl ProcessorControl {
 
 pub struct Processor {
     control: ProcessorControl,
+    /// Source frames dropped on flush; they never reach the sink, so the
+    /// clock adds them to the sink's count to stay in step with the source.
+    skipped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     backend_name: &'static str,
@@ -96,12 +99,14 @@ impl Processor {
         let control = ProcessorControl::default();
         control.set_fade_ms(fade_ms);
         let stop = Arc::new(AtomicBool::new(false));
+        let skipped = Arc::new(AtomicU64::new(0));
         let backend_name = separator.name();
         let latency_frames = separator.latency_frames();
 
         let thread = {
             let control = control.clone();
             let stop = stop.clone();
+            let skipped = skipped.clone();
             thread::Builder::new()
                 .name("stems-processor".into())
                 .spawn(move || {
@@ -130,7 +135,9 @@ impl Processor {
 
                     while !stop.load(Ordering::Relaxed) {
                         if in_flush.take(&mut flush_seen) {
-                            consumed += (drain(&mut input) / ch) as u64;
+                            let dropped = (drain(&mut input) / ch) as u64;
+                            consumed += dropped;
+                            skipped.fetch_add(dropped, Ordering::Relaxed);
                             separator.reset();
                             delay_line.clear();
                             delay_line.resize(latency_frames * ch, 0.0);
@@ -209,6 +216,7 @@ impl Processor {
 
         Self {
             control,
+            skipped,
             stop,
             thread: Some(thread),
             backend_name,
@@ -219,6 +227,11 @@ impl Processor {
     /// Frames of delay this processor adds between its input and output.
     pub fn latency_frames(&self) -> usize {
         self.latency_frames
+    }
+
+    /// Source frames discarded by flushes so far.
+    pub fn skipped_frames(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
     }
 
     pub fn control(&self) -> ProcessorControl {
@@ -360,6 +373,42 @@ mod tests {
         assert_eq!(got[lat * 2], 0.0);
         assert_eq!(got[(lat + 5) * 2], 5.0);
         assert_eq!(proc.latency_frames(), lat);
+    }
+
+    #[test]
+    fn flushed_frames_are_counted() {
+        let blocks = 16;
+        let (mut src_p, src_c) = AudioRing::with_frames(BLOCK_FRAMES * blocks);
+        let (out_p, mut out_c) = AudioRing::with_frames(BLOCK_FRAMES * 2);
+        let flush = FlushSignal::new();
+        let proc = Processor::spawn(
+            src_c,
+            out_p,
+            Box::new(Mute),
+            flush.clone(),
+            FlushSignal::new(),
+            50.0,
+        );
+        let input = vec![0.25f32; BLOCK_FRAMES * 2 * blocks];
+        assert_eq!(push_available(&mut src_p, &input), input.len());
+        // the processor fills the small output ring and stalls on the next block
+        thread::sleep(Duration::from_millis(100));
+        flush.request();
+        let mut popped = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let n = out_c.slots();
+            let mut buf = vec![0.0; n];
+            pop_or_silence(&mut out_c, &mut buf);
+            popped += n / 2;
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(proc.skipped_frames() > 0, "flush dropped nothing");
+        assert_eq!(
+            popped as u64 + proc.skipped_frames(),
+            (BLOCK_FRAMES * blocks) as u64,
+            "every pushed frame is either output or counted as skipped"
+        );
     }
 
     #[test]
