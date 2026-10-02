@@ -3433,6 +3433,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "stems-library"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "hound",
+ "serde",
+ "serde_json",
+ "stems-core",
+ "tracing",
+]
+
+[[package]]
 name = "stems-sep"
 version = "0.0.1"
 dependencies = [

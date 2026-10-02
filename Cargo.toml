@@ -62,6 +62,7 @@ stems-source-spotify = { path = "crates/stems-source-spotify" }
 stems-server = { path = "crates/stems-server" }
 stems-sep = { path = "crates/stems-sep" }
 stems-enrich = { path = "crates/stems-enrich" }
+stems-library = { path = "crates/stems-library" }
 
 [profile.release]
 lto = "thin"
