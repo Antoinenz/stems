@@ -454,6 +454,9 @@ impl Importer {
         let mut last_progress = Instant::now();
         let mut last_log = Instant::now();
         while !buf.is_done() {
+            if buf.is_failed() {
+                bail!("separation failed (model or worker error); retried on the next import");
+            }
             if buf.is_cancelled() {
                 bail!("separation was cancelled");
             }

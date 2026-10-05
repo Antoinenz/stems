@@ -62,6 +62,9 @@ struct Done {
     generation: u64,
     seq: u64,
     start: i64,
+    /// Empty when the runner failed: the window contributes nothing, so
+    /// frames only it covered come out invalid (dry) instead of the input
+    /// being passed off as an instrumental.
     inst: Vec<f32>,
     /// Runner wall time, for the load predictor.
     elapsed_ms: f64,
@@ -105,6 +108,8 @@ pub struct MdxSeparator {
     in_flight: usize,
     max_in_flight: usize,
     dropped: u64,
+    /// Windows whose runner returned an error.
+    failed: u64,
     n_workers: usize,
     /// Smoothed runner time per window (ms); 0 until the first result.
     pred_ms: f64,
@@ -213,7 +218,7 @@ impl MdxSeparator {
                                 Ok(inst) => inst,
                                 Err(e) => {
                                     tracing::error!("mdx inference failed: {e:#}");
-                                    job.window.clone()
+                                    Vec::new()
                                 }
                             };
                             let done = Done {
@@ -268,6 +273,7 @@ impl MdxSeparator {
             // one queued window per worker on top of those running
             max_in_flight: n_workers * 2,
             dropped: 0,
+            failed: 0,
             n_workers,
             pred_ms: 0.0,
             last_dispatched_end: i64::MIN / 2,
@@ -349,6 +355,12 @@ impl MdxSeparator {
     /// Windows skipped so far by the load predictor.
     pub fn thinned(&self) -> u64 {
         self.thinned
+    }
+
+    /// Windows that failed (model error, lost worker) so far. Their frames
+    /// are reported invalid; offline jobs treat any failure as fatal.
+    pub fn failed_windows(&self) -> u64 {
+        self.failed
     }
 
     fn can_skip(&self, end: i64) -> bool {
@@ -485,7 +497,11 @@ impl MdxSeparator {
     fn drain_pending(&mut self) {
         while let Some(done) = self.pending.remove(&self.next_seq) {
             self.next_seq += 1;
-            self.accumulate(done.start, &done.inst);
+            if done.inst.is_empty() {
+                self.failed += 1;
+            } else {
+                self.accumulate(done.start, &done.inst);
+            }
             let end = done.start + self.params.chunk_size() as i64;
             self.finalize_upto(end - self.lookahead as i64);
         }
@@ -681,6 +697,56 @@ mod tests {
             workers: 3,
             realtime: true,
         });
+    }
+
+    #[test]
+    fn failed_window_is_never_passed_off_as_instrumental() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let runners: Vec<WindowRunner> = vec![Box::new(move |w: &[f32]| {
+            if c.fetch_add(1, Ordering::SeqCst) == 3 {
+                anyhow::bail!("worker went away");
+            }
+            Ok(w.iter().map(|x| x * 0.5).collect())
+        })];
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 1536,
+            denoise: false,
+            workers: 1,
+            realtime: false,
+        };
+        let mut sep = MdxSeparator::with_runners(small_params(), "test", runners, opts);
+        let lat = sep.latency_frames();
+        let input: Vec<f32> = (0..40_000)
+            .flat_map(|i| [(i % 1000) as f32 / 1000.0 + 0.1, 0.3])
+            .collect();
+        let mut out = vec![0.0; input.len()];
+        let mut valid = Vec::new();
+        for (b, o) in input.chunks(128 * 2).zip(out.chunks_mut(128 * 2)) {
+            valid.push(sep.process(b, o));
+        }
+        assert_eq!(sep.failed_windows(), 1);
+        // wherever output is claimed valid it is the model's (×0.5) output,
+        // never the dry input
+        for (k, ok) in valid.iter().enumerate() {
+            if !ok {
+                continue;
+            }
+            for f in k * 128..(k + 1) * 128 {
+                if f < lat || f * 2 >= out.len() {
+                    continue;
+                }
+                let expect = input[(f - lat) * 2] * 0.5;
+                assert!(
+                    (out[f * 2] - expect).abs() < 1e-3,
+                    "frame {f}: {} vs {expect}",
+                    out[f * 2]
+                );
+            }
+        }
     }
 
     #[test]

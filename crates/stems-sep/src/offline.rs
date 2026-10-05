@@ -28,6 +28,9 @@ pub struct StemBuffer {
     total_frames: usize,
     done: AtomicBool,
     cancel: AtomicBool,
+    /// The job hit a model / worker error: what was computed is not to be
+    /// trusted as a finished instrumental.
+    failed: AtomicBool,
     /// Where playback is; the job works from here first.
     wanted: AtomicUsize,
     /// Recent processing speed as a multiple of real time (f32 bits).
@@ -50,6 +53,7 @@ impl StemBuffer {
             total_frames,
             done: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
             wanted: AtomicUsize::new(0),
             speed_bits: AtomicU32::new(0),
         }
@@ -111,6 +115,15 @@ impl StemBuffer {
         self.cancel.load(Ordering::Acquire)
     }
 
+    /// Whether the job failed (separation errors); retry with a new job.
+    pub fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+
     /// Tell the job where playback is so it computes that region first.
     pub fn set_wanted(&self, frame: u64) {
         self.wanted
@@ -145,7 +158,7 @@ impl StemBuffer {
         *c = merged;
         let sum: usize = c.iter().map(|(a, b)| b - a).sum();
         self.ready.store(sum, Ordering::Release);
-        if sum >= self.total_frames {
+        if sum >= self.total_frames && !self.is_failed() {
             self.done.store(true, Ordering::Release);
         }
     }
@@ -370,6 +383,10 @@ impl OfflineSeparator {
                     }
                     let started = Instant::now();
                     run_job(&mut sep, &job);
+                    if job.buf.is_failed() {
+                        tracing::warn!(track = ?job.id, "stems job failed: separation errors");
+                        continue;
+                    }
                     if let Some(d) = disk_w.as_ref().filter(|_| job.buf.is_done()) {
                         let data = job.buf.data.lock().expect("stem data");
                         match d.save(&job.id, &data) {
@@ -513,7 +530,7 @@ impl Drop for OfflineSeparator {
 fn run_job(sep: &mut MdxSeparator, job: &Job) {
     let total = job.pcm.len() / CHANNELS as usize;
     let mut last_wanted = job.buf.wanted();
-    while !job.buf.is_cancelled() {
+    while !job.buf.is_cancelled() && !job.buf.is_failed() {
         let wanted = job.buf.wanted();
         let Some((from, to)) = job.buf.next_gap(wanted) else {
             break;
@@ -526,7 +543,7 @@ fn run_job(sep: &mut MdxSeparator, job: &Job) {
         };
         run_segment(sep, job, from, to, &mut last_wanted);
     }
-    if job.buf.ready_frames() >= total {
+    if job.buf.ready_frames() >= total && !job.buf.is_failed() {
         job.buf.done.store(true, Ordering::Release);
     }
 }
@@ -569,6 +586,7 @@ fn run_segment(sep: &mut MdxSeparator, job: &Job, from: usize, to: usize, last_w
     let zeros = vec![0.0f32; BLOCK * ch];
     let mut fed = 0;
     let seg_started = Instant::now();
+    let failed_before = sep.failed_windows();
     while written < len && !job.buf.is_cancelled() {
         let block: &[f32] = if fed < pcm.len() {
             let end = (fed + BLOCK * ch).min(pcm.len());
@@ -579,6 +597,11 @@ fn run_segment(sep: &mut MdxSeparator, job: &Job, from: usize, to: usize, last_w
             &zeros
         };
         feed(block, sep, &mut produced, &mut written);
+        if sep.failed_windows() > failed_before {
+            // never let the dry fallback stand in for an instrumental
+            job.buf.fail();
+            return;
+        }
         let secs = seg_started.elapsed().as_secs_f32();
         if secs > 0.5 {
             job.buf.set_speed(written as f32 / 44_100.0 / secs);
@@ -814,6 +837,41 @@ mod tests {
             primary_stem: PrimaryStem::Instrumental,
             compensate: 1.0,
         }
+    }
+
+    #[test]
+    fn a_failing_window_fails_the_job_instead_of_storing_dry_audio() {
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let runners: Vec<WindowRunner> = vec![Box::new(move |w: &[f32]| {
+            // the fifth window fails, like a worker dropping mid-track
+            if c.fetch_add(1, Ordering::SeqCst) == 4 {
+                anyhow::bail!("worker went away");
+            }
+            Ok(w.iter().map(|x| x * 0.5).collect())
+        })];
+        let opts = StreamOpts {
+            hop_frames: 1024,
+            lookahead_frames: 512,
+            slack_frames: 0,
+            denoise: false,
+            workers: 1,
+            realtime: false,
+        };
+        let off = OfflineSeparator::new(params(), "test", runners, opts);
+        let pcm: Arc<Vec<f32>> = Arc::new(vec![0.25; 60_000 * 2]);
+        let buf = off.submit(TrackId::Spotify("f".into()), pcm, 0, true);
+        let t0 = Instant::now();
+        while !buf.is_failed() && !buf.is_done() {
+            assert!(
+                t0.elapsed().as_secs() < 20,
+                "job neither failed nor finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(buf.is_failed(), "a worker error must fail the job");
+        assert!(!buf.is_done());
     }
 
     #[test]

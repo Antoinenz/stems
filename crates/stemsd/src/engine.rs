@@ -686,6 +686,10 @@ impl Engine {
         let Some(p) = self.prebuffer.as_mut() else {
             return;
         };
+        if p.offline.store().get(id).is_some_and(|b| b.is_failed()) {
+            // a worker error ended the last attempt: start over
+            p.offline.store().remove(id);
+        }
         if p.offline.store().contains(id) {
             p.offline
                 .set_wanted(id, stems_core::ms_to_frames(position_ms));
