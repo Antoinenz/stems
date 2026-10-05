@@ -166,6 +166,9 @@ pub struct Server {
     pub web_dir: Option<PathBuf>,
     /// Downloaded music videos, served at `/media/video/`.
     pub video_dir: Option<PathBuf>,
+    /// The offline library; each track's video and cover are served at
+    /// `/media/library/<key>/{video.mp4,cover.jpg}`.
+    pub library_dir: Option<PathBuf>,
     pub access: Arc<dyn Access>,
 }
 
@@ -176,6 +179,7 @@ impl Server {
         device_name: &str,
         web_dir: Option<&Path>,
         video_dir: Option<&Path>,
+        library_dir: Option<&Path>,
     ) -> Router {
         let device_name = Arc::new(device_name.to_string());
         let sysmon = Arc::new(std::sync::Mutex::new(SysMon::new()));
@@ -224,6 +228,13 @@ impl Server {
             // ServeDir handles Range requests, which <video> seeking needs.
             app = app.nest_service("/media/video", ServeDir::new(dir));
         }
+        if let Some(dir) = library_dir {
+            let tracks = Arc::new(dir.join("tracks"));
+            app = app.route(
+                "/media/library/{key}/{file}",
+                get(move |path, req| library_media(tracks.clone(), path, req)),
+            );
+        }
         app
     }
 
@@ -235,12 +246,35 @@ impl Server {
             &self.device_name,
             self.web_dir.as_deref(),
             self.video_dir.as_deref(),
+            self.library_dir.as_deref(),
         );
         let listener = tokio::net::TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind {}", self.addr))?;
         tracing::info!(addr = %self.addr, "http server listening");
         axum::serve(listener, app).await.context("http server")
+    }
+}
+
+/// A track's video or cover from the library. Only those two files are
+/// exposed (never the audio), and keys cannot climb out of the folder.
+async fn library_media(
+    tracks: Arc<PathBuf>,
+    axum::extract::Path((key, file)): axum::extract::Path<(String, String)>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let key_ok = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !key_ok || !matches!(file.as_str(), "video.mp4" | "cover.jpg") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // ServeFile handles Range requests, which <video> seeking needs
+    match ServeFile::new(tracks.join(&key).join(&file))
+        .oneshot(req)
+        .await
+    {
+        Ok(r) => r.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -460,7 +494,7 @@ mod tests {
     async fn state_endpoint_returns_json() {
         let (ch, state_tx, _rx) = channels();
         state_tx.send_modify(|s| s.volume = 0.42);
-        let app = Server::router(ch, Arc::new(Open), "test", None, None);
+        let app = Server::router(ch, Arc::new(Open), "test", None, None, None);
         let res = app
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
@@ -477,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn command_endpoint_forwards_to_engine() {
         let (ch, _state_tx, mut rx) = channels();
-        let app = Server::router(ch, Arc::new(Open), "test", None, None);
+        let app = Server::router(ch, Arc::new(Open), "test", None, None, None);
         let res = app
             .oneshot(
                 Request::post("/api/command")

@@ -21,7 +21,8 @@
     { id: 'vocals', label: 'Vocal level' },
     { id: 'volume', label: 'Volume' },
     { id: 'stage', label: 'Stage view' },
-    { id: 'timing', label: 'Timing nudges' }
+    { id: 'timing', label: 'Timing nudges' },
+    { id: 'queue', label: 'Play, skip & queue' }
   ];
   let guestPerms = $state<Record<Permission, boolean> | null>(null);
   async function loadGuestPerms() {

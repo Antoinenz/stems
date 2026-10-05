@@ -7,6 +7,7 @@ mod config;
 mod engine;
 mod import;
 mod pipeline;
+mod player;
 mod separator;
 mod settings;
 mod web;
@@ -48,6 +49,9 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Play from the offline library (no internet needed); queue songs
+    /// from the remote or the API.
+    Library,
     /// Play a local audio file through the pipeline.
     Play {
         file: PathBuf,
@@ -147,6 +151,10 @@ fn main() -> Result<()> {
                 );
             }
             Ok(())
+        }
+        Cmd::Library => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pipeline::run_library(&cfg, web_dir, &sink))
         }
         Cmd::Import { sources } => {
             let rt = tokio::runtime::Runtime::new()?;

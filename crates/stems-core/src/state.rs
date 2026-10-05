@@ -121,6 +121,20 @@ pub struct Media {
     pub video_offset_ms: i64,
 }
 
+/// One entry in the player's queue (library playback).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueItem {
+    /// Unique per queue entry, so the same song can be queued twice and
+    /// still be moved or removed individually.
+    pub id: u64,
+    /// Library key of the track.
+    pub key: String,
+    pub track: TrackRef,
+    /// Who is singing, if anyone said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub singer: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackState {
@@ -129,6 +143,10 @@ pub struct PlaybackState {
     pub status: PlaybackStatus,
     pub track: Option<TrackRef>,
     pub next_track: Option<TrackRef>,
+    /// Up next, in order (library playback; empty for live sources).
+    pub queue: Vec<QueueItem>,
+    /// Library key of the playing track, when it comes from the library.
+    pub library_key: Option<String>,
     /// Lyrics for `track`, once resolved. `None` while loading or if none found.
     pub lyrics: Option<Lyrics>,
     pub karaoke: KaraokeState,
@@ -176,6 +194,56 @@ pub enum Command {
     SetVideoOffset {
         offset_ms: i64,
     },
+    /// Resume playback.
+    Play,
+    Pause,
+    /// Skip to the next queued track (stops when the queue is empty).
+    Next,
+    Seek {
+        position_ms: u64,
+    },
+    /// Play a library track now, replacing the current one.
+    PlayTrack {
+        key: String,
+        #[serde(default)]
+        singer: Option<String>,
+    },
+    /// Add a library track to the queue (at the end, or next).
+    Enqueue {
+        key: String,
+        #[serde(default)]
+        singer: Option<String>,
+        #[serde(default)]
+        next: bool,
+    },
+    /// Remove a queue entry by its id.
+    Dequeue {
+        id: u64,
+    },
+    /// Move a queue entry to position `to` (0 = next up).
+    MoveInQueue {
+        id: u64,
+        to: usize,
+    },
+    ClearQueue,
+}
+
+impl Command {
+    /// Transport and queue commands, which the source handles.
+    pub fn is_transport(&self) -> bool {
+        matches!(
+            self,
+            Command::Play
+                | Command::Pause
+                | Command::Next
+                | Command::Seek { .. }
+                | Command::PlayTrack { .. }
+                | Command::Enqueue { .. }
+                | Command::Dequeue { .. }
+                | Command::MoveInQueue { .. }
+                | Command::ClearQueue
+        )
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +254,24 @@ mod tests {
     fn command_json_shape() {
         let c: Command = serde_json::from_str(r#"{"cmd":"set_karaoke","enabled":true}"#).unwrap();
         assert_eq!(c, Command::SetKaraoke { enabled: true });
+    }
+
+    #[test]
+    fn transport_command_shapes() {
+        let c: Command = serde_json::from_str(r#"{"cmd":"next"}"#).unwrap();
+        assert_eq!(c, Command::Next);
+        assert!(c.is_transport());
+        let c: Command =
+            serde_json::from_str(r#"{"cmd":"enqueue","key":"spotify_x","singer":"Sam"}"#).unwrap();
+        assert_eq!(
+            c,
+            Command::Enqueue {
+                key: "spotify_x".into(),
+                singer: Some("Sam".into()),
+                next: false
+            }
+        );
+        assert!(!Command::SetKaraoke { enabled: true }.is_transport());
     }
 
     #[test]

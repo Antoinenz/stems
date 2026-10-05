@@ -55,11 +55,22 @@ export interface Media {
   video_offset_ms: number;
 }
 
+export interface QueueItem {
+  id: number;
+  key: string;
+  track: TrackRef;
+  singer?: string;
+}
+
 export interface PlaybackState {
   source: string | null;
   status: PlaybackStatus;
   track: TrackRef | null;
   next_track: TrackRef | null;
+  /** Up next (library playback). */
+  queue: QueueItem[];
+  /** Library key of the playing track, when it comes from the library. */
+  library_key: string | null;
   lyrics: Lyrics | null;
   karaoke: KaraokeState;
   view_mode: ViewMode;
@@ -86,11 +97,20 @@ export type Command =
   | { cmd: 'set_volume'; level: number }
   | { cmd: 'set_lyrics_offset'; offset_ms: number }
   | { cmd: 'set_view_mode'; mode: ViewMode }
-  | { cmd: 'set_video_offset'; offset_ms: number };
+  | { cmd: 'set_video_offset'; offset_ms: number }
+  | { cmd: 'play' }
+  | { cmd: 'pause' }
+  | { cmd: 'next' }
+  | { cmd: 'seek'; position_ms: number }
+  | { cmd: 'play_track'; key: string; singer?: string | null }
+  | { cmd: 'enqueue'; key: string; singer?: string | null; next?: boolean }
+  | { cmd: 'dequeue'; id: number }
+  | { cmd: 'move_in_queue'; id: number; to: number }
+  | { cmd: 'clear_queue' };
 
 export type Role = 'host' | 'guest';
 /** Guest-grantable permissions, in UI order. */
-export type Permission = 'karaoke' | 'vocals' | 'volume' | 'stage' | 'timing';
+export type Permission = 'karaoke' | 'vocals' | 'volume' | 'stage' | 'timing' | 'queue';
 export interface Me {
   role: Role;
   permissions: Permission[];

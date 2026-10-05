@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::TrackRef;
+use crate::{Command, QueueItem, TrackRef};
 
 /// Transport / metadata events emitted by a [`Source`].
 ///
@@ -49,6 +49,10 @@ pub enum SourceEvent {
     },
     /// The source disconnected or lost its session.
     Disconnected,
+    /// The queue changed (library playback).
+    Queue {
+        items: Vec<QueueItem>,
+    },
     /// Source-provided media for a track (e.g. Spotify Canvas), resolved
     /// asynchronously after `TrackStarted`.
     Media {
@@ -84,6 +88,16 @@ pub trait Source: Send {
 
     /// Ask the source to stop and release resources. Idempotent.
     fn shutdown(&mut self);
+
+    /// Handle a transport / queue command ([`Command::is_transport`]).
+    /// `Err` is a user-facing reason; sources driven by a remote client
+    /// (Spotify Connect) don't take them.
+    fn command(&mut self, _cmd: &Command) -> Result<(), String> {
+        Err(format!(
+            "the {} source is controlled from its own app",
+            self.name()
+        ))
+    }
 }
 
 /// Whole-track audio for pre-buffered separation: interleaved stereo f32

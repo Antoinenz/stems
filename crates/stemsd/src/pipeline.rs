@@ -23,6 +23,9 @@ const RING_SECONDS: f32 = 4.0;
 /// (the phone) runs ahead of the speakers, so keep it just large enough to
 /// absorb scheduling jitter of the decoder thread.
 const LIVE_RING_SECONDS: f32 = 0.15;
+/// Ring for library playback: everything is in memory, so keep it as
+/// small as live playback for snappy skips, seeks and pauses.
+const LIBRARY_RING_SECONDS: f32 = 0.15;
 /// Ring between processor and sink; small, it only smooths scheduling.
 const OUT_RING_SECONDS: f32 = 0.05;
 
@@ -205,6 +208,7 @@ fn spawn_server(
     web_dir: Option<PathBuf>,
     ch: &Channels,
     settings: std::sync::Arc<Settings>,
+    library_dir: Option<PathBuf>,
 ) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
     // always served: videos can be switched on while running
@@ -214,6 +218,7 @@ fn spawn_server(
         device_name: cfg.device_name.clone(),
         web_dir,
         video_dir,
+        library_dir,
         access: settings,
     };
     let channels = stems_server::Channels {
@@ -280,7 +285,60 @@ pub async fn play_file(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings);
+    spawn_server(cfg, web_dir, &ch, settings, None);
+    engine.run().await
+}
+
+/// `stemsd library`: play from the offline library. Needs no internet:
+/// audio, instrumentals, lyrics, videos and covers are all on disk.
+pub async fn run_library(
+    cfg: &Config,
+    web_dir: Option<PathBuf>,
+    sink_kind: &SinkKind,
+) -> Result<()> {
+    use std::sync::Arc;
+    let lib = stems_library::Library::open(cfg.library_dir()?)?;
+    let entries = lib.list()?;
+    tracing::info!(
+        library = %lib.dir().display(),
+        tracks = entries.len(),
+        playable = entries.iter().filter(|e| e.is_playable()).count(),
+        "library"
+    );
+    let stems = Arc::new(stems_sep::StemStore::default());
+    let audio: Box<dyn Separator> = Box::new(stems_sep::CachedStemSeparator::new(stems.clone()));
+    let (producer, flush, processor, sink) = build_chain(
+        LIBRARY_RING_SECONDS,
+        sink_kind,
+        audio,
+        cfg.karaoke.fade_ms as f32,
+    )?;
+    let source = crate::player::LibraryPlayer::new(
+        lib.clone(),
+        cfg.library.target_lufs,
+        producer,
+        flush,
+        stems.clone(),
+    );
+    tracing::info!(
+        sink = sink.name(),
+        "library player ready; queue songs from the remote"
+    );
+    let cache = open_cache()?;
+    let (engine, ch) = Engine::new(
+        Box::new(source),
+        processor,
+        sink,
+        cache,
+        local_lyrics()?,
+        cfg.lyrics_offset_ms,
+        false,
+    );
+    let settings = settings(cfg)?;
+    let engine = engine
+        .with_library(lib.clone(), stems)
+        .with_live(settings.live());
+    spawn_server(cfg, web_dir, &ch, settings, Some(lib.dir().to_path_buf()));
     engine.run().await
 }
 
@@ -348,7 +406,7 @@ pub async fn run_spotify(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings);
+    spawn_server(cfg, web_dir, &ch, settings, None);
     engine.run().await
 }
 

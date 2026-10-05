@@ -41,6 +41,7 @@ const LIVE_KEYS: &[&str] = &[
     "guests.volume",
     "guests.stage",
     "guests.timing",
+    "guests.queue",
 ];
 
 pub struct Settings {

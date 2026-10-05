@@ -18,7 +18,7 @@ pub enum Role {
 }
 
 /// Permission keys guests can be granted, in the order a UI lists them.
-pub const PERMISSIONS: &[&str] = &["karaoke", "vocals", "volume", "stage", "timing"];
+pub const PERMISSIONS: &[&str] = &["karaoke", "vocals", "volume", "stage", "timing", "queue"];
 
 /// The permission a command needs.
 pub fn permission(cmd: &Command) -> &'static str {
@@ -28,6 +28,15 @@ pub fn permission(cmd: &Command) -> &'static str {
         Command::SetVolume { .. } => "volume",
         Command::SetViewMode { .. } => "stage",
         Command::SetLyricsOffset { .. } | Command::SetVideoOffset { .. } => "timing",
+        Command::Play
+        | Command::Pause
+        | Command::Next
+        | Command::Seek { .. }
+        | Command::PlayTrack { .. }
+        | Command::Enqueue { .. }
+        | Command::Dequeue { .. }
+        | Command::MoveInQueue { .. }
+        | Command::ClearQueue => "queue",
     }
 }
 

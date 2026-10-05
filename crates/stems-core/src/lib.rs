@@ -18,7 +18,7 @@ pub use sink::Sink;
 pub use source::{PcmFetcher, Source, SourceEvent};
 pub use state::{
     ClockTick, Command, KaraokeState, LyricLine, LyricWord, Lyrics, Media, PlaybackState,
-    PlaybackStatus, StemsProgress, ViewMode,
+    PlaybackStatus, QueueItem, StemsProgress, ViewMode,
 };
 pub use track::{TrackId, TrackRef};
 

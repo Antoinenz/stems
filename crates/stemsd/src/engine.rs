@@ -17,7 +17,8 @@ use stems_core::{
     SourceEvent, TrackId, TrackRef,
 };
 use stems_enrich::{Cache, Cached, LocalLyrics, LrcLib, VideoFetcher};
-use stems_sep::OfflineSeparator;
+use stems_library::Library;
+use stems_sep::{OfflineSeparator, StemStore};
 
 use crate::settings::Live;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -111,6 +112,10 @@ pub struct Engine {
     align_rx: mpsc::Receiver<align::Aligned>,
     /// Settings changed from the host remote while running.
     live_rx: Option<watch::Receiver<Live>>,
+    /// Library playback: tracks, lyrics, videos and stems come from here.
+    library: Option<Library>,
+    /// Stems the library player registers, read by the processor.
+    library_stems: Option<Arc<StemStore>>,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -176,6 +181,8 @@ impl Engine {
             align_tx,
             align_rx,
             live_rx: None,
+            library: None,
+            library_stems: None,
             exit_on_end,
             tick_count: 0,
         };
@@ -219,6 +226,14 @@ impl Engine {
             next_lyrics: None,
             next_task: None,
         });
+        self
+    }
+
+    /// Play from the offline library: lyrics, video and offsets come from
+    /// each track's folder, stems from `stems` (filled by the player).
+    pub fn with_library(mut self, library: Library, stems: Arc<StemStore>) -> Self {
+        self.library = Some(library);
+        self.library_stems = Some(stems);
         self
     }
 
@@ -325,6 +340,9 @@ impl Engine {
                 );
                 self.clock.anchor(position_ms, at_frame);
                 self.set_anchor(&track.id, position_ms, at_frame);
+                if self.start_library_track(&track) {
+                    return;
+                }
                 self.focus_stems(&track.id);
                 self.ensure_stems(&track.id, position_ms, true);
                 let prealigned = self.prebuffer.as_mut().and_then(|p| {
@@ -431,10 +449,15 @@ impl Engine {
             }
             SourceEvent::Ended => {
                 tracing::info!("track ended");
+                self.state_tx.send_modify(|s| {
+                    s.library_key = None;
+                    s.revision += 1;
+                });
                 self.clock.pause(self.clock.position_ms(self.emitted()));
                 self.set_status(PlaybackStatus::Idle);
             }
             SourceEvent::NextTrackHint { track } => {
+                let track = self.localize(track);
                 tracing::info!(title = %track.title, "next track hint");
                 self.ensure_stems(&track.id, 0, false);
                 let current = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
@@ -452,6 +475,19 @@ impl Engine {
                 });
             }
             SourceEvent::Volume { level } => self.set_volume(level),
+            SourceEvent::Queue { items } => {
+                let items: Vec<_> = items
+                    .into_iter()
+                    .map(|mut i| {
+                        i.track = self.localize(i.track);
+                        i
+                    })
+                    .collect();
+                self.state_tx.send_modify(|s| {
+                    s.queue = items;
+                    s.revision += 1;
+                });
+            }
             SourceEvent::Disconnected => {
                 tracing::warn!("source disconnected");
                 self.set_status(PlaybackStatus::Idle);
@@ -483,6 +519,12 @@ impl Engine {
             }
             _ => tracing::info!(?cmd, "command"),
         }
+        if cmd.is_transport() {
+            if let Err(e) = self.source.command(&cmd) {
+                tracing::warn!(?cmd, "{e}");
+            }
+            return;
+        }
         match cmd {
             Command::SetVolume { level } => self.set_volume(level.clamp(0.0, 1.0)),
             Command::SetKaraoke { enabled } => {
@@ -504,6 +546,16 @@ impl Engine {
                 s.view_mode = mode;
                 s.revision += 1;
             }),
+            // routed to the source above
+            Command::Play
+            | Command::Pause
+            | Command::Next
+            | Command::Seek { .. }
+            | Command::PlayTrack { .. }
+            | Command::Enqueue { .. }
+            | Command::Dequeue { .. }
+            | Command::MoveInQueue { .. }
+            | Command::ClearQueue => {}
             Command::SetVideoOffset { offset_ms } => {
                 let track = self.state_tx.borrow().track.clone();
                 if let Some(t) = &track {
@@ -511,6 +563,7 @@ impl Engine {
                         tracing::warn!("cache: {e:#}");
                     }
                 }
+                self.update_library_entry(|e| e.video_offset_ms = Some(offset_ms));
                 self.state_tx.send_modify(|s| {
                     s.media.video_offset_ms = offset_ms;
                     s.revision += 1;
@@ -525,6 +578,7 @@ impl Engine {
                         tracing::warn!("cache: {e:#}");
                     }
                 }
+                self.update_library_entry(|e| e.lyrics_offset_ms = offset_ms);
                 let total = offset_ms + self.lyrics_offset_ms;
                 self.state_tx.send_modify(|s| {
                     if let Some(l) = s.lyrics.as_mut() {
@@ -599,7 +653,7 @@ impl Engine {
     }
 
     fn set_anchor(&mut self, id: &TrackId, position_ms: u64, at_frame: u64) {
-        if self.prebuffer.is_none() {
+        if self.prebuffer.is_none() && self.library_stems.is_none() {
             return;
         }
         self.processor.control().set_anchor(Some(Anchor {
@@ -1061,6 +1115,100 @@ impl Engine {
         }
     }
 
+    /// A library track started: everything comes from its folder, nothing
+    /// from the network. Returns `false` for tracks not in the library.
+    fn start_library_track(&mut self, track: &TrackRef) -> bool {
+        let Some(lib) = self.library.as_ref() else {
+            return false;
+        };
+        let entry = match lib.get_by_id(&track.id) {
+            Ok(Some(e)) => e,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!("library: {e:#}");
+                return false;
+            }
+        };
+        let hand_made = lib.lyrics_override(&entry).and_then(|text| {
+            let lines = stems_enrich::parse_lrc(&text);
+            (!lines.is_empty()).then(|| Lyrics {
+                provider: "local".into(),
+                lines,
+                plain: None,
+                offset_ms: 0,
+            })
+        });
+        let lyrics = hand_made
+            .or_else(|| lib.load_lyrics(&entry).ok().flatten())
+            .map(|mut l| {
+                l.offset_ms = entry.lyrics_offset_ms;
+                self.with_global_offset(l)
+            });
+        let files = lib.files(&entry);
+        let video_url = (entry.stages.video.is_done() && files.video.is_file())
+            .then(|| format!("/media/library/{}/video.mp4", entry.key));
+        let mut track = track.clone();
+        if files.cover.is_file() {
+            track.art = Some(format!("/media/library/{}/cover.jpg", entry.key));
+        }
+        tracing::info!(
+            title = %track.title,
+            artists = %track.artists_joined(),
+            lyrics = lyrics.as_ref().map(|l| l.lines.len()).unwrap_or(0),
+            words = lyrics.as_ref().is_some_and(|l| l.has_word_timings()),
+            video = video_url.is_some(),
+            "track started (library)"
+        );
+        let key = entry.key.clone();
+        let video_offset_ms = entry.video_offset_ms.unwrap_or(0);
+        self.state_tx.send_modify(|s| {
+            s.status = PlaybackStatus::Playing;
+            s.track = Some(track);
+            s.library_key = Some(key);
+            s.lyrics = lyrics;
+            s.next_track = None;
+            s.media = stems_core::Media {
+                canvas_url: None,
+                video_url,
+                video_offset_ms,
+            };
+            s.revision += 1;
+        });
+        true
+    }
+
+    /// Library tracks show their stored cover (no internet needed).
+    fn localize(&self, mut track: TrackRef) -> TrackRef {
+        if let Some(lib) = self.library.as_ref() {
+            if let Ok(Some(e)) = lib.get_by_id(&track.id) {
+                if lib.files(&e).cover.is_file() {
+                    track.art = Some(format!("/media/library/{}/cover.jpg", e.key));
+                }
+            }
+        }
+        track
+    }
+
+    /// Persist a per-track change for the playing library track.
+    fn update_library_entry(&self, f: impl FnOnce(&mut stems_library::Entry)) {
+        let (Some(lib), Some(key)) = (
+            self.library.as_ref(),
+            self.state_tx.borrow().library_key.clone(),
+        ) else {
+            return;
+        };
+        match lib.get(&key) {
+            Ok(Some(mut e)) => {
+                f(&mut e);
+                if let Err(err) = lib.save(&e) {
+                    tracing::warn!("library: {err:#}");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => tracing::warn!("library: {err:#}"),
+        }
+    }
+
     /// Source frames that have passed the sink: played, or dropped by a
     /// flush (pause, seek, track change) in the processor or the sink.
     /// Shares its origin with the source's `frames_pushed`, which is what
@@ -1093,18 +1241,20 @@ impl Engine {
     /// Publish how far the pre-buffered stems reach for the current track
     /// (~1 Hz while a job runs, once when done).
     fn publish_stems_progress(&mut self) {
-        let Some(p) = self.prebuffer.as_ref() else {
-            return;
+        let store = match (&self.prebuffer, &self.library_stems) {
+            (Some(p), _) => p.offline.store(),
+            (None, Some(s)) => Arc::clone(s),
+            (None, None) => return,
         };
         let id = self.state_tx.borrow().track.as_ref().map(|t| t.id.clone());
-        let progress =
-            id.and_then(|id| p.offline.store().get(&id))
-                .map(|b| stems_core::StemsProgress {
-                    ready_ms: stems_core::frames_to_ms(b.ready_frames() as u64),
-                    total_ms: stems_core::frames_to_ms(b.total_frames() as u64),
-                    done: b.is_done(),
-                    speed: b.speed(),
-                });
+        let progress = id
+            .and_then(|id| store.get(&id))
+            .map(|b| stems_core::StemsProgress {
+                ready_ms: stems_core::frames_to_ms(b.ready_frames() as u64),
+                total_ms: stems_core::frames_to_ms(b.total_frames() as u64),
+                done: b.is_done(),
+                speed: b.speed(),
+            });
         self.state_tx.send_if_modified(|s| {
             let changed = match (&s.karaoke.stems, &progress) {
                 (Some(a), Some(b)) => {

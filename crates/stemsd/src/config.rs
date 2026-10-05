@@ -50,6 +50,8 @@ pub struct GuestsConfig {
     pub stage: bool,
     /// Nudge lyric and video timing.
     pub timing: bool,
+    /// Transport and queue: play/pause/skip/seek, add and reorder songs.
+    pub queue: bool,
 }
 
 impl Default for GuestsConfig {
@@ -60,6 +62,7 @@ impl Default for GuestsConfig {
             volume: false,
             stage: true,
             timing: false,
+            queue: false,
         }
     }
 }
@@ -72,6 +75,7 @@ impl GuestsConfig {
             "volume" => self.volume,
             "stage" => self.stage,
             "timing" => self.timing,
+            "queue" => self.queue,
             _ => false,
         }
     }
