@@ -108,6 +108,29 @@ export type Command =
   | { cmd: 'move_in_queue'; id: number; to: number }
   | { cmd: 'clear_queue' };
 
+/** One track as `/api/library` lists it (host view adds import details). */
+export interface LibraryTrack {
+  key: string;
+  title: string;
+  artists: string[];
+  album: string | null;
+  duration_ms: number;
+  art: string | null;
+  playable: boolean;
+  lyrics: boolean;
+  words: boolean;
+  video: boolean;
+  complete?: boolean;
+}
+
+export interface ImportStatus {
+  running: boolean;
+  current: string | null;
+  waiting: string[];
+  finished: { key: string; title: string; playable: boolean; complete: boolean; problems: string[] }[];
+  errors: string[];
+}
+
 export type Role = 'host' | 'guest';
 /** Guest-grantable permissions, in UI order. */
 export type Permission = 'karaoke' | 'vocals' | 'volume' | 'stage' | 'timing' | 'queue';

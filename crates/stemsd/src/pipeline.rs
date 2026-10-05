@@ -209,17 +209,21 @@ fn spawn_server(
     ch: &Channels,
     settings: std::sync::Arc<Settings>,
     library_dir: Option<PathBuf>,
+    library: Option<std::sync::Arc<dyn stems_server::LibraryApi>>,
 ) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
     // always served: videos can be switched on while running
     let video_dir = crate::config::paths().map(|p| p.video_dir).ok();
     let server = Server {
         addr,
-        device_name: cfg.device_name.clone(),
-        web_dir,
-        video_dir,
-        library_dir,
         access: settings,
+        options: stems_server::Options {
+            device_name: cfg.device_name.clone(),
+            web_dir,
+            video_dir,
+            library_dir,
+            library,
+        },
     };
     let channels = stems_server::Channels {
         state: ch.state.clone(),
@@ -285,7 +289,7 @@ pub async fn play_file(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings, None);
+    spawn_server(cfg, web_dir, &ch, settings, None, None);
     engine.run().await
 }
 
@@ -338,7 +342,15 @@ pub async fn run_library(
     let engine = engine
         .with_library(lib.clone(), stems)
         .with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings, Some(lib.dir().to_path_buf()));
+    let service = crate::library::LibraryService::start(cfg, lib.clone());
+    spawn_server(
+        cfg,
+        web_dir,
+        &ch,
+        settings,
+        Some(lib.dir().to_path_buf()),
+        Some(service),
+    );
     engine.run().await
 }
 
@@ -406,7 +418,7 @@ pub async fn run_spotify(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings, None);
+    spawn_server(cfg, web_dir, &ch, settings, None, None);
     engine.run().await
 }
 

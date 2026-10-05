@@ -4,7 +4,15 @@
 // (position - performance.now()) and extrapolate between ticks; small
 // errors are slewed, large ones (seek, track change) snap.
 
-import type { Command, Inbound, Me, PlaybackState, PlaybackStatus } from './types';
+import type {
+  Command,
+  ImportStatus,
+  Inbound,
+  LibraryTrack,
+  Me,
+  PlaybackState,
+  PlaybackStatus
+} from './types';
 
 const TOKEN_KEY = 'stems.token';
 
@@ -61,6 +69,29 @@ export async function patchSettings(
   return res.json();
 }
 
+/** Library tracks matching `q` (guests only see playable ones). */
+export async function fetchLibrary(q = ''): Promise<LibraryTrack[]> {
+  const res = await fetch(`/api/library?q=${encodeURIComponent(q)}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
+  return res.json();
+}
+
+/** Queue Spotify links / paths for import (host). */
+export async function importSources(sources: string[]): Promise<void> {
+  const res = await fetch('/api/library/import', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ sources })
+  });
+  if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
+}
+
+export async function fetchImportStatus(): Promise<ImportStatus> {
+  const res = await fetch('/api/library/import', { headers: authHeaders() });
+  if (!res.ok) throw new Error((await res.json()).error ?? res.statusText);
+  return res.json();
+}
+
 const SNAP_THRESHOLD_MS = 150;
 const SLEW = 0.15;
 
@@ -69,6 +100,8 @@ export const EMPTY_STATE: PlaybackState = {
   status: 'idle',
   track: null,
   next_track: null,
+  queue: [],
+  library_key: null,
   lyrics: null,
   karaoke: { enabled: false, vocal_gain: 0, backend: null, stems: null },
   view_mode: 'lyrics',

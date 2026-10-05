@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { StemsClient, fetchMe, fetchSettings, patchSettings } from '../../shared/client.svelte';
   import type { Me, Permission, ViewMode } from '../../shared/types';
+  import Import from './Import.svelte';
+  import Library from './Library.svelte';
   import Slider from './Slider.svelte';
   import Stepper from './Stepper.svelte';
 
@@ -111,6 +113,8 @@
     stems ? Math.round((100 * stems.ready_ms) / Math.max(1, stems.total_ms)) : 0
   );
 
+  const isLibrary = $derived(ps.source === 'library');
+
   function toggleKaraoke() {
     client.send({ cmd: 'set_karaoke', enabled: !ps.karaoke.enabled });
   }
@@ -138,10 +142,29 @@
     {:else}
       <div class="idle">
         Nothing playing.<br />
-        <small>Pick “{deviceName ?? 'stems'}” in Spotify Connect.</small>
+        {#if isLibrary}
+          <small>Queue a song from the library below.</small>
+        {:else}
+          <small>Pick “{deviceName ?? 'stems'}” in Spotify Connect.</small>
+        {/if}
       </div>
     {/if}
   </section>
+
+  {#if isLibrary && can('queue')}
+    <section class="transport">
+      {#if ps.status === 'playing'}
+        <button onclick={() => client.send({ cmd: 'pause' })}>Pause</button>
+      {:else}
+        <button
+          disabled={!track && !ps.queue.length}
+          onclick={() => client.send({ cmd: 'play' })}>Play</button>
+      {/if}
+      <button disabled={!track} onclick={() => client.send({ cmd: 'next' })}>
+        {ps.queue.length ? 'Next' : 'Stop'}
+      </button>
+    </section>
+  {/if}
 
   <section class="card">
     <button
@@ -226,10 +249,44 @@
 
   {/if}
 
-  {#if ps.next_track}
+  {#if isLibrary && ps.queue.length}
+    <section class="card">
+      <div class="label">Up next</div>
+      <ol class="queue">
+        {#each ps.queue as item, i (item.id)}
+          <li>
+            <div class="meta">
+              <div class="qtitle">{item.track.title}</div>
+              <div class="qsub">
+                {item.track.artists.join(', ')}{#if item.singer} · 🎤 {item.singer}{/if}
+              </div>
+            </div>
+            {#if can('queue')}
+              {#if i > 0}
+                <button onclick={() => client.send({ cmd: 'move_in_queue', id: item.id, to: 0 })}>↑</button>
+              {/if}
+              <button onclick={() => client.send({ cmd: 'dequeue', id: item.id })}>✕</button>
+            {/if}
+          </li>
+        {/each}
+      </ol>
+    </section>
+  {:else if ps.next_track}
     <section class="next">
       Up next: <b>{ps.next_track.title}</b> · {ps.next_track.artists.join(', ')}
     </section>
+  {/if}
+
+  {#if isLibrary && can('queue')}
+    <Library
+      host={me.role === 'host'}
+      onqueue={(key, singer) => client.send({ cmd: 'enqueue', key, singer })}
+      onplay={(key, singer) => client.send({ cmd: 'play_track', key, singer })}
+    />
+  {/if}
+
+  {#if isLibrary && me.role === 'host'}
+    <Import />
   {/if}
 
   {#if me.role === 'host' && guestPerms}
@@ -297,5 +354,13 @@
   .modes button { padding: 12px 4px; font-size: 14px; }
   .modes button:disabled { opacity: 0.3; }
   .next { color: var(--dim); font-size: 13px; padding: 0 4px; }
+  .transport { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .transport button { padding: 14px; font-size: 16px; }
+  .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .queue li { display: flex; align-items: center; gap: 8px; }
+  .queue .meta { flex: 1; min-width: 0; }
+  .qtitle { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qsub { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue button { width: 36px; height: 36px; padding: 0; flex: none; }
   .sys { color: var(--dim); font-size: 12px; padding: 0 4px; font-variant-numeric: tabular-nums; }
 </style>

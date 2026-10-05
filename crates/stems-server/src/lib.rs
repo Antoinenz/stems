@@ -6,6 +6,8 @@
 //! * `POST /api/command` — one [`Command`] as JSON
 //! * `GET  /api/me` — the caller's role and permissions
 //! * `GET|PATCH /api/settings` — live settings (host only)
+//! * `GET  /api/library?q=` — the offline library (guests: playable tracks)
+//! * `GET|POST /api/library/import` — import progress / queue imports (host)
 //! * `GET  /api/health`
 //! * `/stage`, `/remote`, `/` — static files from the web directory, if present
 //!
@@ -17,7 +19,7 @@
 pub mod access;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -48,6 +50,34 @@ pub struct Channels {
 struct App {
     ch: Channels,
     access: Arc<dyn Access>,
+    library: Option<Arc<dyn LibraryApi>>,
+}
+
+/// The offline library as the server sees it; the daemon implements it.
+pub trait LibraryApi: Send + Sync {
+    /// Tracks matching every word of `query` (all when empty) as a JSON
+    /// array. `full` adds import details (host view); otherwise only
+    /// playable tracks are listed.
+    fn list(&self, query: &str, full: bool) -> Result<serde_json::Value, String>;
+    /// Queue Spotify links / audio paths for import.
+    fn import(&self, sources: Vec<String>) -> Result<(), String>;
+    /// Import progress as JSON.
+    fn import_status(&self) -> serde_json::Value;
+}
+
+/// Everything optional the router serves.
+#[derive(Clone, Default)]
+pub struct Options {
+    /// Name this box advertises to Spotify Connect / AirPlay.
+    pub device_name: String,
+    /// Directory with the built web apps (`<dir>/stage/dist`, …).
+    pub web_dir: Option<PathBuf>,
+    /// Downloaded music videos, served at `/media/video/`.
+    pub video_dir: Option<PathBuf>,
+    /// The offline library folder; each track's video and cover are
+    /// served at `/media/library/<key>/{video.mp4,cover.jpg}`.
+    pub library_dir: Option<PathBuf>,
+    pub library: Option<Arc<dyn LibraryApi>>,
 }
 
 /// Host load, for the remote's status line. Sampled at most every 2 s.
@@ -162,26 +192,13 @@ enum Outbound<'a> {
 
 pub struct Server {
     pub addr: SocketAddr,
-    pub device_name: String,
-    pub web_dir: Option<PathBuf>,
-    /// Downloaded music videos, served at `/media/video/`.
-    pub video_dir: Option<PathBuf>,
-    /// The offline library; each track's video and cover are served at
-    /// `/media/library/<key>/{video.mp4,cover.jpg}`.
-    pub library_dir: Option<PathBuf>,
     pub access: Arc<dyn Access>,
+    pub options: Options,
 }
 
 impl Server {
-    pub fn router(
-        ch: Channels,
-        access: Arc<dyn Access>,
-        device_name: &str,
-        web_dir: Option<&Path>,
-        video_dir: Option<&Path>,
-        library_dir: Option<&Path>,
-    ) -> Router {
-        let device_name = Arc::new(device_name.to_string());
+    pub fn router(ch: Channels, access: Arc<dyn Access>, opts: &Options) -> Router {
+        let device_name = Arc::new(opts.device_name.clone());
         let sysmon = Arc::new(std::sync::Mutex::new(SysMon::new()));
         let mut app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
@@ -190,6 +207,11 @@ impl Server {
             .route("/api/me", get(get_me))
             .route("/api/settings", get(get_settings).patch(patch_settings))
             .route("/api/ws", get(ws_upgrade))
+            .route("/api/library", get(get_library))
+            .route(
+                "/api/library/import",
+                get(get_import_status).post(post_import),
+            )
             .route("/api/info", {
                 let name = device_name.clone();
                 get(move |headers| async move { Json(info(&headers, &name)) })
@@ -199,10 +221,14 @@ impl Server {
                 let m = sysmon.clone();
                 get(move || async move { Json(m.lock().expect("sysmon").sample()) })
             })
-            .with_state(App { ch, access })
+            .with_state(App {
+                ch,
+                access,
+                library: opts.library.clone(),
+            })
             .layer(CorsLayer::permissive());
 
-        if let Some(dir) = web_dir {
+        if let Some(dir) = opts.web_dir.as_deref() {
             // Vite hashes asset file names, so only the HTML shell must not
             // be cached — otherwise browsers keep loading the old bundle.
             let no_cache = SetResponseHeaderLayer::if_not_present(
@@ -224,11 +250,11 @@ impl Server {
             }
             app = app.route("/", get(|| async { Redirect::temporary("/remote/") }));
         }
-        if let Some(dir) = video_dir {
+        if let Some(dir) = opts.video_dir.as_deref() {
             // ServeDir handles Range requests, which <video> seeking needs.
             app = app.nest_service("/media/video", ServeDir::new(dir));
         }
-        if let Some(dir) = library_dir {
+        if let Some(dir) = opts.library_dir.as_deref() {
             let tracks = Arc::new(dir.join("tracks"));
             app = app.route(
                 "/media/library/{key}/{file}",
@@ -240,14 +266,7 @@ impl Server {
 
     /// Bind and serve until the task is dropped / the process exits.
     pub async fn serve(self, ch: Channels) -> Result<()> {
-        let app = Self::router(
-            ch,
-            self.access.clone(),
-            &self.device_name,
-            self.web_dir.as_deref(),
-            self.video_dir.as_deref(),
-            self.library_dir.as_deref(),
-        );
+        let app = Self::router(ch, self.access.clone(), &self.options);
         let listener = tokio::net::TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind {}", self.addr))?;
@@ -349,6 +368,68 @@ async fn post_command(
         })
 }
 
+#[derive(serde::Deserialize, Default)]
+struct LibraryQuery {
+    #[serde(default)]
+    q: String,
+}
+
+fn no_library() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "no library in this mode (run `stemsd library`)"})),
+    )
+}
+
+async fn get_library(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.as_ref().ok_or_else(no_library)?;
+    let full = access::role_of(&app.access, &headers, query.as_deref()) == Role::Host;
+    lib.list(&q.q, full).map(Json).map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": e})),
+        )
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ImportRequest {
+    sources: Vec<String>,
+}
+
+async fn post_import(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    Json(req): Json<ImportRequest>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.as_ref().ok_or_else(no_library)?;
+    lib.import(req.sources)
+        .map(|_| StatusCode::ACCEPTED)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+        })
+}
+
+async fn get_import_status(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.as_ref().ok_or_else(no_library)?;
+    Ok(Json(lib.import_status()))
+}
+
 async fn get_me(
     State(app): State<App>,
     headers: axum::http::HeaderMap,
@@ -415,7 +496,7 @@ async fn send(
 }
 
 async fn ws_session(socket: WebSocket, app: App, role: Role) {
-    let App { mut ch, access } = app;
+    let App { mut ch, access, .. } = app;
     let (mut tx, mut rx) = socket.split();
 
     // Initial snapshot.
@@ -494,7 +575,7 @@ mod tests {
     async fn state_endpoint_returns_json() {
         let (ch, state_tx, _rx) = channels();
         state_tx.send_modify(|s| s.volume = 0.42);
-        let app = Server::router(ch, Arc::new(Open), "test", None, None, None);
+        let app = Server::router(ch, Arc::new(Open), &Options::default());
         let res = app
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
@@ -511,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn command_endpoint_forwards_to_engine() {
         let (ch, _state_tx, mut rx) = channels();
-        let app = Server::router(ch, Arc::new(Open), "test", None, None, None);
+        let app = Server::router(ch, Arc::new(Open), &Options::default());
         let res = app
             .oneshot(
                 Request::post("/api/command")
@@ -523,5 +604,101 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::ACCEPTED);
         assert_eq!(rx.recv().await, Some(Command::SetKaraoke { enabled: true }));
+    }
+
+    /// Host is whoever sends token `T`.
+    struct TokenT;
+    impl Access for TokenT {
+        fn is_host(&self, token: &str) -> bool {
+            token == "T"
+        }
+        fn guest_allowed(&self, _p: &str) -> bool {
+            false
+        }
+        fn settings(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn update_settings(&self, _p: serde_json::Value) -> Result<SettingsUpdate, String> {
+            Err("no".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeLibrary {
+        imported: std::sync::Mutex<Vec<String>>,
+    }
+    impl LibraryApi for FakeLibrary {
+        fn list(&self, query: &str, full: bool) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!([{"q": query, "full": full}]))
+        }
+        fn import(&self, sources: Vec<String>) -> Result<(), String> {
+            self.imported.lock().unwrap().extend(sources);
+            Ok(())
+        }
+        fn import_status(&self) -> serde_json::Value {
+            serde_json::json!({"running": false})
+        }
+    }
+
+    async fn call(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn library_routes_respect_roles() {
+        let (ch, _state_tx, _rx) = channels();
+        let lib = Arc::new(FakeLibrary::default());
+        let opts = Options {
+            library: Some(lib.clone()),
+            ..Default::default()
+        };
+        let app = Server::router(ch, Arc::new(TokenT), &opts);
+
+        let get = |uri: &str, host: bool| {
+            let mut r = Request::get(uri);
+            if host {
+                r = r.header("x-stems-token", "T");
+            }
+            r.body(Body::empty()).unwrap()
+        };
+        let (s, v) = call(&app, get("/api/library?q=killers", false)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v[0], serde_json::json!({"q": "killers", "full": false}));
+        let (_, v) = call(&app, get("/api/library", true)).await;
+        assert_eq!(v[0]["full"], true);
+
+        let post = |host: bool| {
+            let mut r =
+                Request::post("/api/library/import").header("content-type", "application/json");
+            if host {
+                r = r.header("x-stems-token", "T");
+            }
+            r.body(Body::from(r#"{"sources":["spotify:track:x"]}"#))
+                .unwrap()
+        };
+        assert_eq!(call(&app, post(false)).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call(&app, post(true)).await.0, StatusCode::ACCEPTED);
+        assert_eq!(*lib.imported.lock().unwrap(), vec!["spotify:track:x"]);
+        assert_eq!(
+            call(&app, get("/api/library/import", false)).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get("/api/library/import", true)).await.0,
+            StatusCode::OK
+        );
+
+        // without a library (live modes) the routes say so
+        let (ch, _s, _r) = channels();
+        let bare = Server::router(ch, Arc::new(TokenT), &Options::default());
+        assert_eq!(
+            call(&bare, get("/api/library", true)).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 }

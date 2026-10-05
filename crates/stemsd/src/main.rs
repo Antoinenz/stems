@@ -6,6 +6,7 @@
 mod config;
 mod engine;
 mod import;
+mod library;
 mod pipeline;
 mod player;
 mod separator;
