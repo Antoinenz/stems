@@ -8,6 +8,7 @@ pub mod mixer;
 pub mod processor;
 pub mod resample;
 pub mod ring;
+pub mod rt;
 pub mod sink;
 
 pub use mixer::Mixer;

@@ -463,6 +463,8 @@ impl Player {
     }
 
     fn run(mut self, rx: Receiver<Msg>, stop: Arc<AtomicBool>) {
+        // short sleeps must not stretch under App Nap / timer coalescing
+        stems_audio::rt::promote_current_thread(10.0);
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;

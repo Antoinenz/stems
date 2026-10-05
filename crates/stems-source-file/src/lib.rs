@@ -129,6 +129,7 @@ impl FileSource {
         let thread = thread::Builder::new()
             .name("stems-file-source".into())
             .spawn(move || {
+                stems_audio::rt::promote_current_thread(10.0);
                 let ctx = Ctx {
                     events: &events,
                     stop: &stop,

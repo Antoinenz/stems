@@ -31,7 +31,10 @@ impl RingSink {
 }
 
 impl Sink for RingSink {
+    /// Runs on librespot's player thread, which pushes into our ring with
+    /// short sleeps: keep it on time under App Nap / timer coalescing.
     fn start(&mut self) -> SinkResult<()> {
+        stems_audio::rt::promote_current_thread(10.0);
         Ok(())
     }
 

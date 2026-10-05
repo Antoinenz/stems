@@ -110,6 +110,9 @@ impl Processor {
             thread::Builder::new()
                 .name("stems-processor".into())
                 .spawn(move || {
+                    crate::rt::promote_current_thread(
+                        BLOCK_FRAMES as f64 * 1000.0 / stems_core::SAMPLE_RATE as f64,
+                    );
                     let ch = CHANNELS as usize;
                     let mut original = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut inst = vec![0.0f32; BLOCK_FRAMES * ch];

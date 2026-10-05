@@ -31,6 +31,7 @@ impl NullSink {
             thread::Builder::new()
                 .name("stems-null-sink".into())
                 .spawn(move || {
+                    crate::rt::promote_current_thread(TICK.as_secs_f64() * 1000.0);
                     let frames_per_tick =
                         (SAMPLE_RATE as u64 * TICK.as_millis() as u64 / 1000) as usize;
                     let mut buf = vec![0.0f32; frames_per_tick * CHANNELS as usize];

@@ -384,6 +384,8 @@ mod tests {
         let elapsed = start.elapsed();
         // 16 × 20 ms of work at a 50 % duty cycle ≈ 640 ms
         assert!(elapsed >= Duration::from_millis(600), "elapsed {elapsed:?}");
-        assert!(elapsed < Duration::from_secs(5), "elapsed {elapsed:?}");
+        // generous: under macOS timer coalescing (a hidden terminal) each
+        // 20 ms sleep can take over 100 ms; the lower bound is the real check
+        assert!(elapsed < Duration::from_secs(30), "elapsed {elapsed:?}");
     }
 }
