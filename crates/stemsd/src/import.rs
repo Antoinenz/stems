@@ -101,7 +101,7 @@ pub struct Importer {
     spotify: Option<ImportSession>,
     separator: Option<OfflineSeparator>,
     #[cfg(feature = "onnx")]
-    aligner: Option<stems_sep::align::Aligner>,
+    aligner: Option<Box<dyn stems_sep::align::AlignBackend>>,
     want_words: bool,
     lrclib: LrcLib,
     local_lyrics: LocalLyrics,
@@ -129,7 +129,7 @@ impl Importer {
             };
         #[cfg(feature = "onnx")]
         let aligner = if cfg.lyrics.align {
-            match crate::separator::build_aligner(paths.models_dir.clone(), cfg.karaoke.threads)
+            match crate::separator::build_align_backend(&cfg.karaoke, paths.models_dir.clone())
                 .await
             {
                 Ok(a) => Some(a),
@@ -526,7 +526,7 @@ impl Importer {
         let id = e.track.id.clone();
         let lines = lyrics.lines.clone();
         let (aligner, result) = tokio::task::spawn_blocking(move || {
-            let r = stems_sep::align::worker::align_blocking(&mut aligner, id, buf, lines);
+            let r = stems_sep::align::worker::align_blocking(aligner.as_mut(), id, buf, lines);
             (aligner, r)
         })
         .await

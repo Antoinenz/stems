@@ -434,18 +434,33 @@ fn parse_device_type(s: &str) -> SpotifyDeviceType {
 pub async fn run_worker(cfg: &Config, bind: &str) -> Result<()> {
     let models_dir = crate::config::paths()?.models_dir;
     let workers = cfg.karaoke.workers.max(1);
-    let models = crate::separator::load_models(&cfg.karaoke, models_dir, workers).await?;
+    let models = crate::separator::load_models(&cfg.karaoke, models_dir.clone(), workers).await?;
+    // the speech model too, so imports can place lyric words here
+    let aligner = if cfg.lyrics.align {
+        match crate::separator::build_aligner(models_dir, cfg.karaoke.threads).await {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!("word alignment not offered: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let align = aligner.is_some();
     let listener =
         std::net::TcpListener::bind(bind).map_err(|e| anyhow::anyhow!("bind {bind}: {e}"))?;
     tracing::info!(
         bind,
         model = cfg.karaoke.model,
         sessions = workers,
+        align,
         "separation worker listening"
     );
     let name = cfg.karaoke.model.clone();
-    let serve =
-        tokio::task::spawn_blocking(move || stems_sep::remote::serve::run(listener, &name, models));
+    let serve = tokio::task::spawn_blocking(move || {
+        stems_sep::remote::serve::run(listener, &name, models, aligner)
+    });
     tokio::select! {
         r = serve => r.map_err(|e| anyhow::anyhow!("worker task: {e}"))?,
         _ = tokio::signal::ctrl_c() => {

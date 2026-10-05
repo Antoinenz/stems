@@ -16,6 +16,7 @@ pub mod remote;
 #[cfg(feature = "onnx")]
 pub mod stft;
 pub mod stream;
+pub mod words;
 
 pub use dsp::CentreCancel;
 #[cfg(feature = "onnx")]

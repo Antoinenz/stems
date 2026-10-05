@@ -25,13 +25,18 @@ const VOCAB: [char; 32] = [
     'W', 'C', 'F', 'G', 'Y', 'P', 'B', 'V', 'K', '\'', 'X', 'J', 'Q', 'Z',
 ];
 
-/// A word's span inside the audio handed to [`Aligner::align`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct WordSpan {
-    pub start_ms: u32,
-    pub end_ms: u32,
-    /// Mean log-probability of the word's letters along the path.
-    pub score: f32,
+pub use crate::words::WordSpan;
+
+/// Something that places words in 16 kHz mono speech audio: the local
+/// model, or a separation worker that runs it.
+pub trait AlignBackend: Send + Sync {
+    fn align(&mut self, audio16k: &[f32], words: &[String]) -> Result<Option<Vec<WordSpan>>>;
+}
+
+impl AlignBackend for Aligner {
+    fn align(&mut self, audio16k: &[f32], words: &[String]) -> Result<Option<Vec<WordSpan>>> {
+        Aligner::align(self, audio16k, words)
+    }
 }
 
 pub struct Aligner {
@@ -354,7 +359,7 @@ pub mod worker {
 
     use stems_core::{LyricLine, LyricWord, TrackId, frames_to_ms, ms_to_frames};
 
-    use super::{Aligner, to_16k};
+    use super::{AlignBackend, Aligner, to_16k};
     use crate::offline::StemBuffer;
 
     /// One line's alignment result.
@@ -458,7 +463,7 @@ pub mod worker {
     /// that scored well enough. `buf` should be complete (offline import);
     /// regions without stems are skipped rather than waited for.
     pub fn align_blocking(
-        aligner: &mut Aligner,
+        aligner: &mut dyn AlignBackend,
         track: TrackId,
         buf: Arc<StemBuffer>,
         lines: Vec<LyricLine>,
@@ -598,7 +603,7 @@ pub mod worker {
     /// Align one chunk and hand back each line whose words scored well
     /// enough. Returns how many lines were accepted.
     fn align_chunk(
-        aligner: &mut Aligner,
+        aligner: &mut dyn AlignBackend,
         job: &Job,
         chunk: &Chunk,
         vocals: &[f32],

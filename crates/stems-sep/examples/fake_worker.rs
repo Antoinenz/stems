@@ -23,6 +23,7 @@ fn main() -> anyhow::Result<()> {
         model: "fake-half-gain".into(),
         provider: "fake".into(),
         params,
+        align: false,
     };
     let runners: Vec<Runner> = (0..2)
         .map(|_| -> Runner {
@@ -34,5 +35,5 @@ fn main() -> anyhow::Result<()> {
         .collect();
     let listener = TcpListener::bind(&bind)?;
     eprintln!("fake worker on {bind} (delay {delay_ms} ms per window)");
-    serve::run_with(listener, hello, runners)
+    serve::run_with(listener, hello, runners, None)
 }

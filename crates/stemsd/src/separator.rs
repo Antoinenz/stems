@@ -370,6 +370,63 @@ async fn build_runners(
     }
 }
 
+/// Word alignment for imports, following the same placement rules as
+/// separation: with `backend = "remote"` it runs on the workers (and on
+/// this machine only as `local_fallback` allows).
+#[cfg(feature = "onnx")]
+pub async fn build_align_backend(
+    cfg: &KaraokeConfig,
+    models_dir: PathBuf,
+) -> Result<Box<dyn stems_sep::align::AlignBackend>> {
+    if cfg.backend != "remote" {
+        return Ok(Box::new(build_aligner(models_dir, cfg.threads).await?));
+    }
+    use stems_sep::remote::{ResilientRemote, parse_addrs};
+    let (_, params) = stems_sep::known_model(&cfg.model)
+        .ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
+    let remote = ResilientRemote::new(parse_addrs(&cfg.remote), 0, params, cfg.denoise);
+    let local = match Fallback::parse(&cfg.local_fallback)? {
+        Fallback::Never => None,
+        _ => Some(build_aligner(models_dir, cfg.threads).await?),
+    };
+    Ok(Box::new(RemoteAligner {
+        remote,
+        local,
+        announced: false,
+    }))
+}
+
+/// Alignment on a worker, with an optional local fallback.
+#[cfg(feature = "onnx")]
+struct RemoteAligner {
+    remote: stems_sep::remote::ResilientRemote,
+    local: Option<stems_sep::align::Aligner>,
+    announced: bool,
+}
+
+#[cfg(feature = "onnx")]
+impl stems_sep::align::AlignBackend for RemoteAligner {
+    fn align(
+        &mut self,
+        audio16k: &[f32],
+        words: &[String],
+    ) -> Result<Option<Vec<stems_sep::align::WordSpan>>> {
+        match self.remote.align(audio16k, words) {
+            Ok(spans) => Ok(spans),
+            Err(e) => match self.local.as_mut() {
+                Some(local) => {
+                    if !self.announced {
+                        self.announced = true;
+                        tracing::warn!("aligning lyrics on this machine: {e:#}");
+                    }
+                    local.align(audio16k, words)
+                }
+                None => Err(e),
+            },
+        }
+    }
+}
+
 /// Load the word-alignment model, downloading it on first use.
 #[cfg(feature = "onnx")]
 pub async fn build_aligner(
