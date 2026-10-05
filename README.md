@@ -235,28 +235,40 @@ model cannot place confidently keep the interpolated wipe.
 
 ### Remote worker
 
-The model can run on another machine — a desktop GPU serving a Raspberry Pi or a laptop:
+The model can run on another machine — a desktop GPU serving a Raspberry Pi, or a second
+laptop doing all the separation so the one running the party stays cool:
 
 ```sh
-# on the GPU box (uses its own stems.toml [karaoke] model/device/workers)
-cargo run -p stemsd --features cuda -- worker --bind 0.0.0.0:7374
+# on the worker (uses its own stems.toml [karaoke] model/device/workers)
+cargo run --release -p stemsd --features cuda -- worker --bind 0.0.0.0:7374
 ```
 
 ```toml
 # on the player
 [karaoke]
 backend = "remote"
-remote = "192.168.1.50:7374"
-hop_ms = 1000
-lookahead_ms = 1000
-slack_ms = 1500
-denoise = true
-workers = 2          # parallel connections; the worker's own `workers` bounds concurrency
+remote = "192.168.1.50:7374"     # or several: "192.168.1.50:7374, 192.168.1.51:7374"
+local_fallback = "never"         # never | when_no_worker | always
+model = "UVR-MDX-NET-Inst_HQ_3"  # must be the model the worker runs
+workers = 2                      # parallel connections, spread over the workers
 ```
 
 Windows (~2 MB each way) stream over TCP; the worker answers with the instrumental and the
 player blends them exactly as it would locally, so latency and quality knobs are the same.
 `denoise` is applied on the worker. Several players can share one worker.
+
+Workers may come and go: stemsd starts without one, connects on first use, reconnects with
+backoff when a worker disappears (trying every listed address) and retries a lost window
+once on a fresh connection. A worker running a different model is refused. Where a window
+may run is `local_fallback`: `never` — workers only; a window no worker can take plays dry
+live, and an import marks that song's separation as failed and retries it on the next run
+(nothing half-separated is ever saved); `when_no_worker` — separate on this machine while no
+worker answers; `always` — this machine works alongside the workers (fastest imports). The
+`gpu_limit` pacing only applies to windows that run locally.
+
+With `[lyrics] align` (the default) the worker also loads the speech model and imports place
+lyric words there too, so with `local_fallback = "never"` an import runs no model at all on
+the player.
 
 ## Building
 
@@ -274,7 +286,10 @@ macOS and Windows need no extra system packages. The default build downloads a p
 ONNX Runtime; where that does not link (e.g. Debian 12 on aarch64) use
 `--no-default-features --features onnx-dylib` and point `ORT_DYLIB_PATH` at a
 `libonnxruntime.so` from the official releases, or `--no-default-features` for a DSP-only
-build.
+build. The same applies to Windows on ARM (Snapdragon): if the default build does not link,
+use `--no-default-features --features onnx-dylib,directml` with `ORT_DYLIB_PATH` pointing at
+`onnxruntime.dll` from Microsoft's `win-arm64` release (DirectML runs on the Adreno GPU;
+`device = "cpu"` is the fallback).
 
 ## License
 
