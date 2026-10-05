@@ -12,7 +12,7 @@ pub enum PrimaryStem {
 }
 
 /// STFT / tensor geometry of an MDX-Net model (from UVR's model registry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MdxParams {
     pub n_fft: usize,
     pub hop: usize,

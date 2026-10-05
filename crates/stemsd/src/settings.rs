@@ -202,6 +202,9 @@ fn validate(cfg: &Config) -> std::result::Result<(), String> {
     if cfg.port == 0 {
         return Err("port must be set".into());
     }
+    if let Err(e) = crate::separator::Fallback::parse(&cfg.karaoke.local_fallback) {
+        return Err(format!("karaoke.local_fallback: {e}"));
+    }
     if !(-30.0..=-5.0).contains(&cfg.library.target_lufs) {
         return Err("library.target_lufs must be between -30 and -5".into());
     }

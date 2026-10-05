@@ -652,7 +652,7 @@ pub fn report(entries: &[Entry]) -> String {
         if e.stages.video == Stage::Missing {
             notes.push("no video".into());
         }
-        if e.stages.video.is_done() && e.video_offset_ms.is_none() {
+        if e.stages.video_align.is_done() && e.video_offset_ms.is_none() {
             notes.push(format!(
                 "video may not match (corr {:.2})",
                 e.video_corr.unwrap_or(0.0)

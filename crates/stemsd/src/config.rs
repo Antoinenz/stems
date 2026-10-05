@@ -169,8 +169,15 @@ pub struct KaraokeConfig {
     /// Parallel inference sessions. 2 keeps a GPU busy while the CPU side
     /// of the other window runs; costs one extra model copy in memory.
     pub workers: usize,
-    /// `host:port` of a `stemsd worker` for `backend = "remote"`.
+    /// `host:port` of a `stemsd worker` for `backend = "remote"`, or a
+    /// comma-separated list; connections are spread over them and move to
+    /// another one when a worker goes away.
     pub remote: String,
+    /// With `backend = "remote"`: `never` (workers only — a window no
+    /// worker can take fails: live it plays dry, an import is retried
+    /// later), `when_no_worker` (separate here while no worker answers)
+    /// or `always` (this machine helps the workers).
+    pub local_fallback: String,
     /// `streaming`: separate the live stream with a few seconds of delay.
     /// `prebuffer`: download each track as it starts (and the next one
     /// early), separate it ahead of playback and play with zero delay;
@@ -202,6 +209,7 @@ impl Default for KaraokeConfig {
             denoise: false,
             workers: 1,
             remote: String::new(),
+            local_fallback: "never".into(),
             mode: "streaming".into(),
             fade_ms: 400,
             gpu_limit: 1.0,

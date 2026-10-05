@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,124 @@ impl RemoteRunner {
         );
         Ok(out)
     }
+}
+
+/// A worker connection that survives the worker: it connects on first
+/// use, reconnects after a failure (trying every address in turn, with
+/// backoff while none answers) and retries a window once on a fresh
+/// connection before giving up on it. Workers running a different model
+/// than `expect` are refused.
+pub struct ResilientRemote {
+    addrs: Vec<String>,
+    /// Address to try first; rotates on failure and spreads connections.
+    next: usize,
+    expect: MdxParams,
+    denoise: bool,
+    conn: Option<RemoteRunner>,
+    retry_at: Instant,
+    backoff: Duration,
+}
+
+const BACKOFF_MIN: Duration = Duration::from_millis(500);
+const BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+impl ResilientRemote {
+    /// `first` picks which address this connection prefers, so N
+    /// connections spread over the workers.
+    pub fn new(addrs: Vec<String>, first: usize, expect: MdxParams, denoise: bool) -> Self {
+        let next = if addrs.is_empty() {
+            0
+        } else {
+            first % addrs.len()
+        };
+        Self {
+            addrs,
+            next,
+            expect,
+            denoise,
+            conn: None,
+            retry_at: Instant::now(),
+            backoff: BACKOFF_MIN,
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.conn.is_some()
+    }
+
+    /// Try each address once, starting with the preferred one.
+    fn connect(&mut self) -> Result<()> {
+        let mut last = anyhow!("no worker addresses configured");
+        for k in 0..self.addrs.len() {
+            let i = (self.next + k) % self.addrs.len();
+            let addr = self.addrs[i].clone();
+            match RemoteRunner::connect(addr.as_str()) {
+                Ok(c) if c.hello().params != self.expect => {
+                    last = anyhow!(
+                        "worker {addr} runs model `{}` with different parameters; \
+                         set the same [karaoke] model on both machines",
+                        c.hello().model
+                    );
+                }
+                Ok(c) => {
+                    tracing::info!(
+                        worker = addr,
+                        model = c.hello().model,
+                        provider = c.hello().provider,
+                        "connected to separation worker"
+                    );
+                    self.next = i;
+                    self.conn = Some(c);
+                    self.backoff = BACKOFF_MIN;
+                    return Ok(());
+                }
+                Err(e) => last = e.context(format!("worker {addr}")),
+            }
+        }
+        self.retry_at = Instant::now() + self.backoff;
+        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        Err(last)
+    }
+
+    /// Separate one window remotely.
+    pub fn run(&mut self, window: &[f32]) -> Result<Vec<f32>> {
+        for attempt in 0..2 {
+            if self.conn.is_none() {
+                if Instant::now() < self.retry_at {
+                    return Err(anyhow!("no separation worker reachable (retrying)"));
+                }
+                self.connect()?;
+            }
+            let conn = self.conn.as_mut().expect("connected above");
+            match conn.run(window, self.denoise) {
+                Ok(out) => return Ok(out),
+                // the worker answered with an error: the connection is fine
+                Err(e) if e.to_string().starts_with("worker: ") => return Err(e),
+                Err(e) => {
+                    tracing::warn!(
+                        worker = self.addrs.get(self.next).map(String::as_str).unwrap_or("?"),
+                        attempt,
+                        "lost separation worker: {e:#}"
+                    );
+                    self.conn = None;
+                    // prefer another worker for the retry
+                    if !self.addrs.is_empty() {
+                        self.next = (self.next + 1) % self.addrs.len();
+                    }
+                }
+            }
+        }
+        Err(anyhow!("separation worker connection lost"))
+    }
+}
+
+/// Split `"a:7374, b:7374"` into addresses.
+pub fn parse_addrs(s: &str) -> Vec<String> {
+    s.split([',', ' '])
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Server side: serve connections from a pool of window runners.
@@ -310,6 +428,111 @@ mod tests {
         let err = a.run(&w, true).unwrap_err().to_string();
         assert!(err.contains("no denoise here"), "{err}");
         assert_eq!(a.run(&w, false).unwrap(), out);
+    }
+
+    fn identity_worker(scale: f32, params: MdxParams) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hello = Hello {
+            model: "identity".into(),
+            provider: "test".into(),
+            params,
+        };
+        let runners: Vec<serve::Runner> = vec![Box::new(move |w: &[f32], _d: bool| {
+            Ok(w.iter().map(|x| x * scale).collect())
+        })];
+        std::thread::spawn(move || serve::run_with(listener, hello, runners));
+        addr
+    }
+
+    fn test_params() -> MdxParams {
+        use crate::params::PrimaryStem;
+        MdxParams {
+            n_fft: 512,
+            hop: 16,
+            dim_f: 256,
+            dim_t: 257,
+            primary_stem: PrimaryStem::Instrumental,
+            compensate: 1.0,
+        }
+    }
+
+    #[test]
+    fn resilient_remote_skips_dead_workers_and_wrong_models() {
+        // a port nothing listens on
+        let dead = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let mut other = test_params();
+        other.n_fft = 1024;
+        let wrong = identity_worker(0.5, other).to_string();
+        let good = identity_worker(0.5, test_params()).to_string();
+        let mut r = ResilientRemote::new(vec![dead, wrong, good], 0, test_params(), false);
+        let w = vec![0.4f32; 4096 * 2];
+        let out = r.run(&w).unwrap();
+        assert!(r.is_connected());
+        assert!((out[0] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resilient_remote_backs_off_when_nothing_answers() {
+        let dead = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let mut r = ResilientRemote::new(vec![dead], 0, test_params(), false);
+        let w = vec![0.0f32; 4096 * 2];
+        assert!(r.run(&w).is_err());
+        // inside the backoff window it fails fast without dialling
+        let t = Instant::now();
+        let err = r.run(&w).unwrap_err().to_string();
+        assert!(err.contains("retrying"), "{err}");
+        assert!(t.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn resilient_remote_retries_a_window_after_the_worker_dies() {
+        // serves one window, then drops the connection mid-request
+        let flaky = TcpListener::bind("127.0.0.1:0").unwrap();
+        let flaky_addr = flaky.local_addr().unwrap().to_string();
+        let hello = serde_json::to_vec(&Hello {
+            model: "identity".into(),
+            provider: "test".into(),
+            params: test_params(),
+        })
+        .unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = flaky.accept().unwrap();
+            s.write_all(MAGIC).unwrap();
+            write_u32(&mut s, hello.len() as u32).unwrap();
+            s.write_all(&hello).unwrap();
+            let mut head = [0u8; 5];
+            s.read_exact(&mut head).unwrap();
+            let n = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
+            let w = read_samples(&mut s, n).unwrap();
+            write_samples(&mut s, &w).unwrap();
+            let _ = s.read_exact(&mut head);
+            // drop: the next window is lost with the connection
+        });
+        let good = identity_worker(0.5, test_params()).to_string();
+        let mut r = ResilientRemote::new(vec![flaky_addr, good], 0, test_params(), false);
+        let w = vec![0.4f32; 4096 * 2];
+        assert!(
+            (r.run(&w).unwrap()[0] - 0.4).abs() < 1e-6,
+            "served by the flaky one"
+        );
+        let out = r.run(&w).expect("retried on the other worker");
+        assert!((out[0] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_address_lists() {
+        assert_eq!(
+            parse_addrs(" 192.168.1.50:7374, surface.local:7374 "),
+            vec!["192.168.1.50:7374", "surface.local:7374"]
+        );
+        assert!(parse_addrs("").is_empty());
     }
 
     #[test]

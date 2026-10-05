@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "onnx")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use stems_core::Separator;
 use stems_sep::CentreCancel;
 
@@ -16,7 +18,7 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         return Ok(Box::new(CentreCancel::default()));
     }
     let opts = stream_opts(cfg);
-    let r = build_runners(cfg, models_dir).await?;
+    let r = build_runners(cfg, models_dir, None).await?;
     let sep = stems_sep::MdxSeparator::with_runners(r.params, r.provider, r.runners, opts);
     tracing::info!(
         backend = cfg.backend,
@@ -38,27 +40,16 @@ pub async fn build_offline(
         "mode = \"prebuffer\" needs an ML backend (mdx or remote)"
     );
     let opts = stream_opts(cfg);
-    let r = build_runners(cfg, models_dir).await?;
     let limit = cfg.gpu_limit.clamp(0.1, 1.0);
-    // One governor shared by every worker: windows are serialised and
-    // paced, so two workers cannot keep the GPU saturated by taking turns
-    // sleeping. At a limit of 1.0 it steps aside. The limit can be
-    // changed while running (settings API).
+    // One governor shared by every local session: windows are serialised
+    // and paced, so two sessions cannot keep the GPU saturated by taking
+    // turns sleeping. At a limit of 1.0 it steps aside. The limit can be
+    // changed while running (settings API). Remote windows are not paced:
+    // the worker's GPU is not ours to protect.
     let gov = Arc::new(Governor::new(limit));
     let limit_handle = gov.limit_handle();
-    let runners: Vec<stems_sep::WindowRunner> = r
-        .runners
-        .into_iter()
-        .map(|mut run| -> stems_sep::WindowRunner {
-            let gov = gov.clone();
-            Box::new(move |w: &[f32]| {
-                let t = gov.acquire();
-                let out = run(w);
-                gov.release(t);
-                out
-            })
-        })
-        .collect();
+    let r = build_runners(cfg, models_dir, Some(gov)).await?;
+    let runners = r.runners;
     let disk = match stems_dir.filter(|_| cfg.stem_cache_mb > 0) {
         Some(stems_dir) => {
             match stems_sep::disk::StemDisk::new(&stems_dir, cfg.stem_cache_mb * 1024 * 1024) {
@@ -90,6 +81,8 @@ pub async fn build_offline(
 /// Running windows concurrently would not help here: a saturated GPU
 /// just time-slices them, and the concurrency is what starves the
 /// compositor and everything else.
+// without ONNX nothing runs locally, so nothing is governed
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
 struct Governor {
     /// f32 bits; ≥ 1.0 disables pacing and serialisation.
     limit: Arc<AtomicU32>,
@@ -97,6 +90,7 @@ struct Governor {
     cv: Condvar,
 }
 
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
 struct GovState {
     active: bool,
     /// Earliest instant the next window may start.
@@ -176,14 +170,98 @@ struct Runners {
     runners: Vec<stems_sep::WindowRunner>,
 }
 
+/// Where windows may run when `backend = "remote"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fallback {
+    /// Workers only: a window no worker can take fails (live: dry audio,
+    /// import: retried later). The party setting: no ML on the host.
+    Never,
+    /// Run on this machine while no worker is reachable.
+    WhenNoWorker,
+    /// This machine separates alongside the workers (fastest imports).
+    Always,
+}
+
+impl Fallback {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "never" | "" => Ok(Self::Never),
+            "when_no_worker" => Ok(Self::WhenNoWorker),
+            "always" => Ok(Self::Always),
+            other => Err(anyhow!(
+                "unknown local_fallback `{other}` (never, when_no_worker, always)"
+            )),
+        }
+    }
+}
+
+/// Run `f` under the governor, if there is one.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+fn governed<R>(gov: &Option<Arc<Governor>>, f: impl FnOnce() -> R) -> R {
+    match gov {
+        Some(g) => {
+            let t = g.acquire();
+            let out = f();
+            g.release(t);
+            out
+        }
+        None => f(),
+    }
+}
+
+/// A model session on this machine, loaded on first use (a worker that
+/// never fails costs no memory here).
+#[cfg(feature = "onnx")]
+struct LocalModel {
+    path: PathBuf,
+    params: stems_sep::MdxParams,
+    device: stems_sep::Device,
+    threads: usize,
+    denoise: bool,
+    model: Mutex<Option<stems_sep::MdxModel>>,
+    announced: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "onnx")]
+impl LocalModel {
+    fn run(&self, w: &[f32], gov: &Option<Arc<Governor>>, why: &str) -> Result<Vec<f32>> {
+        if !self.announced.swap(true, Ordering::Relaxed) {
+            tracing::warn!("separating on this machine: {why}");
+        }
+        let mut guard = self
+            .model
+            .lock()
+            .map_err(|_| anyhow!("local model poisoned"))?;
+        if guard.is_none() {
+            let batch = if self.denoise { 2 } else { 1 };
+            let mut m = stems_sep::MdxModel::load(
+                &self.path,
+                self.params.clone(),
+                self.device,
+                self.threads,
+                batch,
+            )?;
+            m.warm_up()?;
+            *guard = Some(m);
+        }
+        let m = guard.as_mut().expect("loaded above");
+        governed(gov, || m.instrumental_for_window_opt(w, self.denoise))
+    }
+}
+
 /// Window runners for the configured backend: in-process model sessions
-/// or connections to a `stemsd worker`.
-async fn build_runners(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Runners> {
+/// or connections to `stemsd worker`s (with an optional local fallback).
+/// Local windows run under `gov`.
+async fn build_runners(
+    cfg: &KaraokeConfig,
+    models_dir: PathBuf,
+    gov: Option<Arc<Governor>>,
+) -> Result<Runners> {
     use stems_sep::WindowRunner;
     match cfg.backend.as_str() {
         #[cfg(not(feature = "onnx"))]
         "mdx" => {
-            let _ = models_dir;
+            let _ = (models_dir, gov);
             Err(anyhow!(
                 "this build has no ONNX support; rebuild stemsd with `--features onnx`"
             ))
@@ -197,7 +275,10 @@ async fn build_runners(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Runne
             let runners = models
                 .into_iter()
                 .map(|mut m| -> WindowRunner {
-                    Box::new(move |w: &[f32]| m.instrumental_for_window_opt(w, denoise))
+                    let gov = gov.clone();
+                    Box::new(move |w: &[f32]| {
+                        governed(&gov, || m.instrumental_for_window_opt(w, denoise))
+                    })
                 })
                 .collect();
             Ok(Runners {
@@ -207,35 +288,78 @@ async fn build_runners(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Runne
             })
         }
         "remote" => {
-            use stems_sep::remote::RemoteRunner;
+            use stems_sep::remote::{ResilientRemote, parse_addrs};
+            let addrs = parse_addrs(&cfg.remote);
             anyhow::ensure!(
-                !cfg.remote.is_empty(),
-                "backend = \"remote\" needs `remote = \"host:port\"` in [karaoke]"
+                !addrs.is_empty(),
+                "backend = \"remote\" needs `remote = \"host:port\"` (or a comma-separated list) in [karaoke]"
             );
-            let addr = cfg.remote.clone();
+            let (_, params) = stems_sep::known_model(&cfg.model).ok_or_else(|| {
+                anyhow!(
+                    "unknown MDX model `{}`: set [karaoke] model to the model the worker runs",
+                    cfg.model
+                )
+            })?;
+            let policy = Fallback::parse(&cfg.local_fallback)?;
+            #[cfg(feature = "onnx")]
+            let local: Option<Arc<LocalModel>> = if policy == Fallback::Never {
+                None
+            } else {
+                let (path, params) = model_file(cfg, models_dir).await?;
+                Some(Arc::new(LocalModel {
+                    path,
+                    params,
+                    device: device(cfg),
+                    threads: cfg.threads,
+                    denoise: cfg.denoise,
+                    model: Mutex::new(None),
+                    announced: std::sync::atomic::AtomicBool::new(false),
+                }))
+            };
+            #[cfg(not(feature = "onnx"))]
+            {
+                let _ = models_dir;
+                if policy != Fallback::Never {
+                    tracing::warn!("no ONNX in this build: local_fallback ignored");
+                }
+            }
             let n = cfg.workers.max(1);
-            let conns = tokio::task::spawn_blocking(move || {
-                (0..n)
-                    .map(|_| RemoteRunner::connect(addr.as_str()))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .await
-            .context("worker connect task")??;
-            let hello = conns[0].hello().clone();
-            tracing::info!(
-                remote = cfg.remote,
-                model = hello.model,
-                provider = hello.provider,
-                connections = n,
-                "remote separation worker"
-            );
             let denoise = cfg.denoise;
-            let runners = conns
-                .into_iter()
-                .map(|mut c| -> WindowRunner { Box::new(move |w: &[f32]| c.run(w, denoise)) })
+            #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
+            let mut runners: Vec<WindowRunner> = (0..n)
+                .map(|i| -> WindowRunner {
+                    let mut remote =
+                        ResilientRemote::new(addrs.clone(), i, params.clone(), denoise);
+                    #[cfg(feature = "onnx")]
+                    let fallback = local.clone().filter(|_| policy == Fallback::WhenNoWorker);
+                    #[cfg(feature = "onnx")]
+                    let gov = gov.clone();
+                    Box::new(move |w: &[f32]| match remote.run(w) {
+                        Ok(out) => Ok(out),
+                        #[cfg(feature = "onnx")]
+                        Err(e) if fallback.is_some() => fallback.as_ref().expect("checked").run(
+                            w,
+                            &gov,
+                            &format!("no worker reachable ({e:#})"),
+                        ),
+                        Err(e) => Err(e),
+                    })
+                })
                 .collect();
+            #[cfg(feature = "onnx")]
+            if let (Fallback::Always, Some(l)) = (policy, local) {
+                runners.push(Box::new(move |w: &[f32]| {
+                    l.run(w, &gov, "local_fallback = \"always\"")
+                }));
+            }
+            tracing::info!(
+                workers = ?addrs,
+                connections = n,
+                local_fallback = cfg.local_fallback,
+                "remote separation (connects on first use)"
+            );
             Ok(Runners {
-                params: hello.params,
+                params,
                 provider: "remote",
                 runners,
             })
@@ -262,23 +386,25 @@ pub async fn build_aligner(
         .context("aligner load task")?
 }
 
-/// Resolve and (if needed) download the configured model; load
-/// `count` sessions.
+/// The configured model's file (downloaded on first use) and geometry.
 #[cfg(feature = "onnx")]
-pub async fn load_models(
+async fn model_file(
     cfg: &KaraokeConfig,
     models_dir: PathBuf,
-    count: usize,
-) -> Result<Vec<stems_sep::MdxModel>> {
-    use stems_sep::{Device, MdxModel, known_model};
-
-    let (base_url, params) =
-        known_model(&cfg.model).ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
+) -> Result<(PathBuf, stems_sep::MdxParams)> {
+    let (base_url, params) = stems_sep::known_model(&cfg.model)
+        .ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
     let path = models_dir.join(format!("{}.onnx", cfg.model));
     if !path.is_file() {
         download(&format!("{base_url}/{}.onnx", cfg.model), &path).await?;
     }
-    let device = match cfg.device.as_str() {
+    Ok((path, params))
+}
+
+#[cfg(feature = "onnx")]
+fn device(cfg: &KaraokeConfig) -> stems_sep::Device {
+    use stems_sep::Device;
+    match cfg.device.as_str() {
         "cpu" => Device::Cpu,
         "cuda" => Device::Cuda,
         "directml" => Device::DirectMl,
@@ -287,7 +413,21 @@ pub async fn load_models(
         "coreml-all" => Device::CoreMlAll,
         "coreml-ane" => Device::CoreMlAne,
         _ => Device::Auto,
-    };
+    }
+}
+
+/// Resolve and (if needed) download the configured model; load
+/// `count` sessions.
+#[cfg(feature = "onnx")]
+pub async fn load_models(
+    cfg: &KaraokeConfig,
+    models_dir: PathBuf,
+    count: usize,
+) -> Result<Vec<stems_sep::MdxModel>> {
+    use stems_sep::MdxModel;
+
+    let (path, params) = model_file(cfg, models_dir).await?;
+    let device = device(cfg);
     let threads = cfg.threads;
     let batch = if cfg.denoise { 2 } else { 1 };
     // Loading a 60+ MB model blocks; keep it off the async runtime.
