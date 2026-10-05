@@ -33,8 +33,44 @@ Pick **stems** in the Spotify app, then open `http://<host>:7373/stage/` on the 
 control it from `http://<host>:7373/remote/` on their phones — the stage shows a QR code for
 it while idle and a small one in the corner while playing (`/stage/?qr=0` hides it). The
 remote has the karaoke toggle, vocal level, volume, stage mode, and lyric/video timing nudges.
-Other commands: `stemsd play <file> [--title … --artist …]`, `stemsd devices`, `stemsd config`,
-`stemsd worker`.
+Other commands: `stemsd library` and `stemsd import` (see [Offline library](#offline-library)),
+`stemsd play <file> [--title … --artist …]`, `stemsd devices`, `stemsd config`, `stemsd worker`.
+
+### Offline library
+
+For a party with bad (or no) internet, stems can be the player instead of Spotify: songs are
+imported ahead of time into a library folder, and `stemsd library` plays them with nothing
+from the network.
+
+```sh
+stemsd import https://open.spotify.com/playlist/… ~/Music/extra-song.flac   # links, files, folders
+stemsd library                                                                  # play; queue from the remote
+```
+
+```toml
+[library]
+dir = "/Volumes/Party/stems-library"   # empty = library/ in the platform data dir
+target_lufs = -14.0                    # every song is levelled to this loudness
+```
+
+Each track gets a folder with the original audio (`mix.ogg`, as Spotify serves it), the
+instrumental (`instrumental.wav`), lyrics with word timings (`lyrics.json`), the music video
+with its measured offset, cover art, and a `track.json` that records every step. Importing
+uses the `[karaoke]` model/device (or a `remote` worker), `[lyrics] align` and `[video]`
+settings; a song takes about 2 minutes on an M1 Air. Re-running `stemsd import` resumes
+where it stopped and retries only what failed, and it ends with a report of songs with no
+lyrics, no video or a video that does not match the audio. Drop a hand-made `lyrics.lrc`
+into a track's folder to override its lyrics. A library on an unplugged drive is reported
+instead of silently starting an empty one.
+
+Spotify imports log in with the credentials Spotify Connect saved the first time a phone
+picked this device, so run `stemsd spotify` and connect once before importing. Saving
+decoded Spotify audio is against Spotify's terms: keep the library for your own private use.
+
+In library mode the remote has play/pause/skip, the queue (with an optional singer name per
+song), a searchable song list and, for the host, an import box; songs can be imported while
+the party runs. Each song is decoded into memory before it plays (and the next one ahead of
+time), so a slow or briefly unplugged disk does not interrupt the music.
 
 ### Stage view modes
 
@@ -55,6 +91,12 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 - `GET|PATCH /api/settings` — the live config (host only); a patch is a partial object such
   as `{"karaoke":{"gpu_limit":0.6},"guests":{"volume":true}}` and answers with what changed
   and which keys need a restart
+- `GET /api/library?q=` — library tracks matching the search (guests see playable ones);
+  `POST /api/library/import` with `{"sources":["<link or path>", …]}` and
+  `GET /api/library/import` (progress) are host only
+- Library playback commands: `{"cmd":"enqueue","key":"…","singer":"Sam","next":false}`,
+  `play_track`, `play`, `pause`, `next`, `seek` (`position_ms`), `dequeue` / `move_in_queue`
+  (by queue entry `id`), `clear_queue`
 
 ### Host and guests
 
@@ -71,6 +113,7 @@ vocals = true    # vocal level slider
 volume = false
 stage = true     # stage view
 timing = false   # lyric / video timing nudges
+queue = false    # play / pause / skip / seek and the queue (library mode)
 ```
 
 The host remote shows a "Guests may" panel that edits these live. Settings changed through

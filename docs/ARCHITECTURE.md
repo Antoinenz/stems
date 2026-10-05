@@ -21,6 +21,7 @@ Status: draft v0.2 · 2026-09-14 (adds AirPlay modes, rebeam/OpenAir, video pref
 | D7 | **Two AirPlay personalities.** *Display mode*: a normal AirPlay 2 receiver that honours the sender's multiroom clock. *Karaoke mode*: we play `L` late, sender-side grouping is sacrificed, and **rebeam** (OpenAir sink) re-syncs every room from *our* output. | Vocal removal is incompatible with sender-driven sync by definition; re-mastering the clock on our side is the only way every speaker plays the karaoke mix. |
 | D8 | **Sinks are plural and latency-aware.** `Sink` trait: cpal local, OpenAir AirPlay 2 sender (multi-room), later Snapcast/SonoBus. Each reports latency; the mixer aligns all sinks to the slowest. | Local TV audio and rebeamed rooms stay in sync without special cases. |
 | D9 | **The stage is a pure view.** It receives state + a clock over WS and draws; it never touches audio. | Makes the web/native rendering choice reversible (see §4.1). |
+| D10 | **Library mode: stems can be the player.** Songs are imported ahead of time into a folder per track (original audio, instrumental, lyrics with word timings, video + offset, cover; `track.json` as the source of truth) and played by a library source with its own queue. Spotify becomes an importer. | A party with bad or no internet keeps working; nothing is computed or downloaded while it runs, so the host machine stays cool for live audio. |
 
 ---
 
