@@ -35,5 +35,5 @@ fn main() -> anyhow::Result<()> {
         .collect();
     let listener = TcpListener::bind(&bind)?;
     eprintln!("fake worker on {bind} (delay {delay_ms} ms per window)");
-    serve::run_with(listener, hello, runners, None)
+    serve::run_with(serve::Mode::Listen(listener), hello, runners, None)
 }

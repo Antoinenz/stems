@@ -80,6 +80,7 @@ fn read_samples(r: &mut impl Read, n: u32) -> io::Result<Vec<f32>> {
 pub struct RemoteRunner {
     stream: TcpStream,
     hello: Hello,
+    peer: String,
 }
 
 impl RemoteRunner {
@@ -89,19 +90,42 @@ impl RemoteRunner {
             .context("resolve worker address")?
             .next()
             .ok_or_else(|| anyhow!("worker address resolves to nothing"))?;
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
             .with_context(|| format!("connect to worker {addr}"))?;
+        Self::handshake(stream, &addr.to_string())
+    }
+
+    /// A worker that dialled in (reverse mode): read its greeting.
+    pub fn from_stream(stream: TcpStream) -> Result<Self> {
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        Self::handshake(stream, &peer)
+    }
+
+    fn handshake(mut stream: TcpStream, peer: &str) -> Result<Self> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(60)))?;
         stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         let mut magic = [0u8; 4];
         stream.read_exact(&mut magic).context("worker handshake")?;
-        anyhow::ensure!(&magic == MAGIC, "not a stems worker at {addr}");
+        anyhow::ensure!(&magic == MAGIC, "not a stems worker at {peer}");
         let len = read_u32(&mut stream)?;
+        anyhow::ensure!(len < 64 * 1024, "worker hello too large");
         let mut json = vec![0u8; len as usize];
         stream.read_exact(&mut json)?;
         let hello: Hello = serde_json::from_slice(&json).context("worker hello")?;
-        Ok(Self { stream, hello })
+        Ok(Self {
+            stream,
+            hello,
+            peer: peer.to_string(),
+        })
+    }
+
+    /// Address of the worker on the other end.
+    pub fn peer(&self) -> &str {
+        &self.peer
     }
 
     pub fn hello(&self) -> &Hello {
@@ -256,7 +280,7 @@ impl ResilientRemote {
             match f(conn) {
                 Ok(out) => return Ok(out),
                 // the worker answered with an error: the connection is fine
-                Err(e) if e.to_string().starts_with("worker: ") => return Err(e),
+                Err(e) if !is_transport_error(&e) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         worker = self.addrs.get(self.next).map(String::as_str).unwrap_or("?"),
@@ -272,6 +296,162 @@ impl ResilientRemote {
             }
         }
         Err(anyhow!("separation worker connection lost"))
+    }
+}
+
+/// Is this error a lost connection (as opposed to the worker answering
+/// with an error, after which the connection is still good)?
+fn is_transport_error(e: &anyhow::Error) -> bool {
+    !e.to_string().starts_with("worker: ")
+}
+
+/// Reverse mode: workers dial in (`stemsd worker --connect`), so a worker
+/// on a managed laptop needs no inbound firewall rule. Accepted
+/// connections wait here, idle, until a runner borrows one.
+pub struct WorkerHub {
+    /// Round robin: spreads windows over workers and reaches a dead
+    /// connection soon, instead of letting it sit at the bottom.
+    idle: std::sync::Mutex<std::collections::VecDeque<RemoteRunner>>,
+    cv: std::sync::Condvar,
+    expect: MdxParams,
+    addr: std::net::SocketAddr,
+    /// Connections admitted and not yet found dead (idle or borrowed).
+    live: std::sync::atomic::AtomicUsize,
+}
+
+impl WorkerHub {
+    /// Accept workers on `bind` (e.g. `0.0.0.0:7375`) in the background.
+    pub fn listen(bind: &str, expect: MdxParams) -> Result<std::sync::Arc<Self>> {
+        let listener = std::net::TcpListener::bind(bind)
+            .with_context(|| format!("listen for workers on {bind}"))?;
+        tracing::info!(bind, "waiting for separation workers to connect");
+        let hub = std::sync::Arc::new(Self {
+            idle: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            cv: std::sync::Condvar::new(),
+            expect,
+            addr: listener.local_addr()?,
+            live: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let h = std::sync::Arc::clone(&hub);
+        std::thread::Builder::new()
+            .name("stems-worker-hub".into())
+            .spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(stream) = conn else { continue };
+                    // handshake off the accept loop: a silent client must
+                    // not hold up the next worker
+                    let h = std::sync::Arc::clone(&h);
+                    let _ = std::thread::Builder::new()
+                        .name("stems-worker-hello".into())
+                        .spawn(move || h.admit(stream));
+                }
+            })
+            .context("spawn worker hub")?;
+        Ok(hub)
+    }
+
+    fn admit(&self, stream: TcpStream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        match RemoteRunner::from_stream(stream) {
+            Ok(c) if c.hello().params != self.expect => tracing::warn!(
+                worker = c.peer(),
+                model = c.hello().model,
+                "refusing a worker running a different model; set the same [karaoke] model"
+            ),
+            Ok(c) => {
+                tracing::info!(
+                    worker = c.peer(),
+                    model = c.hello().model,
+                    provider = c.hello().provider,
+                    "separation worker connected"
+                );
+                self.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.put(c);
+            }
+            Err(e) => tracing::debug!("not a worker: {e:#}"),
+        }
+    }
+
+    fn put(&self, c: RemoteRunner) {
+        self.idle.lock().expect("worker hub").push_back(c);
+        self.cv.notify_one();
+    }
+
+    /// Workers' connections currently usable (idle or busy).
+    pub fn connected(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn drop_dead(&self) {
+        let _ = self.live.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| n.checked_sub(1),
+        );
+        // waiters re-check whether anything is left to wait for
+        self.cv.notify_all();
+    }
+
+    /// Borrow an idle connection, waiting up to `wait` while all of them
+    /// are busy. Returns at once when no worker is connected at all.
+    fn take(&self, wait: Duration) -> Option<RemoteRunner> {
+        let deadline = Instant::now() + wait;
+        let mut idle = self.idle.lock().expect("worker hub");
+        loop {
+            if let Some(c) = idle.pop_front() {
+                return Some(c);
+            }
+            let now = Instant::now();
+            if now >= deadline || self.connected() == 0 {
+                return None;
+            }
+            idle = self
+                .cv
+                .wait_timeout(idle, deadline - now)
+                .expect("worker hub")
+                .0;
+        }
+    }
+
+    /// Where workers should dial.
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    /// Connections currently idle (not counting borrowed ones).
+    pub fn idle_count(&self) -> usize {
+        self.idle.lock().expect("worker hub").len()
+    }
+
+    /// One request on any connected worker. A connection that turns out
+    /// dead (the worker restarted, its laptop went to sleep) is dropped
+    /// and the next one tried.
+    pub fn call<T>(
+        &self,
+        wait: Duration,
+        mut f: impl FnMut(&mut RemoteRunner) -> Result<T>,
+    ) -> Result<T> {
+        // a few stale connections may be queued after a worker restart
+        for _ in 0..8 {
+            let Some(mut c) = self.take(wait) else {
+                return Err(anyhow!("no separation worker connected"));
+            };
+            match f(&mut c) {
+                Ok(v) => {
+                    self.put(c);
+                    return Ok(v);
+                }
+                Err(e) if !is_transport_error(&e) => {
+                    self.put(c);
+                    return Err(e);
+                }
+                Err(e) => {
+                    tracing::warn!(worker = c.peer(), "lost separation worker: {e:#}");
+                    self.drop_dead();
+                }
+            }
+        }
+        Err(anyhow!("separation worker connections keep failing"))
     }
 }
 
@@ -302,10 +482,20 @@ pub mod serve {
         Box<dyn FnMut(&[f32], &[String]) -> Result<Option<Vec<WordSpan>>> + Send>;
     type SharedAligner = Arc<Mutex<Option<AlignRunner>>>;
 
+    /// How a worker meets its players.
+    pub enum Mode {
+        /// Wait for players to connect (`stemsd worker --bind`).
+        Listen(TcpListener),
+        /// Dial a player and keep `connections` open to it
+        /// (`stemsd worker --connect`): nothing has to accept inbound
+        /// connections on the worker's machine.
+        Dial { addr: String, connections: usize },
+    }
+
     /// Serve a pool of model sessions.
     #[cfg(feature = "onnx")]
     pub fn run(
-        listener: TcpListener,
+        mode: Mode,
         model_name: &str,
         models: Vec<crate::mdx::MdxModel>,
         aligner: Option<crate::align::Aligner>,
@@ -323,27 +513,97 @@ pub mod serve {
             .collect();
         let aligner = aligner
             .map(|mut a| -> AlignRunner { Box::new(move |audio, words| a.align(audio, words)) });
-        run_with(listener, hello, runners, aligner)
+        run_with(mode, hello, runners, aligner)
     }
 
-    /// Blocking accept loop; each connection gets a thread and borrows a
-    /// runner from the pool per window, so `runners.len()` windows run
-    /// concurrently across all clients.
+    /// Everything a connection needs, shared by all of them.
+    #[derive(Clone)]
+    struct Shared {
+        hello_json: Arc<Vec<u8>>,
+        pool: Arc<Mutex<mpsc::Receiver<Runner>>>,
+        pool_tx: mpsc::Sender<Runner>,
+        aligner: SharedAligner,
+    }
+
+    /// Blocking: serve forever. Each connection gets a thread and borrows
+    /// a runner from the pool per window, so `runners.len()` windows run
+    /// concurrently across all players.
     pub fn run_with(
-        listener: TcpListener,
+        mode: Mode,
         mut hello: Hello,
         runners: Vec<Runner>,
         aligner: Option<AlignRunner>,
     ) -> Result<()> {
         anyhow::ensure!(!runners.is_empty(), "no runners");
         hello.align = aligner.is_some();
-        let aligner: SharedAligner = Arc::new(Mutex::new(aligner));
-        let hello_json = serde_json::to_vec(&hello)?;
         let (pool_tx, rx) = mpsc::channel::<Runner>();
         for r in runners {
             pool_tx.send(r).expect("pool");
         }
-        let pool = Arc::new(Mutex::new(rx));
+        let shared = Shared {
+            hello_json: Arc::new(serde_json::to_vec(&hello)?),
+            pool: Arc::new(Mutex::new(rx)),
+            pool_tx,
+            aligner: Arc::new(Mutex::new(aligner)),
+        };
+        match mode {
+            Mode::Listen(listener) => accept_loop(listener, shared),
+            Mode::Dial { addr, connections } => dial_loop(&addr, connections.max(1), shared),
+        }
+    }
+
+    /// Keep `connections` connections open to the player, redialling with
+    /// backoff whenever one drops (player restarted, network blip).
+    fn dial_loop(addr: &str, connections: usize, shared: Shared) -> Result<()> {
+        tracing::info!(player = addr, connections, "worker dialling the player");
+        let handles: Vec<_> = (0..connections)
+            .map(|i| {
+                let shared = shared.clone();
+                let addr = addr.to_string();
+                std::thread::Builder::new()
+                    .name(format!("stems-worker-dial-{i}"))
+                    .spawn(move || dial_forever(&addr, i, &shared))
+                    .context("spawn dial thread")
+            })
+            .collect::<Result<_>>()?;
+        for h in handles {
+            let _ = h.join();
+        }
+        Ok(())
+    }
+
+    fn dial_forever(addr: &str, i: usize, shared: &Shared) {
+        let mut backoff = Duration::from_millis(500);
+        let mut announced = false;
+        loop {
+            let stream = addr
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut a| a.next())
+                .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_secs(5)).ok());
+            let Some(stream) = stream else {
+                if !announced {
+                    tracing::info!(player = addr, "player not reachable yet; retrying");
+                    announced = true;
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(10));
+                continue;
+            };
+            backoff = Duration::from_millis(500);
+            announced = false;
+            tracing::info!(player = addr, conn = i, "connected to player");
+            match serve_conn(stream, shared) {
+                Ok(()) => tracing::info!(player = addr, conn = i, "player connection closed"),
+                Err(e) => {
+                    tracing::info!(player = addr, conn = i, "player connection lost: {e:#}")
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn accept_loop(listener: TcpListener, shared: Shared) -> Result<()> {
         for conn in listener.incoming() {
             let stream = match conn {
                 Ok(s) => s,
@@ -357,14 +617,11 @@ pub mod serve {
                 .map(|a| a.to_string())
                 .unwrap_or_default();
             tracing::info!(peer, "worker client connected");
-            let pool = Arc::clone(&pool);
-            let pool_tx = pool_tx.clone();
-            let hello_json = hello_json.clone();
-            let aligner = Arc::clone(&aligner);
+            let shared = shared.clone();
             std::thread::Builder::new()
                 .name(format!("stems-worker-{peer}"))
                 .spawn(move || {
-                    if let Err(e) = serve_conn(stream, &hello_json, pool, pool_tx, aligner) {
+                    if let Err(e) = serve_conn(stream, &shared) {
                         tracing::info!(peer, "worker client gone: {e:#}");
                     }
                 })
@@ -373,13 +630,13 @@ pub mod serve {
         Ok(())
     }
 
-    fn serve_conn(
-        mut stream: TcpStream,
-        hello_json: &[u8],
-        pool: Arc<Mutex<mpsc::Receiver<Runner>>>,
-        pool_tx: mpsc::Sender<Runner>,
-        aligner: SharedAligner,
-    ) -> Result<()> {
+    fn serve_conn(mut stream: TcpStream, shared: &Shared) -> Result<()> {
+        let Shared {
+            hello_json,
+            pool,
+            pool_tx,
+            aligner,
+        } = shared;
         stream.set_nodelay(true)?;
         stream.write_all(MAGIC)?;
         write_u32(&mut stream, hello_json.len() as u32)?;
@@ -403,7 +660,7 @@ pub mod serve {
             }
             let n = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
             if head[0] == REQ_ALIGN {
-                serve_align(&mut stream, n, &aligner)?;
+                serve_align(&mut stream, n, aligner)?;
                 continue;
             }
             let denoise = head[0] != 0;
@@ -523,7 +780,9 @@ mod tests {
                 })
             })
             .collect();
-        std::thread::spawn(move || serve::run_with(listener, hello, runners, None));
+        std::thread::spawn(move || {
+            serve::run_with(serve::Mode::Listen(listener), hello, runners, None)
+        });
 
         let mut a = RemoteRunner::connect(addr).unwrap();
         let mut b = RemoteRunner::connect(addr).unwrap();
@@ -553,7 +812,9 @@ mod tests {
         let runners: Vec<serve::Runner> = vec![Box::new(move |w: &[f32], _d: bool| {
             Ok(w.iter().map(|x| x * scale).collect())
         })];
-        std::thread::spawn(move || serve::run_with(listener, hello, runners, None));
+        std::thread::spawn(move || {
+            serve::run_with(serve::Mode::Listen(listener), hello, runners, None)
+        });
         addr
     }
 
@@ -665,7 +926,9 @@ mod tests {
                     .collect(),
             ))
         });
-        std::thread::spawn(move || serve::run_with(listener, hello, runners, Some(aligner)));
+        std::thread::spawn(move || {
+            serve::run_with(serve::Mode::Listen(listener), hello, runners, Some(aligner))
+        });
 
         let mut r = ResilientRemote::new(vec![addr], 0, test_params(), false);
         let words: Vec<String> = ["hello", "world"].map(String::from).to_vec();
@@ -689,6 +952,118 @@ mod tests {
         let mut r = ResilientRemote::new(vec![addr], 0, test_params(), false);
         let err = r.align(&[0.0; 16], &["x".into()]).unwrap_err().to_string();
         assert!(err.contains("no word alignment model"), "{err}");
+    }
+
+    /// A worker in dial mode, halving every sample.
+    fn dialling_worker(player: String, params: MdxParams) {
+        let hello = Hello {
+            model: "identity".into(),
+            provider: "test".into(),
+            params,
+            align: false,
+        };
+        let runners: Vec<serve::Runner> = vec![Box::new(|w: &[f32], _| {
+            Ok(w.iter().map(|x| x * 0.5).collect())
+        })];
+        std::thread::spawn(move || {
+            serve::run_with(
+                serve::Mode::Dial {
+                    addr: player,
+                    connections: 2,
+                },
+                hello,
+                runners,
+                None,
+            )
+        });
+    }
+
+    #[test]
+    fn workers_can_dial_the_player() {
+        let hub = WorkerHub::listen("127.0.0.1:0", test_params()).unwrap();
+        let w = vec![0.4f32; 4096 * 2];
+        // nothing connected yet: fails after the wait instead of hanging
+        let t = Instant::now();
+        let err = hub
+            .call(Duration::from_secs(5), |c| c.run(&w, false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no separation worker connected"), "{err}");
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "with no worker at all, fail at once"
+        );
+
+        dialling_worker(hub.local_addr().to_string(), test_params());
+        let t = Instant::now();
+        while hub.connected() == 0 {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "worker never dialled in"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let out = hub
+            .call(Duration::from_secs(5), |c| c.run(&w, false))
+            .unwrap();
+        assert!((out[0] - 0.2).abs() < 1e-6);
+        // both of the worker's connections arrive
+        let t = Instant::now();
+        while hub.idle_count() < 2 {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "second connection never came"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn hub_refuses_workers_with_another_model() {
+        let hub = WorkerHub::listen("127.0.0.1:0", test_params()).unwrap();
+        let mut other = test_params();
+        other.n_fft = 1024;
+        dialling_worker(hub.local_addr().to_string(), other);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(hub.idle_count(), 0);
+    }
+
+    #[test]
+    fn hub_drops_dead_connections_and_uses_live_ones() {
+        let hub = WorkerHub::listen("127.0.0.1:0", test_params()).unwrap();
+        // a "worker" that greets, then dies
+        {
+            let mut s = TcpStream::connect(hub.local_addr()).unwrap();
+            let hello = serde_json::to_vec(&Hello {
+                model: "identity".into(),
+                provider: "test".into(),
+                params: test_params(),
+                align: false,
+            })
+            .unwrap();
+            s.write_all(MAGIC).unwrap();
+            write_u32(&mut s, hello.len() as u32).unwrap();
+            s.write_all(&hello).unwrap();
+        }
+        let t = Instant::now();
+        while hub.idle_count() < 1 {
+            assert!(t.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        dialling_worker(hub.local_addr().to_string(), test_params());
+        while hub.idle_count() < 3 {
+            assert!(t.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let w = vec![0.4f32; 4096 * 2];
+        for _ in 0..4 {
+            let out = hub
+                .call(Duration::from_secs(1), |c| c.run(&w, false))
+                .unwrap();
+            assert!((out[0] - 0.2).abs() < 1e-6);
+        }
+        assert_eq!(hub.idle_count(), 2, "the dead connection was dropped");
+        assert_eq!(hub.connected(), 2);
     }
 
     #[test]

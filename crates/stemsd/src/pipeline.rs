@@ -431,7 +431,7 @@ fn parse_device_type(s: &str) -> SpotifyDeviceType {
 
 /// `stemsd worker`: serve the configured model over TCP.
 #[cfg(feature = "onnx")]
-pub async fn run_worker(cfg: &Config, bind: &str) -> Result<()> {
+pub async fn run_worker(cfg: &Config, bind: &str, connect: Option<&str>) -> Result<()> {
     let models_dir = crate::config::paths()?.models_dir;
     let workers = cfg.karaoke.workers.max(1);
     let models = crate::separator::load_models(&cfg.karaoke, models_dir.clone(), workers).await?;
@@ -448,18 +448,43 @@ pub async fn run_worker(cfg: &Config, bind: &str) -> Result<()> {
         None
     };
     let align = aligner.is_some();
-    let listener =
-        std::net::TcpListener::bind(bind).map_err(|e| anyhow::anyhow!("bind {bind}: {e}"))?;
-    tracing::info!(
-        bind,
-        model = cfg.karaoke.model,
-        sessions = workers,
-        align,
-        "separation worker listening"
-    );
+    use stems_sep::remote::serve::Mode;
+    let mode = match connect {
+        Some(addr) => {
+            // `host` alone means the player's default worker port
+            let addr = if addr.contains(':') {
+                addr.to_string()
+            } else {
+                format!("{addr}:{}", crate::separator::LISTEN_PORT)
+            };
+            tracing::info!(
+                player = addr,
+                model = cfg.karaoke.model,
+                sessions = workers,
+                align,
+                "separation worker connecting to the player"
+            );
+            Mode::Dial {
+                addr,
+                connections: workers,
+            }
+        }
+        None => {
+            let listener = std::net::TcpListener::bind(bind)
+                .map_err(|e| anyhow::anyhow!("bind {bind}: {e}"))?;
+            tracing::info!(
+                bind,
+                model = cfg.karaoke.model,
+                sessions = workers,
+                align,
+                "separation worker listening"
+            );
+            Mode::Listen(listener)
+        }
+    };
     let name = cfg.karaoke.model.clone();
     let serve = tokio::task::spawn_blocking(move || {
-        stems_sep::remote::serve::run(listener, &name, models, aligner)
+        stems_sep::remote::serve::run(mode, &name, models, aligner)
     });
     tokio::select! {
         r = serve => r.map_err(|e| anyhow::anyhow!("worker task: {e}"))?,
@@ -471,7 +496,7 @@ pub async fn run_worker(cfg: &Config, bind: &str) -> Result<()> {
 }
 
 #[cfg(not(feature = "onnx"))]
-pub async fn run_worker(_cfg: &Config, _bind: &str) -> Result<()> {
+pub async fn run_worker(_cfg: &Config, _bind: &str, _connect: Option<&str>) -> Result<()> {
     Err(anyhow::anyhow!(
         "this build has no ONNX support; rebuild stemsd with `--features onnx`"
     ))

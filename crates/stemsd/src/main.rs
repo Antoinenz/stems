@@ -75,9 +75,14 @@ enum Cmd {
     /// Serve the configured MDX model to other stems instances
     /// (`backend = "remote"`). Uses [karaoke] model/device/workers.
     Worker {
-        /// Address to listen on.
+        /// Address to listen on for players (`remote = "host:7374"`).
         #[arg(long, default_value = "0.0.0.0:7374")]
         bind: String,
+        /// Instead of listening, dial the player (`host` or `host:port`;
+        /// the player sets `remote = "listen:7375"`). Nothing on this
+        /// machine accepts connections, so no firewall rule is needed.
+        #[arg(long, value_name = "PLAYER")]
+        connect: Option<String>,
     },
     /// Print the effective configuration and file locations (writes a
     /// default stems.toml if none exists).
@@ -168,9 +173,9 @@ fn main() -> Result<()> {
             std::mem::forget(rt);
             result
         }
-        Cmd::Worker { bind } => {
+        Cmd::Worker { bind, connect } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pipeline::run_worker(&cfg, &bind))
+            rt.block_on(pipeline::run_worker(&cfg, &bind, connect.as_deref()))
         }
         Cmd::Play {
             file,

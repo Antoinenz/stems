@@ -3,13 +3,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "onnx")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use stems_core::Separator;
 use stems_sep::CentreCancel;
+use stems_sep::remote::WorkerHub;
 
 use crate::config::KaraokeConfig;
 
@@ -249,6 +250,145 @@ impl LocalModel {
     }
 }
 
+/// Workers that dial in (`listen:` entries) share one hub per address for
+/// the whole process: separation and lyric alignment use the same one.
+fn hub_for(bind: &str, params: &stems_sep::MdxParams) -> Result<Arc<WorkerHub>> {
+    static HUBS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Arc<WorkerHub>>>> =
+        std::sync::OnceLock::new();
+    let mut hubs = HUBS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| anyhow!("worker hubs poisoned"))?;
+    if let Some(h) = hubs.get(bind) {
+        return Ok(Arc::clone(h));
+    }
+    let h = WorkerHub::listen(bind, params.clone())?;
+    hubs.insert(bind.to_string(), Arc::clone(&h));
+    Ok(h)
+}
+
+/// Port workers dial by default (`listen:` with no address).
+pub const LISTEN_PORT: u16 = 7375;
+
+/// Where the workers are, from `[karaoke] remote`: addresses to dial,
+/// and/or `listen:[host:]port` to accept workers started with
+/// `stemsd worker --connect`.
+struct WorkerTargets {
+    dial: Vec<String>,
+    hub: Option<Arc<WorkerHub>>,
+}
+
+impl WorkerTargets {
+    fn parse(spec: &str, params: &stems_sep::MdxParams) -> Result<Self> {
+        let mut dial = Vec::new();
+        let mut hub = None;
+        for entry in stems_sep::remote::parse_addrs(spec) {
+            match entry.strip_prefix("listen:") {
+                Some(rest) => {
+                    anyhow::ensure!(
+                        hub.is_none(),
+                        "only one `listen:` entry in [karaoke] remote"
+                    );
+                    hub = Some(hub_for(&listen_addr(rest), params)?);
+                }
+                None if entry == "listen" => {
+                    anyhow::ensure!(
+                        hub.is_none(),
+                        "only one `listen:` entry in [karaoke] remote"
+                    );
+                    hub = Some(hub_for(&listen_addr(""), params)?);
+                }
+                None => dial.push(entry),
+            }
+        }
+        anyhow::ensure!(
+            !dial.is_empty() || hub.is_some(),
+            "backend = \"remote\" needs [karaoke] remote: worker addresses (\"192.168.1.50:7374\") \
+             and/or \"listen:{LISTEN_PORT}\" for workers started with `stemsd worker --connect`"
+        );
+        Ok(Self { dial, hub })
+    }
+
+    /// The connection(s) for runner `i`.
+    fn link(&self, i: usize, params: &stems_sep::MdxParams, denoise: bool) -> WorkerLink {
+        WorkerLink {
+            hub: self.hub.clone(),
+            dial: (!self.dial.is_empty()).then(|| {
+                stems_sep::remote::ResilientRemote::new(
+                    self.dial.clone(),
+                    i,
+                    params.clone(),
+                    denoise,
+                )
+            }),
+            denoise,
+        }
+    }
+}
+
+/// `""` → all interfaces on the default port; `"7375"` → all interfaces;
+/// anything with a colon is used as given.
+fn listen_addr(rest: &str) -> String {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        format!("0.0.0.0:{LISTEN_PORT}")
+    } else if rest.contains(':') {
+        rest.to_string()
+    } else {
+        format!("0.0.0.0:{rest}")
+    }
+}
+
+/// How long a window waits for a busy dialled-in worker. With no worker
+/// connected at all it fails at once (so a fallback can take over).
+const HUB_WAIT: Duration = Duration::from_secs(30);
+
+/// One runner's way to the workers: those that dialled in, then those
+/// to dial.
+struct WorkerLink {
+    hub: Option<Arc<WorkerHub>>,
+    dial: Option<stems_sep::remote::ResilientRemote>,
+    denoise: bool,
+}
+
+impl WorkerLink {
+    fn run(&mut self, w: &[f32]) -> Result<Vec<f32>> {
+        let denoise = self.denoise;
+        self.call(|c| c.run(w, denoise), |d| d.run(w))
+    }
+
+    #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+    fn align(
+        &mut self,
+        audio16k: &[f32],
+        words: &[String],
+    ) -> Result<Option<Vec<stems_sep::words::WordSpan>>> {
+        self.call(|c| c.align(audio16k, words), |d| d.align(audio16k, words))
+    }
+
+    fn call<T>(
+        &mut self,
+        on_hub: impl FnMut(&mut stems_sep::remote::RemoteRunner) -> Result<T>,
+        on_dial: impl FnOnce(&mut stems_sep::remote::ResilientRemote) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(h) = &self.hub {
+            // with addresses to dial as well, only wait on the hub when a
+            // worker is actually there
+            if self.dial.is_none() || h.connected() > 0 {
+                match h.call(HUB_WAIT, on_hub) {
+                    Ok(v) => return Ok(v),
+                    Err(e) if self.dial.is_none() => return Err(e),
+                    Err(_) => {}
+                }
+            }
+        }
+        match self.dial.as_mut() {
+            Some(d) => on_dial(d),
+            None => Err(anyhow!("no separation worker connected")),
+        }
+    }
+}
+
 /// Window runners for the configured backend: in-process model sessions
 /// or connections to `stemsd worker`s (with an optional local fallback).
 /// Local windows run under `gov`.
@@ -288,18 +428,13 @@ async fn build_runners(
             })
         }
         "remote" => {
-            use stems_sep::remote::{ResilientRemote, parse_addrs};
-            let addrs = parse_addrs(&cfg.remote);
-            anyhow::ensure!(
-                !addrs.is_empty(),
-                "backend = \"remote\" needs `remote = \"host:port\"` (or a comma-separated list) in [karaoke]"
-            );
             let (_, params) = stems_sep::known_model(&cfg.model).ok_or_else(|| {
                 anyhow!(
                     "unknown MDX model `{}`: set [karaoke] model to the model the worker runs",
                     cfg.model
                 )
             })?;
+            let targets = WorkerTargets::parse(&cfg.remote, &params)?;
             let policy = Fallback::parse(&cfg.local_fallback)?;
             #[cfg(feature = "onnx")]
             let local: Option<Arc<LocalModel>> = if policy == Fallback::Never {
@@ -328,8 +463,7 @@ async fn build_runners(
             #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
             let mut runners: Vec<WindowRunner> = (0..n)
                 .map(|i| -> WindowRunner {
-                    let mut remote =
-                        ResilientRemote::new(addrs.clone(), i, params.clone(), denoise);
+                    let mut remote = targets.link(i, &params, denoise);
                     #[cfg(feature = "onnx")]
                     let fallback = local.clone().filter(|_| policy == Fallback::WhenNoWorker);
                     #[cfg(feature = "onnx")]
@@ -353,7 +487,8 @@ async fn build_runners(
                 }));
             }
             tracing::info!(
-                workers = ?addrs,
+                dial = ?targets.dial,
+                listen = targets.hub.as_ref().map(|h| h.local_addr().to_string()),
                 connections = n,
                 local_fallback = cfg.local_fallback,
                 "remote separation (connects on first use)"
@@ -381,10 +516,9 @@ pub async fn build_align_backend(
     if cfg.backend != "remote" {
         return Ok(Box::new(build_aligner(models_dir, cfg.threads).await?));
     }
-    use stems_sep::remote::{ResilientRemote, parse_addrs};
     let (_, params) = stems_sep::known_model(&cfg.model)
         .ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
-    let remote = ResilientRemote::new(parse_addrs(&cfg.remote), 0, params, cfg.denoise);
+    let remote = WorkerTargets::parse(&cfg.remote, &params)?.link(0, &params, cfg.denoise);
     let local = match Fallback::parse(&cfg.local_fallback)? {
         Fallback::Never => None,
         _ => Some(build_aligner(models_dir, cfg.threads).await?),
@@ -399,7 +533,7 @@ pub async fn build_align_backend(
 /// Alignment on a worker, with an optional local fallback.
 #[cfg(feature = "onnx")]
 struct RemoteAligner {
-    remote: stems_sep::remote::ResilientRemote,
+    remote: WorkerLink,
     local: Option<stems_sep::align::Aligner>,
     announced: bool,
 }
@@ -548,6 +682,26 @@ mod tests {
 
     /// Two threads hammering the GPU stand-in never overlap and leave
     /// the configured idle fraction between windows.
+    #[test]
+    fn listen_addresses() {
+        assert_eq!(listen_addr(""), "0.0.0.0:7375");
+        assert_eq!(listen_addr("7400"), "0.0.0.0:7400");
+        assert_eq!(listen_addr("192.168.1.2:7400"), "192.168.1.2:7400");
+    }
+
+    #[test]
+    fn worker_targets_need_somewhere_to_go() {
+        let (_, params) = stems_sep::known_model("UVR-MDX-NET-Inst_HQ_3").unwrap();
+        assert!(WorkerTargets::parse("", &params).is_err());
+        let t = WorkerTargets::parse("10.0.0.2:7374, 10.0.0.3:7374", &params).unwrap();
+        assert_eq!(t.dial.len(), 2);
+        assert!(t.hub.is_none());
+        let t = WorkerTargets::parse("listen:127.0.0.1:0, 10.0.0.2:7374", &params).unwrap();
+        assert!(t.hub.is_some());
+        assert_eq!(t.dial, vec!["10.0.0.2:7374"]);
+        assert!(WorkerTargets::parse("listen:127.0.0.1:0, listen:127.0.0.1:0", &params).is_err());
+    }
+
     #[test]
     fn governor_serialises_and_paces() {
         let gov = Arc::new(Governor::new(0.5));
