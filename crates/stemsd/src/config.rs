@@ -270,7 +270,16 @@ pub struct Paths {
     pub library_dir: PathBuf,
 }
 
+/// Environment variable that moves every stems file under one folder
+/// ("portable mode"): `stems.toml`, models, caches and the default
+/// library. For a worker run from a USB stick or a borrowed laptop:
+/// deleting the folder removes everything.
+pub const HOME_ENV: &str = "STEMS_HOME";
+
 pub fn paths() -> Result<Paths> {
+    if let Some(home) = std::env::var_os(HOME_ENV).filter(|h| !h.is_empty()) {
+        return Ok(paths_under(&PathBuf::from(home)));
+    }
     let dirs = ProjectDirs::from("", "", "stems").context("no home directory")?;
     Ok(Paths {
         config_file: dirs.config_dir().join("stems.toml"),
@@ -280,6 +289,19 @@ pub fn paths() -> Result<Paths> {
         stems_dir: dirs.cache_dir().join("stems"),
         library_dir: dirs.data_dir().join("library"),
     })
+}
+
+/// Layout under a single folder (portable mode).
+fn paths_under(home: &std::path::Path) -> Paths {
+    let cache = home.join("cache");
+    Paths {
+        config_file: home.join("stems.toml"),
+        models_dir: cache.join("models"),
+        video_dir: cache.join("video"),
+        stems_dir: cache.join("stems"),
+        library_dir: home.join("library"),
+        cache_dir: cache,
+    }
 }
 
 impl Config {
@@ -389,6 +411,23 @@ mod tests {
         assert_eq!(c.spotify.bitrate, 160);
         assert_eq!(c.sink, "cpal");
         assert!(c.spotify.enabled);
+    }
+
+    #[test]
+    fn portable_layout_keeps_everything_in_one_folder() {
+        let home = PathBuf::from("/Volumes/USB/stems-worker/data");
+        let p = paths_under(&home);
+        for path in [
+            &p.config_file,
+            &p.cache_dir,
+            &p.models_dir,
+            &p.video_dir,
+            &p.stems_dir,
+            &p.library_dir,
+        ] {
+            assert!(path.starts_with(&home), "{path:?}");
+        }
+        assert_eq!(p.config_file, home.join("stems.toml"));
     }
 
     #[test]

@@ -135,6 +135,10 @@ fn main() -> Result<()> {
             let created = Config::ensure_exists()?;
             println!("config file: {} ", created.display());
             println!("cache dir:   {}", p.cache_dir.display());
+            println!("models:      {}", p.models_dir.display());
+            if std::env::var_os(config::HOME_ENV).is_some_and(|h| !h.is_empty()) {
+                println!("(portable: everything under {})", config::HOME_ENV);
+            }
             println!("library:     {}", cfg.library_dir()?.display());
             println!();
             print!("{}", toml::to_string_pretty(&cfg)?);
