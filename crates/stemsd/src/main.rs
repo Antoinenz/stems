@@ -84,6 +84,22 @@ enum Cmd {
         #[arg(long, value_name = "PLAYER")]
         connect: Option<String>,
     },
+    /// Time the separation model on this machine (no network needed) to
+    /// see whether it is fast enough to be a worker.
+    Bench {
+        /// Override [karaoke] device (cpu, directml, cuda, coreml, …).
+        #[arg(long)]
+        device: Option<String>,
+        /// Override [karaoke] workers (parallel model sessions).
+        #[arg(long)]
+        sessions: Option<usize>,
+        /// Windows per session.
+        #[arg(long, default_value_t = 8)]
+        windows: usize,
+        /// The player's hop_ms, for the speed estimate.
+        #[arg(long, default_value_t = 2000)]
+        hop_ms: u64,
+    },
     /// Print the effective configuration and file locations (writes a
     /// default stems.toml if none exists).
     Config,
@@ -172,6 +188,21 @@ fn main() -> Result<()> {
             // librespot's session tasks can panic while the runtime is torn down
             std::mem::forget(rt);
             result
+        }
+        Cmd::Bench {
+            device,
+            sessions,
+            windows,
+            hop_ms,
+        } => {
+            if let Some(d) = device {
+                cfg.karaoke.device = d;
+            }
+            if let Some(n) = sessions {
+                cfg.karaoke.workers = n;
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pipeline::run_bench(&cfg, windows, hop_ms))
         }
         Cmd::Worker { bind, connect } => {
             let rt = tokio::runtime::Runtime::new()?;

@@ -429,6 +429,108 @@ fn parse_device_type(s: &str) -> SpotifyDeviceType {
     })
 }
 
+/// `stemsd bench`: time the separation model on this machine, so a
+/// would-be worker can be judged in a minute without a player or a
+/// network. Uses [karaoke] model/device/workers unless overridden.
+#[cfg(feature = "onnx")]
+pub async fn run_bench(cfg: &Config, windows: usize, hop_ms: u64) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let models_dir = crate::config::paths()?.models_dir;
+    let sessions = cfg.karaoke.workers.max(1);
+    println!(
+        "loading {} on `{}` ({} session{}) …",
+        cfg.karaoke.model,
+        cfg.karaoke.device,
+        sessions,
+        if sessions == 1 { "" } else { "s" }
+    );
+    let mut models = crate::separator::load_models(&cfg.karaoke, models_dir, sessions).await?;
+    let provider = models[0].provider();
+    let chunk = models[0].params().chunk_size();
+    let window_s = chunk as f64 / stems_core::SAMPLE_RATE as f64;
+    let windows = windows.max(2);
+    let report = tokio::task::spawn_blocking(move || -> Result<String> {
+        // music-like input: silence lets some providers take shortcuts
+        let input: Vec<f32> = (0..chunk)
+            .flat_map(|i| {
+                let t = i as f32 / 44_100.0;
+                let v = 0.3 * (t * 220.0 * std::f32::consts::TAU).sin()
+                    + 0.2 * (t * 331.0 * std::f32::consts::TAU).sin()
+                    + 0.05 * (((i * 7919) % 1000) as f32 / 500.0 - 1.0);
+                [v, 0.8 * v]
+            })
+            .collect();
+        // one session, back to back
+        let mut times: Vec<Duration> = Vec::with_capacity(windows);
+        for _ in 0..windows {
+            let t = Instant::now();
+            let out = models[0].instrumental_for_window_opt(&input, false)?;
+            anyhow::ensure!(
+                out.iter().all(|x| x.is_finite()),
+                "the model produced invalid numbers on this device"
+            );
+            times.push(t.elapsed());
+        }
+        times.sort();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let median = times[times.len() / 2];
+        // every session at once, as the worker runs them
+        let started = Instant::now();
+        std::thread::scope(|s| -> Result<()> {
+            let handles: Vec<_> = models
+                .iter_mut()
+                .map(|m| {
+                    let input = &input;
+                    s.spawn(move || -> Result<()> {
+                        for _ in 0..windows {
+                            m.instrumental_for_window_opt(input, false)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join()
+                    .map_err(|_| anyhow::anyhow!("bench thread panicked"))??;
+            }
+            Ok(())
+        })?;
+        let per_s = (sessions * windows) as f64 / started.elapsed().as_secs_f64();
+        let hop_s = hop_ms as f64 / 1000.0;
+        let speed = per_s * hop_s;
+        let song = 240.0 / speed;
+        let verdict = if speed >= 2.0 {
+            "good: separates well ahead of playback"
+        } else if speed >= 1.0 {
+            "usable: keeps up, with little margin"
+        } else {
+            "too slow at this hop: raise hop_ms on the player or try another device"
+        };
+        Ok(format!(
+            "provider:     {provider}\n\
+             one window:   {:.0} ms median (min {:.0}, max {:.0}) for {window_s:.1} s of audio\n\
+             throughput:   {per_s:.2} windows/s with {sessions} session(s) at once\n\
+             import speed: {speed:.1}× realtime at hop {hop_s:.1} s \
+             (a 4-minute song in {song:.0} s)\n\
+             verdict:      {verdict}",
+            ms(median),
+            ms(times[0]),
+            ms(*times.last().expect("windows >= 2")),
+        ))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("bench task: {e}"))??;
+    println!("\n{report}");
+    Ok(())
+}
+
+#[cfg(not(feature = "onnx"))]
+pub async fn run_bench(_cfg: &Config, _windows: usize, _hop_ms: u64) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "this build has no ONNX support; rebuild stemsd with `--features onnx`"
+    ))
+}
+
 /// `stemsd worker`: serve the configured model over TCP.
 #[cfg(feature = "onnx")]
 pub async fn run_worker(cfg: &Config, bind: &str, connect: Option<&str>) -> Result<()> {
