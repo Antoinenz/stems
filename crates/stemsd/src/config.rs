@@ -159,7 +159,8 @@ impl Default for VideoConfig {
 #[serde(default)]
 pub struct KaraokeConfig {
     /// `dsp` (centre-cancel, instant), `mdx` (MDX-Net ONNX model in
-    /// process) or `remote` (windows sent to a `stemsd worker`).
+    /// process), `remote` (windows sent to a `stemsd worker`) or, for
+    /// imports only, `spool` (whole tracks handed to an external daemon).
     pub backend: String,
     /// Model name for `mdx`, e.g. `UVR-MDX-NET-Inst_HQ_3` or `Kim_Vocal_2`.
     pub model: String,
@@ -205,6 +206,10 @@ pub struct KaraokeConfig {
     /// ≈40 MB per 4-minute track) up to this many MB, oldest evicted
     /// first, so a replayed track costs nothing. 0 disables.
     pub stem_cache_mb: u64,
+    /// For `backend = "spool"` (imports only): the folder an external
+    /// separator daemon watches (see `farm/cloud/separator.py`). Empty =
+    /// `<cache dir>/spool`.
+    pub spool_dir: String,
 }
 
 impl Default for KaraokeConfig {
@@ -225,6 +230,7 @@ impl Default for KaraokeConfig {
             fade_ms: 400,
             gpu_limit: 1.0,
             stem_cache_mb: 4096,
+            spool_dir: String::new(),
         }
     }
 }
@@ -392,7 +398,7 @@ impl Config {
 }
 
 /// `~/…` → the home directory.
-fn expand_home(p: &str) -> PathBuf {
+pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => directories::BaseDirs::new()
             .map(|b| b.home_dir().join(rest))

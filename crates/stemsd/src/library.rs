@@ -145,6 +145,15 @@ fn summary(lib: &Library, e: &Entry, full: bool) -> Value {
         "words": e.stages.words.is_done(),
         "video": e.stages.video.is_done(),
     });
+    // for sorting and browsing: tempo, danceability, genre, year
+    if let Some(a) = &e.analysis {
+        v["bpm"] = json!(a.bpm);
+        v["danceability"] = json!(a.danceability);
+        v["genre"] = json!(a.main_genre());
+    }
+    if let Some(y) = e.info.year() {
+        v["year"] = json!(y);
+    }
     if full {
         v["complete"] = json!(e.is_complete());
         v["stages"] = json!(e.stages);
@@ -152,6 +161,9 @@ fn summary(lib: &Library, e: &Entry, full: bool) -> Value {
         v["video_offset_ms"] = json!(e.video_offset_ms);
         v["video_corr"] = json!(e.video_corr);
         v["added_at"] = json!(e.added_at);
+        v["stems_model"] = json!(e.stems_model);
+        v["analysis"] = json!(e.analysis);
+        v["info"] = json!(e.info);
     }
     v
 }
@@ -240,7 +252,7 @@ async fn worker(
         };
         let titles: Vec<String> = tracks
             .iter()
-            .map(|t| format!("{} — {}", t.artists_joined(), t.title))
+            .map(|t| format!("{} — {}", t.track.artists_joined(), t.track.title))
             .collect();
         set(&|s| s.waiting.extend(titles.iter().cloned()));
         for (t, title) in tracks.into_iter().zip(titles) {

@@ -2,15 +2,20 @@
   {
     "added_at": 1791333000,
     "album": null,
+    "analysis": null,
     "art": null,
     "artists": [],
     "complete": false,
     "duration_ms": 61000,
+    "info": {},
     "key": "local_demo_00ff00ff00ff00ff",
     "loudness_lufs": null,
     "lyrics": false,
     "playable": true,
     "stages": {
+      "analysis": {
+        "state": "pending"
+      },
       "audio": {
         "state": "done"
       },
@@ -34,6 +39,7 @@
         "state": "pending"
       }
     },
+    "stems_model": null,
     "title": "Demo",
     "video": false,
     "video_corr": null,
@@ -43,18 +49,46 @@
   {
     "added_at": 1791332963,
     "album": "Album",
+    "analysis": {
+      "analyzer": "essentia",
+      "bpm": 140.10000610351562,
+      "danceability": 0.8600000143051147,
+      "genres": [
+        {
+          "name": "Hip Hop / Trap",
+          "score": 0.6399999856948853
+        }
+      ],
+      "key": "D minor",
+      "moods": {
+        "happy": 0.3199999928474426,
+        "party": 0.7099999785423279
+      }
+    },
     "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
     "artists": [
       "JAY-Z",
       "Kanye West"
     ],
+    "bpm": 140.10000610351562,
     "complete": true,
+    "danceability": 0.8600000143051147,
     "duration_ms": 219333,
+    "genre": "Hip Hop",
+    "info": {
+      "explicit": true,
+      "label": "Roc-A-Fella",
+      "popularity": 78,
+      "release_date": "2011-08-08"
+    },
     "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
     "loudness_lufs": -8.899999618530273,
     "lyrics": true,
     "playable": true,
     "stages": {
+      "analysis": {
+        "state": "done"
+      },
       "audio": {
         "state": "done"
       },
@@ -77,10 +111,12 @@
         "state": "done"
       }
     },
+    "stems_model": "model_bs_roformer_ep_317_sdr_12.9755",
     "title": "Ni**as In Paris",
     "video": true,
     "video_corr": 0.8199999928474426,
     "video_offset_ms": 350,
-    "words": true
+    "words": true,
+    "year": 2011
   }
 ]

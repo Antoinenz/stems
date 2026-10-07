@@ -24,6 +24,7 @@
       "model": "UVR-MDX-NET-Inst_HQ_3",
       "remote": "",
       "slack_ms": 2000,
+      "spool_dir": "",
       "stem_cache_mb": 4096,
       "threads": 0,
       "workers": 1

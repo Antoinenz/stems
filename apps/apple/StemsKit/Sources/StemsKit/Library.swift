@@ -51,9 +51,11 @@ public struct Stages: Codable, Hashable, Sendable {
     public var video: StageState
     public var videoAlign: StageState
     public var cover: StageState
+    /// Optional: tempo, key, danceability, genres.
+    public var analysis: StageState
 
     enum CodingKeys: String, CodingKey {
-        case audio, stems, lyrics, words, video, cover
+        case audio, stems, lyrics, words, video, cover, analysis
         case videoAlign = "video_align"
     }
 
@@ -76,6 +78,7 @@ public struct Stages: Codable, Hashable, Sendable {
         video = try get(.video)
         videoAlign = try get(.videoAlign)
         cover = try get(.cover)
+        analysis = try get(.analysis)
     }
 }
 
@@ -92,6 +95,12 @@ public struct LibraryTrack: Codable, Hashable, Identifiable, Sendable {
     /// Lyrics have word timings.
     public var words: Bool
     public var video: Bool
+    /// From the audio analysis, when it ran (for sorting and browsing).
+    public var bpm: Double?
+    public var danceability: Double?
+    /// Top genre, e.g. `Hip Hop`.
+    public var genre: String?
+    public var year: Int?
     // Host view only:
     public var complete: Bool?
     public var stages: Stages?
@@ -99,12 +108,16 @@ public struct LibraryTrack: Codable, Hashable, Identifiable, Sendable {
     public var videoOffsetMs: Int?
     public var videoCorr: Double?
     public var addedAt: Int?
+    /// Which separation model made the instrumental.
+    public var stemsModel: String?
 
     public var id: String { key }
     public var artistLine: String { artists.joined(separator: ", ") }
 
     enum CodingKeys: String, CodingKey {
         case key, title, artists, album, art, playable, lyrics, words, video, complete, stages
+        case bpm, danceability, genre, year
+        case stemsModel = "stems_model"
         case durationMs = "duration_ms"
         case loudnessLufs = "loudness_lufs"
         case videoOffsetMs = "video_offset_ms"
@@ -130,6 +143,11 @@ public struct LibraryTrack: Codable, Hashable, Identifiable, Sendable {
         videoOffsetMs = try c.decodeIfPresent(Int.self, forKey: .videoOffsetMs)
         videoCorr = try c.decodeIfPresent(Double.self, forKey: .videoCorr)
         addedAt = try c.decodeIfPresent(Int.self, forKey: .addedAt)
+        bpm = try c.decodeIfPresent(Double.self, forKey: .bpm)
+        danceability = try c.decodeIfPresent(Double.self, forKey: .danceability)
+        genre = try c.decodeIfPresent(String.self, forKey: .genre)
+        year = try c.decodeIfPresent(Int.self, forKey: .year)
+        stemsModel = try c.decodeIfPresent(String.self, forKey: .stemsModel)
     }
 }
 

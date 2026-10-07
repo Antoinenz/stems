@@ -14,6 +14,7 @@ mod pipeline;
 mod player;
 mod separator;
 mod settings;
+mod spool;
 mod status;
 mod web;
 
@@ -71,8 +72,15 @@ enum Cmd {
     /// links, audio files or folders. Re-running resumes unfinished
     /// tracks and retries failed steps.
     Import {
-        #[arg(required = true)]
         sources: Vec<String>,
+        /// Only work on these stages (comma separated): audio, stems,
+        /// analysis, lyrics, words, video, video_align, cover. E.g. a GPU
+        /// box runs `audio,stems,analysis` and another machine the rest.
+        #[arg(long, value_name = "LIST")]
+        stages: Option<String>,
+        /// Also finish every library track with work left (in --stages).
+        #[arg(long)]
+        resume: bool,
     },
     /// List output devices.
     Devices,
@@ -201,9 +209,14 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pipeline::run_library(&cfg, web_dir, &sink))
         }
-        Cmd::Import { sources } => {
+        Cmd::Import {
+            sources,
+            stages,
+            resume,
+        } => {
+            let stages = stages.as_deref().map(import::parse_stages).transpose()?;
             let rt = tokio::runtime::Runtime::new()?;
-            let result = rt.block_on(import::run(&cfg, &sources));
+            let result = rt.block_on(import::run(&cfg, &sources, stages, resume));
             // librespot's session tasks can panic while the runtime is torn down
             std::mem::forget(rt);
             result

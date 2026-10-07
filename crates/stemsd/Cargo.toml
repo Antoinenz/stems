@@ -35,6 +35,7 @@ stems-source-spotify.workspace = true
 stems-server.workspace = true
 stems-enrich.workspace = true
 stems-library.workspace = true
+hound.workspace = true
 ebur128 = "0.1"
 sysinfo = { version = "0.36", default-features = false, features = ["disk"] }
 stems-sep.workspace = true

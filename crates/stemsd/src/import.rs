@@ -10,15 +10,46 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, anyhow, bail};
-use stems_core::{Lyrics, TrackId, TrackRef};
+use stems_core::{Lyrics, TrackId, TrackInfo, TrackRef};
 use stems_enrich::{LocalLyrics, LrcLib, VideoFetcher};
-use stems_library::{Entry, Library, Stage};
+use stems_library::{Entry, Library, Playlist, Stage};
 use stems_sep::{OfflineSeparator, StemBuffer};
 use stems_source_spotify::Bitrate;
-use stems_source_spotify::import::{ImportSession, Link};
+use stems_source_spotify::import::{ImportSession, Link, ResolvedTrack};
 
 use crate::config::Config;
+use crate::spool::Spool;
+
+/// Import stages by name, in pipeline order (`--stages`).
+pub const STAGES: &[&str] = &[
+    "audio",
+    "stems",
+    "analysis",
+    "lyrics",
+    "words",
+    "video",
+    "video_align",
+    "cover",
+];
+
+/// `--stages audio,stems` → the set; unknown names are an error.
+pub fn parse_stages(list: &str) -> Result<BTreeSet<&'static str>> {
+    let mut out = BTreeSet::new();
+    for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        let known = STAGES
+            .iter()
+            .find(|s| **s == name)
+            .ok_or_else(|| anyhow!("unknown stage `{name}` (known: {})", STAGES.join(", ")))?;
+        out.insert(*known);
+    }
+    if out.is_empty() {
+        bail!("no stages given");
+    }
+    Ok(out)
+}
 
 /// Audio file types accepted for local import.
 const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav", "opus"];
@@ -96,6 +127,9 @@ fn now() -> u64 {
 
 pub struct Importer {
     lib: Library,
+    /// Stages this run may work on (`None` = all).
+    stages: Option<BTreeSet<&'static str>>,
+    spool: Option<Spool>,
     spotify_dir: PathBuf,
     bitrate: Bitrate,
     spotify: Option<ImportSession>,
@@ -103,6 +137,8 @@ pub struct Importer {
     #[cfg(feature = "onnx")]
     aligner: Option<Box<dyn stems_sep::align::AlignBackend>>,
     want_words: bool,
+    /// Name of the local separation model, recorded on each entry.
+    local_model: String,
     lrclib: LrcLib,
     local_lyrics: LocalLyrics,
     video: Option<(String, u32)>,
@@ -113,11 +149,31 @@ impl Importer {
     /// Load the separation (and alignment) models per `cfg`. Without an
     /// ML backend tracks still import, with the stems stage failed.
     pub async fn new(cfg: &Config, lib: Library) -> Result<Self> {
+        Self::with_stages(cfg, lib, None).await
+    }
+
+    /// Like [`Importer::new`], working only on `stages` (models for the
+    /// others are not loaded).
+    pub async fn with_stages(
+        cfg: &Config,
+        lib: Library,
+        stages: Option<BTreeSet<&'static str>>,
+    ) -> Result<Self> {
         let paths = crate::config::paths()?;
+        let wants = |s: &str| stages.as_ref().is_none_or(|set| set.contains(s));
+        let spool = if cfg.karaoke.backend == "spool" {
+            let spool = crate::spool::from_config(&cfg.karaoke.spool_dir)?;
+            tracing::info!(dir = %spool.dir().display(), "separation and analysis go through the spool");
+            Some(spool)
+        } else {
+            None
+        };
         // no disk cache: instrumentals live in the library, and a cached
         // file from a live-stream decode may not be sample-aligned with
         // the stored original
-        let separator =
+        let separator = if spool.is_some() || !wants("stems") {
+            None
+        } else {
             match crate::separator::build_offline(&cfg.karaoke, paths.models_dir.clone(), None)
                 .await
             {
@@ -126,9 +182,10 @@ impl Importer {
                     tracing::warn!("no separation for imports: {e:#}");
                     None
                 }
-            };
+            }
+        };
         #[cfg(feature = "onnx")]
-        let aligner = if cfg.lyrics.align {
+        let aligner = if cfg.lyrics.align && wants("words") {
             match crate::separator::build_align_backend(&cfg.karaoke, paths.models_dir.clone())
                 .await
             {
@@ -148,6 +205,8 @@ impl Importer {
             .unwrap_or_default();
         Ok(Self {
             lib,
+            stages,
+            spool,
             spotify_dir: paths.cache_dir.join("spotify"),
             bitrate: match cfg.spotify.bitrate {
                 96 => Bitrate::Bitrate96,
@@ -159,6 +218,7 @@ impl Importer {
             #[cfg(feature = "onnx")]
             aligner,
             want_words: cfg.lyrics.align,
+            local_model: cfg.karaoke.model.clone(),
             lrclib: LrcLib::new(),
             local_lyrics: LocalLyrics::new(config_dir.join("lyrics")),
             video: cfg
@@ -178,21 +238,49 @@ impl Importer {
         Ok(self.spotify.as_ref().expect("just connected"))
     }
 
+    /// Whether this run works on `stage`. Analysis needs the spool.
+    fn wants(&self, stage: &str) -> bool {
+        (stage != "analysis" || self.spool.is_some())
+            && self.stages.as_ref().is_none_or(|set| set.contains(stage))
+    }
+
     /// Expand sources into tracks (albums and playlists become their
-    /// tracks), dropping duplicates.
-    pub async fn resolve(&mut self, sources: &[Source]) -> Result<Vec<TrackRef>> {
-        let mut out: Vec<TrackRef> = Vec::new();
+    /// tracks), dropping duplicates. Albums and playlists are recorded in
+    /// the library's `playlists/` so it can be browsed by them.
+    pub async fn resolve(&mut self, sources: &[Source]) -> Result<Vec<ResolvedTrack>> {
+        let mut out: Vec<ResolvedTrack> = Vec::new();
         for s in sources {
             let tracks = match s {
                 Source::Spotify(link) => {
-                    let t = self.spotify().await?.resolve(link).await?;
-                    tracing::info!(?link, tracks = t.len(), "resolved");
-                    t
+                    let r = self.spotify().await?.resolve(link).await?;
+                    tracing::info!(?link, tracks = r.tracks.len(), "resolved");
+                    if let Some(c) = &r.collection {
+                        let p = Playlist {
+                            id: format!("spotify_{}_{}", c.kind, c.id),
+                            kind: c.kind.to_string(),
+                            name: c.name.clone(),
+                            url: Some(c.url.clone()),
+                            description: c.description.clone(),
+                            tracks: r
+                                .tracks
+                                .iter()
+                                .map(|t| Library::key_for(&t.track.id))
+                                .collect(),
+                            updated_at: now(),
+                        };
+                        if let Err(e) = self.lib.save_playlist(&p) {
+                            tracing::warn!(name = %p.name, "saving playlist: {e:#}");
+                        }
+                    }
+                    r.tracks
                 }
-                Source::File(p) => vec![local_track(p)?],
+                Source::File(p) => vec![ResolvedTrack {
+                    track: local_track(p)?,
+                    info: TrackInfo::default(),
+                }],
             };
             for t in tracks {
-                if !out.iter().any(|o| o.id == t.id) {
+                if !out.iter().any(|o| o.track.id == t.track.id) {
                     out.push(t);
                 }
             }
@@ -200,10 +288,34 @@ impl Importer {
         Ok(out)
     }
 
+    /// Library tracks with work left in this run's stages (not handed off).
+    pub fn unfinished(&self) -> Result<Vec<ResolvedTrack>> {
+        Ok(self
+            .lib
+            .list()?
+            .into_iter()
+            .filter(|e| !self.lib.is_sent(&e.key))
+            .filter(|e| {
+                e.stages
+                    .iter_all()
+                    .any(|(name, st)| st.needs_work() && self.wants(name))
+            })
+            .map(|e| ResolvedTrack {
+                track: e.track,
+                info: e.info,
+            })
+            .collect())
+    }
+
     /// Run every stage of `track` that still needs work. Errors are
     /// recorded per stage; only library I/O failures are returned.
-    pub async fn import_track(&mut self, track: TrackRef) -> Result<Entry> {
+    pub async fn import_track(&mut self, item: ResolvedTrack) -> Result<Entry> {
+        let ResolvedTrack { track, info } = item;
         let key = Library::key_for(&track.id);
+        if self.lib.is_sent(&key) {
+            tracing::info!(title = %track.title, "already handed off to another machine; skipping");
+            return self.lib.get(&key)?.ok_or_else(|| anyhow!("{key} vanished"));
+        }
         let mut e = match self.lib.get(&key)? {
             Some(mut e) => {
                 // keep hand edits, fill in what the source knows better now
@@ -217,6 +329,9 @@ impl Importer {
             }
             None => Entry::new(key, track, now()),
         };
+        if !info.is_empty() {
+            e.info = info;
+        }
         self.lib.save(&e)?;
         let started = Instant::now();
         let title = format!("{} — {}", e.track.artists_joined(), e.track.title);
@@ -224,7 +339,7 @@ impl Importer {
         // audio: everything else depends on it
         let mix_missing = self.lib.files(&e).mix.is_none_or(|p| !p.is_file());
         let mut pcm: Option<Arc<Vec<f32>>> = None;
-        if e.stages.audio.needs_work() || mix_missing {
+        if (e.stages.audio.needs_work() || mix_missing) && self.wants("audio") {
             tracing::info!(track = %title, "fetching audio");
             match self.fetch_audio(&mut e).await {
                 Ok(p) => {
@@ -241,9 +356,14 @@ impl Importer {
             self.lib.save(&e)?;
         }
 
-        let need_pcm = e.stages.stems.needs_work()
-            || (self.want_words && e.stages.words.needs_work())
-            || e.stages.video_align.needs_work();
+        if !e.stages.audio.is_done() || (mix_missing && pcm.is_none()) {
+            // nothing else can run without the audio
+            return Ok(e);
+        }
+        let need_pcm = (self.wants("stems") && e.stages.stems.needs_work())
+            || (self.wants("analysis") && e.stages.analysis.needs_work())
+            || (self.wants("words") && self.want_words && e.stages.words.needs_work())
+            || (self.wants("video_align") && e.stages.video_align.needs_work());
         if need_pcm && pcm.is_none() {
             match self.decode_mix(&e).await {
                 Ok(p) => pcm = Some(p),
@@ -257,14 +377,26 @@ impl Importer {
             }
         }
 
-        // stems
+        // stems (and analysis) through the spool
         let mut buf: Option<Arc<StemBuffer>> = None;
-        if e.stages.stems.needs_work() {
+        let spool_stems = self.wants("stems") && e.stages.stems.needs_work();
+        let spool_analysis = self.wants("analysis") && e.stages.analysis.needs_work();
+        if self.spool.is_some() && (spool_stems || spool_analysis) {
+            let pcm = pcm.clone().expect("decoded above");
+            tracing::info!(track = %title, stems = spool_stems, analysis = spool_analysis, "sending to the spool");
+            self.run_spool(&mut e, &pcm, spool_stems, spool_analysis)
+                .await?;
+            self.lib.save(&e)?;
+        }
+
+        // stems
+        if self.spool.is_none() && self.wants("stems") && e.stages.stems.needs_work() {
             let pcm = pcm.clone().expect("decoded above");
             tracing::info!(track = %title, "separating");
             match self.separate(&e, pcm).await {
                 Ok(b) => {
                     e.stages.stems = Stage::Done;
+                    e.stems_model = Some(self.local_model.clone());
                     buf = Some(b);
                 }
                 Err(err) => {
@@ -275,8 +407,8 @@ impl Importer {
             self.lib.save(&e)?;
         }
         let need_buf = e.stages.stems.is_done()
-            && ((self.want_words && e.stages.words.needs_work())
-                || e.stages.video_align.needs_work());
+            && ((self.wants("words") && self.want_words && e.stages.words.needs_work())
+                || (self.wants("video_align") && e.stages.video_align.needs_work()));
         if need_buf && buf.is_none() {
             let pcm = pcm.clone().expect("decoded above");
             match self.lib.read_instrumental(&e) {
@@ -292,7 +424,7 @@ impl Importer {
 
         // lyrics
         let mut lyrics = self.lib.load_lyrics(&e).ok().flatten();
-        if e.stages.lyrics.needs_work() {
+        if self.wants("lyrics") && e.stages.lyrics.needs_work() {
             match self.find_lyrics(&e).await {
                 Ok(Some(l)) => {
                     self.lib.save_lyrics(&e, &l)?;
@@ -310,7 +442,7 @@ impl Importer {
         }
 
         // word timings
-        if e.stages.words.needs_work() {
+        if self.wants("words") && e.stages.words.needs_work() {
             e.stages.words = match (&lyrics, &buf) {
                 _ if !self.want_words => Stage::Skipped,
                 (Some(l), _) if !l.is_synced() => Stage::Skipped,
@@ -333,7 +465,7 @@ impl Importer {
         }
 
         // music video
-        if e.stages.video.needs_work() {
+        if self.wants("video") && e.stages.video.needs_work() {
             e.stages.video = match self.fetch_video(&e).await {
                 Ok(Some(())) => Stage::Done,
                 Ok(None) if self.video.is_none() => Stage::Skipped,
@@ -345,7 +477,7 @@ impl Importer {
             };
             self.lib.save(&e)?;
         }
-        if e.stages.video_align.needs_work() {
+        if self.wants("video_align") && e.stages.video_align.needs_work() {
             e.stages.video_align = if e.video_offset_ms.is_some() {
                 // set by hand or measured before: keep it
                 Stage::Done
@@ -367,7 +499,7 @@ impl Importer {
         }
 
         // cover art
-        if e.stages.cover.needs_work() {
+        if self.wants("cover") && e.stages.cover.needs_work() {
             e.stages.cover = match self.fetch_cover(&e).await {
                 Ok(true) => Stage::Done,
                 Ok(false) => Stage::Missing,
@@ -384,6 +516,74 @@ impl Importer {
             "imported"
         );
         Ok(e)
+    }
+
+    /// One spool job for the stems and/or the analysis of `e`. Failures are
+    /// recorded on the stages; only library I/O errors are returned.
+    async fn run_spool(
+        &mut self,
+        e: &mut Entry,
+        pcm: &[f32],
+        stems: bool,
+        analysis: bool,
+    ) -> Result<()> {
+        let spool = self.spool.clone().expect("checked by the caller");
+        let started = Instant::now();
+        let result = spool
+            .run(
+                &e.key,
+                &e.track.title,
+                &e.track.artists,
+                pcm,
+                stems,
+                analysis,
+            )
+            .await;
+        match result {
+            Ok(r) => {
+                if let Some(path) = r.instrumental {
+                    let lib = self.lib.clone();
+                    let entry = e.clone();
+                    tokio::task::spawn_blocking(move || {
+                        lib.install_instrumental_flac(&entry, &path)
+                    })
+                    .await
+                    .context("install task")??;
+                    e.stages.stems = Stage::Done;
+                    e.stems_model = r.model.clone();
+                    tracing::info!(
+                        title = %e.track.title,
+                        model = r.model.as_deref().unwrap_or("?"),
+                        secs = format!("{:.0}", started.elapsed().as_secs_f32()),
+                        "instrumental saved"
+                    );
+                }
+                if analysis {
+                    match (r.analysis, r.analysis_error) {
+                        (Some(a), _) => {
+                            tracing::info!(title = %e.track.title, bpm = ?a.bpm, danceability = ?a.danceability, genre = ?a.main_genre(), "analysed");
+                            e.analysis = Some(a);
+                            e.stages.analysis = Stage::Done;
+                        }
+                        (None, Some(err)) => e.stages.analysis = Stage::failed(err),
+                        (None, None) => {
+                            e.stages.analysis = Stage::failed("the separator returned no analysis")
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(title = %e.track.title, "spool job failed: {err:#}");
+                if stems {
+                    e.stages.stems = Stage::failed(&err);
+                }
+                if analysis {
+                    e.stages.analysis = Stage::failed(&err);
+                }
+            }
+        }
+        spool.clean(&e.key);
+        Ok(())
     }
 
     /// Store the original audio in the track folder, decode it, measure
@@ -482,6 +682,7 @@ impl Importer {
         let inst = buf.instrumental();
         let lib = self.lib.clone();
         let entry = e.clone();
+        // (the model name is recorded by the caller)
         tokio::task::spawn_blocking(move || lib.write_instrumental(&entry, &inst))
             .await
             .context("write task")??;
@@ -671,16 +872,36 @@ pub fn report(entries: &[Entry]) -> String {
 }
 
 /// `stemsd import`: resolve, import one track at a time, print a report.
-pub async fn run(cfg: &Config, args: &[String]) -> Result<()> {
+/// With `resume`, also every library track with work left in `stages`.
+pub async fn run(
+    cfg: &Config,
+    args: &[String],
+    stages: Option<BTreeSet<&'static str>>,
+    resume: bool,
+) -> Result<()> {
+    if args.is_empty() && !resume {
+        bail!("nothing to import: give Spotify links or audio files, or --resume");
+    }
     let sources = parse_sources(args)?;
     let lib = Library::open(cfg.library_dir()?)?;
-    tracing::info!(library = %lib.dir().display(), "importing");
-    let mut importer = Importer::new(cfg, lib).await?;
-    let tracks = importer.resolve(&sources).await?;
+    tracing::info!(library = %lib.dir().display(), ?stages, "importing");
+    let mut importer = Importer::with_stages(cfg, lib, stages).await?;
+    let mut tracks = if sources.is_empty() {
+        Vec::new()
+    } else {
+        importer.resolve(&sources).await?
+    };
+    if resume {
+        for t in importer.unfinished()? {
+            if !tracks.iter().any(|o| o.track.id == t.track.id) {
+                tracks.push(t);
+            }
+        }
+    }
     let total = tracks.len();
     let mut done = Vec::with_capacity(total);
     for (i, t) in tracks.into_iter().enumerate() {
-        tracing::info!(n = i + 1, of = total, title = %t.title, "importing track");
+        tracing::info!(n = i + 1, of = total, title = %t.track.title, "importing track");
         done.push(importer.import_track(t).await?);
     }
     println!("\n{}", report(&done));

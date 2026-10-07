@@ -136,6 +136,12 @@ func decode<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
         #expect(full.stages?.all.allSatisfy { $0.state.isDone } == true)
         #expect(full.videoOffsetMs == 350)
         #expect(full.loudnessLufs != nil)
+        #expect(full.stages?.analysis == .done)
+        #expect(full.genre == "Hip Hop")
+        #expect(full.year == 2011)
+        #expect(abs((full.danceability ?? 0) - 0.86) < 1e-4)
+        #expect(full.stemsModel?.contains("roformer") == true)
+        #expect(demo.bpm == nil)
 
         let guest = try decode([LibraryTrack].self, "library_guest")
         #expect(guest.count == 2)

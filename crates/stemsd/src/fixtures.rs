@@ -193,6 +193,26 @@ fn library(name: &str) -> Library {
     done.loudness_lufs = Some(-8.9);
     done.video_offset_ms = Some(350);
     done.video_corr = Some(0.82);
+    done.stems_model = Some("model_bs_roformer_ep_317_sdr_12.9755".into());
+    done.info = stems_core::TrackInfo {
+        release_date: Some("2011-08-08".into()),
+        label: Some("Roc-A-Fella".into()),
+        popularity: Some(78),
+        explicit: Some(true),
+        ..Default::default()
+    };
+    done.analysis = Some(stems_library::Analysis {
+        bpm: Some(140.1),
+        key: Some("D minor".into()),
+        danceability: Some(0.86),
+        moods: [("party".to_string(), 0.71f32), ("happy".to_string(), 0.32)].into(),
+        genres: vec![stems_library::Genre {
+            name: "Hip Hop / Trap".into(),
+            score: 0.64,
+        }],
+        analyzer: Some("essentia".into()),
+        ..Default::default()
+    });
     for s in [
         &mut done.stages.audio,
         &mut done.stages.stems,
@@ -201,6 +221,7 @@ fn library(name: &str) -> Library {
         &mut done.stages.video,
         &mut done.stages.video_align,
         &mut done.stages.cover,
+        &mut done.stages.analysis,
     ] {
         *s = Stage::Done;
     }

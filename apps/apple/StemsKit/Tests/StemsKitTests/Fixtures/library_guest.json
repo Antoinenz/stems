@@ -18,12 +18,16 @@
       "JAY-Z",
       "Kanye West"
     ],
+    "bpm": 140.10000610351562,
+    "danceability": 0.8600000143051147,
     "duration_ms": 219333,
+    "genre": "Hip Hop",
     "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
     "lyrics": true,
     "playable": true,
     "title": "Ni**as In Paris",
     "video": true,
-    "words": true
+    "words": true,
+    "year": 2011
   }
 ]
