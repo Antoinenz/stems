@@ -270,6 +270,38 @@ With `[lyrics] align` (the default) the worker also loads the speech model and i
 lyric words there too, so with `local_fallback = "never"` an import runs no model at all on
 the player.
 
+**Workers can dial the player instead** — for a laptop whose firewall you cannot (or should
+not) change, nothing on it then accepts connections:
+
+```sh
+stemsd worker --connect 192.168.1.10      # the player's address; port 7375 by default
+```
+
+```toml
+# on the player
+[karaoke]
+backend = "remote"
+remote = "listen:7375"   # accept workers; may be combined with addresses to dial
+```
+
+The worker keeps one connection per model session open and redials whenever one drops;
+the player uses whatever workers are connected, round robin.
+
+**Is a machine fast enough?** `stemsd bench` (optionally `--device cpu|directml|cuda|…`,
+`--sessions N`) times the model there without a player or network and prints the import speed
+it implies, e.g. `4.1× realtime at hop 2.0 s (a 4-minute song in 59 s)` on an M1 Air's GPU.
+
+**Portable mode:** with `STEMS_HOME=<folder>` every file stems uses — config, models, caches,
+library — lives in that folder.
+
+**Windows worker without installing anything:** `scripts/package-windows-worker.sh arm64`
+(or `x64`) builds `dist/stems-worker-win-<arch>.zip` on a Mac: `stemsd.exe` cross-compiled
+with [cargo-xwin](https://github.com/rust-cross/cargo-xwin), ONNX Runtime with DirectML (any
+DirectX 12 GPU), the Visual C++ runtime it needs, both models, and `bench.cmd` /
+`run-worker.cmd`. Unzip anywhere and double-click; it runs in portable mode and dials the
+player. Needs `rustup target add aarch64-pc-windows-msvc` (or `x86_64-…`),
+`cargo install cargo-xwin` and `brew install llvm lld sevenzip`.
+
 ## Building
 
 Requires stable Rust (see `rust-toolchain.toml`).
