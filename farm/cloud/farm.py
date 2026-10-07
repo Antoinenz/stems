@@ -141,10 +141,12 @@ def start() -> None:
         [str(py), str(here / "separator.py"), "--spool", str(SPOOL), "--models", str(FARM / "models"), *dummy],
     )
     spawn("runner", [str(py), str(Path(__file__).resolve()), "_runner"])
+    # dashboard on 127.0.0.1:8765 (ssh -L 8765:localhost:8765 <box>)
+    spawn("web", [str(py), str(here / "web.py")])
 
 
 def stop() -> None:
-    for name in ("runner", "separator"):
+    for name in ("runner", "separator", "web"):
         pid = pid_alive(name)
         if pid:
             # the runner's whole group (it and the stemsd it runs); the
