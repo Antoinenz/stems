@@ -3,20 +3,29 @@
 //!
 //! ```text
 //! <library>/tracks/<key>/
-//!   track.json          Entry: metadata, import stages, loudness, offsets
+//!   track.json          Entry: metadata, import stages, loudness, offsets,
+//!                       analysis (tempo, key, danceability, genres)
 //!   mix.ogg             the original audio, as fetched (no re-encode)
-//!   instrumental.wav    16-bit stereo 44.1 kHz; vocals = mix − instrumental
+//!   instrumental.flac   stereo 44.1 kHz; vocals = mix − instrumental
+//!    or .wav            (16-bit WAV when separated locally)
 //!   lyrics.json         line + word timings
 //!   lyrics.lrc          optional hand-made override (plain or enhanced LRC)
 //!   video.mp4
 //!   cover.jpg
+//!   .sent               handed off to another machine: only track.json is
+//!                       left here, and imports skip the track
+//! <library>/playlists/<id>.json
+//!                       a Spotify playlist or album: name, link, track keys
 //! ```
 //!
 //! `track.json` is the source of truth; there is no separate index (a few
 //! hundred small files scan in milliseconds), so a library folder can be
 //! copied between machines or repaired by hand.
 
+pub mod analysis;
 pub mod entry;
+pub mod flac;
+pub mod playlist;
 pub mod wav;
 
 use std::fs;
@@ -25,11 +34,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use stems_core::{Lyrics, TrackId};
 
+pub use analysis::{Analysis, Genre};
 pub use entry::{Entry, Stage, Stages};
+pub use playlist::Playlist;
 
 pub const TRACKS_DIR: &str = "tracks";
 pub const ENTRY_FILE: &str = "track.json";
 pub const INSTRUMENTAL_FILE: &str = "instrumental.wav";
+pub const INSTRUMENTAL_FLAC_FILE: &str = "instrumental.flac";
+pub const PLAYLISTS_DIR: &str = "playlists";
+pub const SENT_FILE: &str = ".sent";
 pub const LYRICS_FILE: &str = "lyrics.json";
 pub const LYRICS_OVERRIDE_FILE: &str = "lyrics.lrc";
 pub const VIDEO_FILE: &str = "video.mp4";
@@ -41,7 +55,10 @@ pub struct Files {
     pub dir: PathBuf,
     /// The original audio, if the entry names one.
     pub mix: Option<PathBuf>,
+    /// 16-bit WAV, as written by a local separation.
     pub instrumental: PathBuf,
+    /// FLAC, as delivered by a remote separation; preferred when present.
+    pub instrumental_flac: PathBuf,
     pub lyrics: PathBuf,
     pub lyrics_override: PathBuf,
     pub video: PathBuf,
@@ -111,6 +128,7 @@ impl Library {
         Files {
             mix: entry.mix_file.as_ref().map(|f| dir.join(f)),
             instrumental: dir.join(INSTRUMENTAL_FILE),
+            instrumental_flac: dir.join(INSTRUMENTAL_FLAC_FILE),
             lyrics: dir.join(LYRICS_FILE),
             lyrics_override: dir.join(LYRICS_OVERRIDE_FILE),
             video: dir.join(VIDEO_FILE),
@@ -199,12 +217,129 @@ impl Library {
         fs::read_to_string(self.files(entry).lyrics_override).ok()
     }
 
+    /// Save a locally separated instrumental (WAV). A FLAC from an earlier
+    /// separation is removed so the two can't disagree.
     pub fn write_instrumental(&self, entry: &Entry, pcm: &[f32]) -> Result<()> {
-        wav::write_pcm16(&self.files(entry).instrumental, pcm)
+        let files = self.files(entry);
+        wav::write_pcm16(&files.instrumental, pcm)?;
+        remove_if_exists(&files.instrumental_flac)
+    }
+
+    /// Move a FLAC instrumental made elsewhere into the track folder
+    /// (replacing any WAV). The caller checks its length first.
+    pub fn install_instrumental_flac(&self, entry: &Entry, src: &Path) -> Result<()> {
+        let files = self.files(entry);
+        fs::create_dir_all(&files.dir)
+            .with_context(|| format!("create {}", files.dir.display()))?;
+        let tmp = files.instrumental_flac.with_extension("flac.part");
+        if fs::rename(src, &tmp).is_err() {
+            // another filesystem
+            fs::copy(src, &tmp).with_context(|| format!("copy {}", src.display()))?;
+            remove_if_exists(src)?;
+        }
+        fs::rename(&tmp, &files.instrumental_flac)
+            .with_context(|| format!("rename to {}", files.instrumental_flac.display()))?;
+        remove_if_exists(&files.instrumental)
+    }
+
+    /// The instrumental file in use: FLAC if there is one, else WAV.
+    pub fn instrumental_path(&self, entry: &Entry) -> Option<PathBuf> {
+        let files = self.files(entry);
+        [files.instrumental_flac, files.instrumental]
+            .into_iter()
+            .find(|p| p.is_file())
     }
 
     pub fn read_instrumental(&self, entry: &Entry) -> Result<Vec<f32>> {
-        wav::read_pcm(&self.files(entry).instrumental)
+        let files = self.files(entry);
+        if files.instrumental_flac.is_file() {
+            flac::read_pcm(&files.instrumental_flac)
+        } else {
+            wav::read_pcm(&files.instrumental)
+        }
+    }
+
+    // ---- hand-off -------------------------------------------------------
+
+    /// Whether the track was handed off to another machine (see
+    /// [`Library::mark_sent`]); imports leave it alone.
+    pub fn is_sent(&self, key: &str) -> bool {
+        self.track_dir(key).join(SENT_FILE).is_file()
+    }
+
+    /// The track now lives on another machine: delete its media here, keep
+    /// `track.json` (so it is not fetched again) and leave a `.sent` marker
+    /// saying where it went.
+    pub fn mark_sent(&self, key: &str, to: &str) -> Result<()> {
+        let Some(_) = self.get(key)? else {
+            bail!("no track `{key}` in the library");
+        };
+        let dir = self.track_dir(key);
+        fs::write(dir.join(SENT_FILE), format!("{to}\n"))
+            .with_context(|| format!("write {}", dir.join(SENT_FILE).display()))?;
+        for e in fs::read_dir(&dir)
+            .with_context(|| format!("read {}", dir.display()))?
+            .flatten()
+        {
+            let name = e.file_name();
+            if name == ENTRY_FILE || name == SENT_FILE {
+                continue;
+            }
+            let path = e.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            }
+            .with_context(|| format!("remove {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    // ---- playlists ------------------------------------------------------
+
+    pub fn save_playlist(&self, p: &Playlist) -> Result<()> {
+        let dir = self.dir.join(PLAYLISTS_DIR);
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        write_json(&dir.join(format!("{}.json", sanitize(&p.id, 100))), p)
+    }
+
+    pub fn get_playlist(&self, id: &str) -> Result<Option<Playlist>> {
+        let path = self
+            .dir
+            .join(PLAYLISTS_DIR)
+            .join(format!("{}.json", sanitize(id, 100)));
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        Ok(Some(
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
+        ))
+    }
+
+    /// Every playlist, by name.
+    pub fn list_playlists(&self) -> Result<Vec<Playlist>> {
+        let dir = self.dir.join(PLAYLISTS_DIR);
+        let Ok(rd) = fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<Playlist> = rd
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .filter_map(|e| {
+                let text = fs::read_to_string(e.path()).ok()?;
+                match serde_json::from_str(&text) {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        tracing::warn!(path = %e.path().display(), "skipping playlist: {err}");
+                        None
+                    }
+                }
+            })
+            .collect();
+        out.sort_by_cached_key(|p: &Playlist| p.name.to_lowercase());
+        Ok(out)
     }
 
     /// A small JSON file at the library root (the saved queue, …), if any.
@@ -237,6 +372,14 @@ impl Library {
                 .sum()
         }
         walk(&self.dir)
+    }
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
     }
 }
 
@@ -381,6 +524,115 @@ mod tests {
         fs::create_dir_all(&bad).unwrap();
         fs::write(bad.join(ENTRY_FILE), "{not json").unwrap();
         assert_eq!(lib.list().unwrap().len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn testdata(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(name)
+    }
+
+    #[test]
+    fn flac_instrumental_is_preferred_and_replaces_wav() {
+        let dir = tmp("flac");
+        let lib = Library::open(&dir).unwrap();
+        let t = track("f", "T", "A");
+        let e = Entry::new(Library::key_for(&t.id), t, 0);
+        lib.save(&e).unwrap();
+        assert!(lib.instrumental_path(&e).is_none());
+        lib.write_instrumental(&e, &vec![0.0; 2 * 100]).unwrap();
+        assert!(
+            lib.instrumental_path(&e)
+                .unwrap()
+                .ends_with(INSTRUMENTAL_FILE)
+        );
+
+        // a FLAC delivered from elsewhere wins and removes the WAV
+        let incoming = dir.join("incoming.flac");
+        fs::copy(testdata("sine.flac"), &incoming).unwrap();
+        lib.install_instrumental_flac(&e, &incoming).unwrap();
+        assert!(!incoming.exists());
+        assert!(!lib.files(&e).instrumental.exists());
+        assert!(
+            lib.instrumental_path(&e)
+                .unwrap()
+                .ends_with(INSTRUMENTAL_FLAC_FILE)
+        );
+        let pcm = lib.read_instrumental(&e).unwrap();
+        assert_eq!(pcm.len(), 2 * 11_025, "0.25 s of stereo at 44.1 kHz");
+        let peak = pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05 && peak <= 1.0, "peak {peak}");
+
+        // separating locally again replaces the FLAC
+        lib.write_instrumental(&e, &vec![0.0; 2 * 100]).unwrap();
+        assert!(!lib.files(&e).instrumental_flac.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flac_at_another_rate_is_refused() {
+        let err = flac::read_pcm(&testdata("sine48k.flac"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("48000"), "{err}");
+    }
+
+    #[test]
+    fn sent_tracks_keep_only_their_entry() {
+        let dir = tmp("sent");
+        let lib = Library::open(&dir).unwrap();
+        let t = track("s", "T", "A");
+        let e = Entry::new(Library::key_for(&t.id), t, 0);
+        lib.save(&e).unwrap();
+        lib.write_instrumental(&e, &vec![0.0; 200]).unwrap();
+        fs::write(lib.track_dir(&e.key).join("mix.ogg"), b"x").unwrap();
+        assert!(!lib.is_sent(&e.key));
+        lib.mark_sent(&e.key, "antoine-pc").unwrap();
+        assert!(lib.is_sent(&e.key));
+        let mut left: Vec<String> = fs::read_dir(lib.track_dir(&e.key))
+            .unwrap()
+            .flatten()
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [SENT_FILE, ENTRY_FILE]);
+        assert!(lib.get(&e.key).unwrap().is_some());
+        assert!(lib.mark_sent("nope", "x").is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn playlists_roundtrip_sorted_by_name() {
+        let dir = tmp("playlists");
+        let lib = Library::open(&dir).unwrap();
+        assert!(lib.list_playlists().unwrap().is_empty());
+        for (id, name) in [
+            ("spotify_playlist_b", "Zumba"),
+            ("spotify_album_a", "abba gold"),
+        ] {
+            lib.save_playlist(&Playlist {
+                id: id.into(),
+                kind: "playlist".into(),
+                name: name.into(),
+                url: None,
+                description: String::new(),
+                tracks: vec!["spotify_x".into()],
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+        let all = lib.list_playlists().unwrap();
+        assert_eq!(
+            all.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["abba gold", "Zumba"]
+        );
+        assert_eq!(
+            lib.get_playlist("spotify_album_a").unwrap().unwrap().tracks,
+            ["spotify_x"]
+        );
+        assert!(lib.get_playlist("missing").unwrap().is_none());
+        assert!(lib.list().unwrap().is_empty(), "playlists are not tracks");
         fs::remove_dir_all(&dir).unwrap();
     }
 

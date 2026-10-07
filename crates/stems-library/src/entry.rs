@@ -2,7 +2,9 @@
 //! import got.
 
 use serde::{Deserialize, Serialize};
-use stems_core::TrackRef;
+use stems_core::{TrackInfo, TrackRef};
+
+use crate::analysis::Analysis;
 
 /// Import progress of one piece of a track.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -57,6 +59,10 @@ pub struct Stages {
     pub video_align: Stage,
     /// `cover.jpg` downloaded.
     pub cover: Stage,
+    /// Tempo, key, danceability, moods, genres measured from the audio.
+    /// Optional extra: not part of [`Entry::is_complete`], since only some
+    /// machines can run the analysis models.
+    pub analysis: Stage,
 }
 
 impl Stages {
@@ -71,6 +77,11 @@ impl Stages {
             ("cover", &self.cover),
         ]
         .into_iter()
+    }
+
+    /// [`Stages::iter`] plus the optional ones.
+    pub fn iter_all(&self) -> impl Iterator<Item = (&'static str, &Stage)> {
+        self.iter().chain([("analysis", &self.analysis)])
     }
 }
 
@@ -103,6 +114,15 @@ pub struct Entry {
     /// Per-track lyric nudge, on top of the global offset.
     #[serde(default)]
     pub lyrics_offset_ms: i64,
+    /// Release date, label, popularity… from the source.
+    #[serde(default, skip_serializing_if = "TrackInfo::is_empty")]
+    pub info: TrackInfo,
+    /// Which separation model made the instrumental (e.g.
+    /// `UVR-MDX-NET-Inst_HQ_3`, `model_bs_roformer_ep_317_sdr_12.9755`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stems_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<Analysis>,
 }
 
 impl Entry {
@@ -118,6 +138,9 @@ impl Entry {
             video_offset_ms: None,
             video_corr: None,
             lyrics_offset_ms: 0,
+            info: TrackInfo::default(),
+            stems_model: None,
+            analysis: None,
         }
     }
 
@@ -134,7 +157,7 @@ impl Entry {
     /// Stages that failed, with their errors (for the import report).
     pub fn failures(&self) -> Vec<(&'static str, &str)> {
         self.stages
-            .iter()
+            .iter_all()
             .filter_map(|(name, s)| match s {
                 Stage::Failed { error } => Some((name, error.as_str())),
                 _ => None,
@@ -214,8 +237,9 @@ mod tests {
             video: Stage::Done,
             video_align: Stage::Done,
             cover: Stage::Done,
+            analysis: Stage::Pending,
         };
-        assert!(e.is_complete());
+        assert!(e.is_complete(), "analysis is optional");
         e.stages.cover = Stage::failed("http 404");
         assert!(!e.is_complete());
         assert_eq!(e.failures(), vec![("cover", "http 404")]);

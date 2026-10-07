@@ -52,3 +52,38 @@ impl TrackRef {
         self.artists.join(", ")
     }
 }
+
+/// Catalogue facts about a track beyond what playback needs: for sorting
+/// and browsing a library (release year, label, popularity…). Everything is
+/// optional; sources fill in what they know.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackInfo {
+    /// `YYYY-MM-DD` (or just the year when that is all that is known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Spotify popularity, 0–100, when it was fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+    /// Languages of the vocals (ISO 639), when the source says.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    /// The album artists, when they differ from the track artists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub album_artists: Vec<String>,
+}
+
+impl TrackInfo {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The year part of `release_date`.
+    pub fn year(&self) -> Option<u16> {
+        self.release_date.as_deref()?.get(..4)?.parse().ok()
+    }
+}

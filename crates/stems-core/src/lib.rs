@@ -20,7 +20,7 @@ pub use state::{
     ClockTick, Command, KaraokeState, LyricLine, LyricWord, Lyrics, Media, PlaybackState,
     PlaybackStatus, QueueItem, QueueKind, StemsProgress, ViewMode,
 };
-pub use track::{TrackId, TrackRef};
+pub use track::{TrackId, TrackInfo, TrackRef};
 
 /// Internal sample rate in Hz.
 pub const SAMPLE_RATE: u32 = 44_100;
