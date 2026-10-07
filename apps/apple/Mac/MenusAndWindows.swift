@@ -20,8 +20,10 @@ struct StemsCommands: Commands {
 
         CommandMenu("Controls") {
             let client = model.client
+            // Space is handled by the main window (onKeyPress) rather than
+            // here: a bare-Space menu shortcut would eat spaces typed in
+            // the search field
             Button(client.state.status == .playing ? "Pause" : "Play") { client.togglePlayPause() }
-                .keyboardShortcut(.space, modifiers: [])
             Button("Next Song") { client.send(.next) }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
             Divider()

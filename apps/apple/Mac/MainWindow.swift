@@ -31,6 +31,12 @@ struct MainWindow: View {
             }
             .stemsErrorToast()
         }
+        // Space plays/pauses unless a text field has focus (it gets the key first)
+        .onKeyPress(.space) {
+            guard client.connection.isConnected else { return .ignored }
+            client.togglePlayPause()
+            return .handled
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
