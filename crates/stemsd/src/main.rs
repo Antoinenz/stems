@@ -12,6 +12,7 @@ mod pipeline;
 mod player;
 mod separator;
 mod settings;
+mod status;
 mod web;
 
 use std::path::PathBuf;

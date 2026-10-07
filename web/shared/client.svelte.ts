@@ -125,7 +125,11 @@ export class StemsClient {
   #raf = 0;
   #retry = 0;
 
-  constructor(private url = defaultUrl()) {}
+  /** `app` names this client in the host's status view (`stage`, `remote`…). */
+  constructor(
+    private app = 'other',
+    private url = defaultUrl()
+  ) {}
 
   start() {
     this.#connect();
@@ -153,7 +157,9 @@ export class StemsClient {
 
   #connect() {
     const token = hostToken();
-    const ws = new WebSocket(token ? `${this.url}?token=${encodeURIComponent(token)}` : this.url);
+    const params = new URLSearchParams({ app: this.app });
+    if (token) params.set('token', token);
+    const ws = new WebSocket(`${this.url}?${params}`);
     this.#ws = ws;
     ws.onopen = () => {
       this.connected = true;

@@ -75,6 +75,70 @@ fn read_samples(r: &mut impl Read, n: u32) -> io::Result<Vec<f32>> {
         .collect())
 }
 
+/// What this process knows about one worker (all its connections),
+/// for status screens. Keyed by host: a worker's several connections
+/// count as one worker.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WorkerStat {
+    pub host: String,
+    pub model: String,
+    pub provider: String,
+    /// Offers lyric alignment.
+    pub align: bool,
+    /// Open connections right now (0 = gone).
+    pub connections: usize,
+    /// Windows separated and alignment requests answered.
+    pub requests: u64,
+    pub failures: u64,
+    /// Smoothed time per separated window, ms.
+    pub window_ms: f64,
+    pub last_error: Option<String>,
+    /// Seconds since the worker last answered.
+    pub idle_s: Option<f64>,
+    #[serde(skip)]
+    last_seen: Option<Instant>,
+}
+
+fn worker_stats_map() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, WorkerStat>> {
+    static STATS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, WorkerStat>>,
+    > = std::sync::OnceLock::new();
+    STATS.get_or_init(Default::default)
+}
+
+/// Host part of `host:port` (IPv6 `[a::b]:port` keeps its brackets).
+fn host_of(peer: &str) -> String {
+    peer.rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(peer)
+        .to_string()
+}
+
+fn with_stat(peer: &str, f: impl FnOnce(&mut WorkerStat)) {
+    if let Ok(mut m) = worker_stats_map().lock() {
+        let host = host_of(peer);
+        let s = m.entry(host.clone()).or_insert_with(|| WorkerStat {
+            host,
+            ..WorkerStat::default()
+        });
+        f(s);
+    }
+}
+
+/// Every worker this process has talked to, with live numbers.
+pub fn worker_stats() -> Vec<WorkerStat> {
+    let Ok(m) = worker_stats_map().lock() else {
+        return Vec::new();
+    };
+    m.values()
+        .map(|s| {
+            let mut s = s.clone();
+            s.idle_s = s.last_seen.map(|t| t.elapsed().as_secs_f64());
+            s
+        })
+        .collect()
+}
+
 /// Client side: one TCP connection, one window in flight at a time.
 /// Use one per streaming worker for parallelism.
 pub struct RemoteRunner {
@@ -116,11 +180,40 @@ impl RemoteRunner {
         let mut json = vec![0u8; len as usize];
         stream.read_exact(&mut json)?;
         let hello: Hello = serde_json::from_slice(&json).context("worker hello")?;
+        with_stat(peer, |s| {
+            s.model = hello.model.clone();
+            s.provider = hello.provider.clone();
+            s.align = hello.align;
+            s.connections += 1;
+            s.last_error = None;
+        });
         Ok(Self {
             stream,
             hello,
             peer: peer.to_string(),
         })
+    }
+
+    /// Count a request's outcome for the status screens.
+    fn record<T>(&self, started: Instant, window: bool, r: &Result<T>) {
+        with_stat(&self.peer, |s| match r {
+            Ok(_) => {
+                s.requests += 1;
+                s.last_seen = Some(Instant::now());
+                if window {
+                    let ms = started.elapsed().as_secs_f64() * 1000.0;
+                    s.window_ms = if s.window_ms == 0.0 {
+                        ms
+                    } else {
+                        s.window_ms + 0.2 * (ms - s.window_ms)
+                    };
+                }
+            }
+            Err(e) => {
+                s.failures += 1;
+                s.last_error = Some(format!("{e:#}"));
+            }
+        });
     }
 
     /// Address of the worker on the other end.
@@ -142,6 +235,13 @@ impl RemoteRunner {
 
     /// Place `words` in mono 16 kHz vocals on the worker.
     pub fn align(&mut self, audio16k: &[f32], words: &[String]) -> Result<Option<Vec<WordSpan>>> {
+        let started = Instant::now();
+        let r = self.align_inner(audio16k, words);
+        self.record(started, false, &r);
+        r
+    }
+
+    fn align_inner(&mut self, audio16k: &[f32], words: &[String]) -> Result<Option<Vec<WordSpan>>> {
         anyhow::ensure!(self.hello.align, "worker: has no word alignment model");
         let json = serde_json::to_vec(words)?;
         self.stream.write_all(&[REQ_ALIGN])?;
@@ -161,6 +261,13 @@ impl RemoteRunner {
 
     /// Send one window, block for the instrumental.
     pub fn run(&mut self, window: &[f32], denoise: bool) -> Result<Vec<f32>> {
+        let started = Instant::now();
+        let r = self.run_inner(window, denoise);
+        self.record(started, true, &r);
+        r
+    }
+
+    fn run_inner(&mut self, window: &[f32], denoise: bool) -> Result<Vec<f32>> {
         self.stream.write_all(&[denoise as u8])?;
         write_samples(&mut self.stream, window)?;
         self.stream.flush()?;
@@ -296,6 +403,14 @@ impl ResilientRemote {
             }
         }
         Err(anyhow!("separation worker connection lost"))
+    }
+}
+
+impl Drop for RemoteRunner {
+    fn drop(&mut self) {
+        with_stat(&self.peer, |s| {
+            s.connections = s.connections.saturating_sub(1)
+        });
     }
 }
 
@@ -1064,6 +1179,22 @@ mod tests {
         }
         assert_eq!(hub.idle_count(), 2, "the dead connection was dropped");
         assert_eq!(hub.connected(), 2);
+    }
+
+    #[test]
+    fn worker_stats_follow_connections() {
+        let addr = identity_worker(0.5, test_params());
+        let host = host_of(&addr.to_string());
+        let mut c = RemoteRunner::connect(addr).unwrap();
+        c.run(&vec![0.1f32; 4096 * 2], false).unwrap();
+        let s = worker_stats().into_iter().find(|s| s.host == host).unwrap();
+        // other tests talk to workers on this host too: only lower bounds
+        assert!(s.connections >= 1 && s.requests >= 1);
+        assert_eq!(s.provider, "test");
+        assert!(s.idle_s.is_some());
+        drop(c);
+        assert_eq!(host_of("192.168.1.5:7374"), "192.168.1.5");
+        assert_eq!(host_of("[::1]:7374"), "[::1]");
     }
 
     #[test]

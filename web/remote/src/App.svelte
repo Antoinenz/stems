@@ -7,7 +7,7 @@
   import Slider from './Slider.svelte';
   import Stepper from './Stepper.svelte';
 
-  const client = new StemsClient();
+  const client = new StemsClient('remote');
   // Who we are decides what is shown: guests only get what the host allows.
   let me = $state<Me>({ role: 'guest', permissions: [] });
   const can = (p: Permission) => me.permissions.includes(p);

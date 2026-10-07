@@ -44,6 +44,21 @@ pub struct LibraryService {
     lib: Library,
     tx: mpsc::UnboundedSender<Vec<String>>,
     status: Arc<Mutex<ImportStatus>>,
+    /// Library counts and disk space, refreshed at most every 10 s.
+    summary: Mutex<Option<(std::time::Instant, Value)>>,
+}
+
+/// Free and total bytes of the disk holding `path` (the mount point that
+/// is the longest prefix of it).
+fn disk_space(path: &std::path::Path) -> Option<(u64, u64)> {
+    let path = path.canonicalize().ok()?;
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| (d.available_space(), d.total_space()))
 }
 
 impl LibraryService {
@@ -53,7 +68,61 @@ impl LibraryService {
         let (tx, rx) = mpsc::unbounded_channel();
         let status = Arc::new(Mutex::new(ImportStatus::default()));
         tokio::spawn(worker(cfg.clone(), lib.clone(), rx, status.clone()));
-        Arc::new(Self { lib, tx, status })
+        Arc::new(Self {
+            lib,
+            tx,
+            status,
+            summary: Mutex::new(None),
+        })
+    }
+
+    pub fn dir(&self) -> &std::path::Path {
+        self.lib.dir()
+    }
+
+    /// For the status view: is the drive there, how full, how many songs
+    /// are ready, and what the importer is doing.
+    pub fn status(&self) -> Value {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+        let cached = self
+            .summary
+            .lock()
+            .expect("library summary")
+            .as_ref()
+            .filter(|(t, _)| t.elapsed() < EVERY)
+            .map(|(_, v)| v.clone());
+        let mut v = match cached {
+            Some(v) => v,
+            None => {
+                let available = self.lib.is_available();
+                let entries = if available {
+                    self.lib.list().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let (free, total) = disk_space(self.lib.dir()).unwrap_or((0, 0));
+                let v = json!({
+                    "dir": self.lib.dir().display().to_string(),
+                    "available": available,
+                    "tracks": entries.len(),
+                    "playable": entries.iter().filter(|e| e.is_playable()).count(),
+                    "complete": entries.iter().filter(|e| e.is_complete()).count(),
+                    "free_bytes": free,
+                    "total_bytes": total,
+                });
+                *self.summary.lock().expect("library summary") =
+                    Some((std::time::Instant::now(), v.clone()));
+                v
+            }
+        };
+        let s = self.status.lock().expect("import status");
+        v["import"] = json!({
+            "running": s.running,
+            "current": s.current,
+            "waiting": s.waiting.len(),
+            "last_error": s.errors.front(),
+        });
+        v
     }
 }
 

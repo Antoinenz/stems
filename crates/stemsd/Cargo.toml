@@ -36,6 +36,7 @@ stems-server.workspace = true
 stems-enrich.workspace = true
 stems-library.workspace = true
 ebur128 = "0.1"
+sysinfo = { version = "0.36", default-features = false, features = ["disk"] }
 stems-sep.workspace = true
 rustls.workspace = true
 serde.workspace = true

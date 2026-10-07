@@ -8,6 +8,8 @@
 //! * `GET|PATCH /api/settings` — live settings (host only)
 //! * `GET  /api/library?q=` — the offline library (guests: playable tracks)
 //! * `GET|POST /api/library/import` — import progress / queue imports (host)
+//! * `GET  /api/status` — machines view: audio, workers, library, system,
+//!   connected screens (host only; also pushed to host WebSockets at 1 Hz)
 //! * `GET  /api/health`
 //! * `/stage`, `/remote`, `/` — static files from the web directory, if present
 //!
@@ -44,6 +46,69 @@ pub struct Channels {
     pub state: watch::Receiver<PlaybackState>,
     pub clock: watch::Receiver<ClockTick>,
     pub commands: mpsc::Sender<Command>,
+    /// The daemon's status document (refreshed by it, ~1 Hz), if any.
+    pub status: Option<watch::Receiver<serde_json::Value>>,
+}
+
+/// Open WebSocket sessions, by the `app=` they connect with (`stage`,
+/// `remote`, `ios`, `mac`…) and by role.
+#[derive(Default)]
+struct Clients {
+    by_app: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+    hosts: std::sync::atomic::AtomicUsize,
+    guests: std::sync::atomic::AtomicUsize,
+}
+
+impl Clients {
+    fn snapshot(&self) -> serde_json::Value {
+        use std::sync::atomic::Ordering::Relaxed;
+        serde_json::json!({
+            "apps": *self.by_app.lock().expect("clients"),
+            "hosts": self.hosts.load(Relaxed),
+            "guests": self.guests.load(Relaxed),
+        })
+    }
+}
+
+/// Counts a session while it lives.
+struct ClientGuard {
+    clients: Arc<Clients>,
+    app: String,
+    role: Role,
+}
+
+impl ClientGuard {
+    fn new(clients: Arc<Clients>, app: String, role: Role) -> Self {
+        *clients
+            .by_app
+            .lock()
+            .expect("clients")
+            .entry(app.clone())
+            .or_default() += 1;
+        match role {
+            Role::Host => &clients.hosts,
+            Role::Guest => &clients.guests,
+        }
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { clients, app, role }
+    }
+}
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        let mut m = self.clients.by_app.lock().expect("clients");
+        if let Some(n) = m.get_mut(&self.app) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.app);
+            }
+        }
+        match self.role {
+            Role::Host => &self.clients.hosts,
+            Role::Guest => &self.clients.guests,
+        }
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -51,6 +116,22 @@ struct App {
     ch: Channels,
     access: Arc<dyn Access>,
     library: Option<Arc<dyn LibraryApi>>,
+    sysmon: Arc<std::sync::Mutex<SysMon>>,
+    clients: Arc<Clients>,
+}
+
+impl App {
+    /// The daemon's status plus what only the server knows.
+    fn full_status(&self) -> serde_json::Value {
+        let mut v = match self.ch.status.as_ref().map(|s| s.borrow().clone()) {
+            Some(v @ serde_json::Value::Object(_)) => v,
+            _ => serde_json::json!({}),
+        };
+        v["system"] =
+            serde_json::to_value(self.sysmon.lock().expect("sysmon").sample()).unwrap_or_default();
+        v["clients"] = self.clients.snapshot();
+        v
+    }
 }
 
 /// The offline library as the server sees it; the daemon implements it.
@@ -187,7 +268,11 @@ pub fn lan_ip() -> Option<std::net::IpAddr> {
 enum Outbound<'a> {
     State(&'a PlaybackState),
     Clock(&'a ClockTick),
-    Error { message: String },
+    /// The machines view (hosts only).
+    Status(&'a serde_json::Value),
+    Error {
+        message: String,
+    },
 }
 
 pub struct Server {
@@ -217,6 +302,7 @@ impl Server {
                 get(move |headers| async move { Json(info(&headers, &name)) })
             })
             .route("/api/remote-qr.svg", get(get_remote_qr))
+            .route("/api/status", get(get_status))
             .route("/api/system", {
                 let m = sysmon.clone();
                 get(move || async move { Json(m.lock().expect("sysmon").sample()) })
@@ -225,6 +311,8 @@ impl Server {
                 ch,
                 access,
                 library: opts.library.clone(),
+                sysmon,
+                clients: Arc::default(),
             })
             .layer(CorsLayer::permissive());
 
@@ -430,6 +518,19 @@ async fn get_import_status(
     Ok(Json(lib.import_status()))
 }
 
+async fn get_status(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    // sysinfo samples block briefly
+    let v = tokio::task::spawn_blocking(move || app.full_status())
+        .await
+        .unwrap_or_default();
+    Ok(Json(v))
+}
+
 async fn get_me(
     State(app): State<App>,
     headers: axum::http::HeaderMap,
@@ -484,7 +585,15 @@ async fn ws_upgrade(
     RawQuery(query): RawQuery,
 ) -> impl IntoResponse {
     let role = access::role_of(&app.access, &headers, query.as_deref());
-    ws.on_upgrade(move |socket| ws_session(socket, app, role))
+    let client = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("app="))
+        .filter(|a| !a.is_empty() && a.len() <= 32 && a.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("other")
+        .to_string();
+    ws.on_upgrade(move |socket| ws_session(socket, app, role, client))
 }
 
 async fn send(
@@ -495,8 +604,12 @@ async fn send(
     tx.send(Message::Text(text.into())).await
 }
 
-async fn ws_session(socket: WebSocket, app: App, role: Role) {
+async fn ws_session(socket: WebSocket, app: App, role: Role, client: String) {
+    let _counted = ClientGuard::new(Arc::clone(&app.clients), client, role);
+    let status_app = app.clone();
     let App { mut ch, access, .. } = app;
+    // only hosts get the machines view
+    let mut status = ch.status.clone().filter(|_| role == Role::Host);
     let (mut tx, mut rx) = socket.split();
 
     // Initial snapshot.
@@ -520,6 +633,19 @@ async fn ws_session(socket: WebSocket, app: App, role: Role) {
                 if changed.is_err() { break; }
                 let tick = *ch.clock.borrow_and_update();
                 if send(&mut tx, Outbound::Clock(&tick)).await.is_err() { break; }
+            }
+            Ok(()) = async {
+                match status.as_mut() {
+                    Some(s) => s.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(s) = status.as_mut() {
+                    s.mark_unchanged();
+                }
+                let a = status_app.clone();
+                let doc = tokio::task::spawn_blocking(move || a.full_status()).await.unwrap_or_default();
+                if send(&mut tx, Outbound::Status(&doc)).await.is_err() { break; }
             }
             incoming = rx.next() => {
                 match incoming {
@@ -565,6 +691,7 @@ mod tests {
                 state: state_rx,
                 clock: clock_rx,
                 commands: cmd_tx,
+                status: None,
             },
             state_tx,
             cmd_rx,
@@ -647,6 +774,44 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn status_is_for_the_host_and_merged_with_server_facts() {
+        let (mut ch, _state_tx, _rx) = channels();
+        let (status_tx, status_rx) = watch::channel(serde_json::json!({"mode": "library"}));
+        ch.status = Some(status_rx);
+        let app = Server::router(ch, Arc::new(TokenT), &Options::default());
+        let get = |host: bool| {
+            let mut r = Request::get("/api/status");
+            if host {
+                r = r.header("x-stems-token", "T");
+            }
+            r.body(Body::empty()).unwrap()
+        };
+        assert_eq!(call(&app, get(false)).await.0, StatusCode::FORBIDDEN);
+        let (s, v) = call(&app, get(true)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["mode"], "library");
+        assert!(v["system"]["mem_total_mb"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(v["clients"]["hosts"], 0);
+        status_tx.send_modify(|v| v["mode"] = "spotify".into());
+        assert_eq!(call(&app, get(true)).await.1["mode"], "spotify");
+    }
+
+    #[test]
+    fn client_guards_count_and_uncount() {
+        let clients = Arc::new(Clients::default());
+        let a = ClientGuard::new(clients.clone(), "stage".into(), Role::Guest);
+        let b = ClientGuard::new(clients.clone(), "ios".into(), Role::Host);
+        let c = ClientGuard::new(clients.clone(), "stage".into(), Role::Guest);
+        let v = clients.snapshot();
+        assert_eq!(v["apps"]["stage"], 2);
+        assert_eq!(v["hosts"], 1);
+        drop((a, b, c));
+        let v = clients.snapshot();
+        assert_eq!(v["apps"], serde_json::json!({}));
+        assert_eq!(v["guests"], 0);
     }
 
     #[tokio::test]

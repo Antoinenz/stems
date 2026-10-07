@@ -208,8 +208,8 @@ fn spawn_server(
     web_dir: Option<PathBuf>,
     ch: &Channels,
     settings: std::sync::Arc<Settings>,
-    library_dir: Option<PathBuf>,
-    library: Option<std::sync::Arc<dyn stems_server::LibraryApi>>,
+    mode: &'static str,
+    library: Option<std::sync::Arc<crate::library::LibraryService>>,
 ) {
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.port).into();
     // always served: videos can be switched on while running
@@ -221,14 +221,18 @@ fn spawn_server(
             device_name: cfg.device_name.clone(),
             web_dir,
             video_dir,
-            library_dir,
-            library,
+            library_dir: library.as_ref().map(|l| l.dir().to_path_buf()),
+            library: library
+                .clone()
+                .map(|l| l as std::sync::Arc<dyn stems_server::LibraryApi>),
         },
     };
+    let status = crate::status::spawn(cfg, mode, ch.status.clone(), library);
     let channels = stems_server::Channels {
         state: ch.state.clone(),
         clock: ch.clock.clone(),
         commands: ch.commands.clone(),
+        status: Some(status),
     };
     tracing::info!(
         token = cfg.host_token,
@@ -289,7 +293,7 @@ pub async fn play_file(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings, None, None);
+    spawn_server(cfg, web_dir, &ch, settings, "file", None);
     engine.run().await
 }
 
@@ -345,14 +349,7 @@ pub async fn run_library(
         .with_library(lib.clone(), stems)
         .with_live(settings.live());
     let service = crate::library::LibraryService::start(cfg, lib.clone());
-    spawn_server(
-        cfg,
-        web_dir,
-        &ch,
-        settings,
-        Some(lib.dir().to_path_buf()),
-        Some(service),
-    );
+    spawn_server(cfg, web_dir, &ch, settings, "library", Some(service));
     engine.run().await
 }
 
@@ -420,7 +417,7 @@ pub async fn run_spotify(
         settings.attach_gpu_limit(h);
     }
     let engine = engine.with_live(settings.live());
-    spawn_server(cfg, web_dir, &ch, settings, None, None);
+    spawn_server(cfg, web_dir, &ch, settings, "spotify", None);
     engine.run().await
 }
 

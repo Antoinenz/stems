@@ -72,6 +72,27 @@ pub struct Channels {
     pub state: watch::Receiver<PlaybackState>,
     pub clock: watch::Receiver<ClockTick>,
     pub commands: mpsc::Sender<Command>,
+    pub status: watch::Receiver<AudioStatus>,
+}
+
+/// The audio path, for status screens; published once a second.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AudioStatus {
+    /// `library`, `spotify`, `file`.
+    pub source: String,
+    pub sink: String,
+    pub sink_latency_ms: u64,
+    /// Separation backend on the audio path (`prebuffer`, `mdx`, `dsp`…)
+    /// and the delay it adds.
+    pub processor: String,
+    pub processor_delay_ms: u64,
+    /// Audio between the source and the speakers right now.
+    pub buffered_ms: u64,
+    /// Silence the output had to insert while playing (a dropout), in
+    /// ms since start, and in how many separate seconds it happened.
+    pub dropout_ms: u64,
+    pub dropout_seconds: u64,
+    pub uptime_s: u64,
 }
 
 pub struct Engine {
@@ -81,6 +102,11 @@ pub struct Engine {
     clock: Clock,
     state_tx: watch::Sender<PlaybackState>,
     clock_tx: watch::Sender<ClockTick>,
+    status_tx: watch::Sender<AudioStatus>,
+    /// Sink underrun count at the last status, and dropouts while playing.
+    underruns_seen: u64,
+    dropout_frames: u64,
+    dropout_seconds: u64,
     cmd_rx: mpsc::Receiver<Command>,
     started: Instant,
     lyrics: LrcLib,
@@ -145,6 +171,7 @@ impl Engine {
             ..PlaybackState::default()
         });
         let (clock_tx, clock_rx) = watch::channel(ClockTick::default());
+        let (status_tx, status_rx) = watch::channel(AudioStatus::default());
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
         let (video_tx, video_rx) = mpsc::channel(8);
@@ -161,6 +188,10 @@ impl Engine {
             clock,
             state_tx,
             clock_tx,
+            status_tx,
+            underruns_seen: 0,
+            dropout_frames: 0,
+            dropout_seconds: 0,
             cmd_rx,
             started: Instant::now(),
             lyrics: LrcLib::new(),
@@ -194,6 +225,7 @@ impl Engine {
             Channels {
                 state: state_rx,
                 clock: clock_rx,
+                status: status_rx,
                 commands: cmd_tx,
             },
         )
@@ -1313,9 +1345,39 @@ impl Engine {
         });
     }
 
+    fn publish_status(&mut self) {
+        let playing = self.state_tx.borrow().status == PlaybackStatus::Playing;
+        let underruns = self.sink.underruns();
+        // the sink also counts the silence it plays while idle or paused
+        if playing {
+            let new = underruns.saturating_sub(self.underruns_seen);
+            if new > 0 {
+                self.dropout_frames += new;
+                self.dropout_seconds += 1;
+            }
+        }
+        self.underruns_seen = underruns;
+        let pushed = self.source.frames_pushed();
+        let status = AudioStatus {
+            source: self.source.name().to_string(),
+            sink: self.sink.name().to_string(),
+            sink_latency_ms: self.sink.latency().as_millis() as u64,
+            processor: self.processor.backend_name().to_string(),
+            processor_delay_ms: self.processor_delay_ms(),
+            buffered_ms: stems_core::frames_to_ms(pushed.saturating_sub(self.emitted())),
+            dropout_ms: stems_core::frames_to_ms(self.dropout_frames),
+            dropout_seconds: self.dropout_seconds,
+            uptime_s: self.started.elapsed().as_secs(),
+        };
+        let _ = self.status_tx.send(status);
+    }
+
     fn tick(&mut self) {
         if self.tick_count % 5 == 0 {
             self.publish_stems_progress();
+        }
+        if self.tick_count % 10 == 0 {
+            self.publish_status();
         }
         let status = self.state_tx.borrow().status;
         let revision = self.state_tx.borrow().revision;

@@ -7,7 +7,7 @@
   import LyricsView from './LyricsView.svelte';
   import NowPlaying from './NowPlaying.svelte';
 
-  const client = new StemsClient();
+  const client = new StemsClient('stage');
   onMount(() => {
     client.start();
     return () => client.stop();
