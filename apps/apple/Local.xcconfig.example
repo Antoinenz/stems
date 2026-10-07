@@ -1,0 +1,10 @@
+// Copy to Local.xcconfig (gitignored) and fill in.
+//
+// Your Apple ID's team: Xcode > Settings > Accounts > (your Apple ID) >
+// Team ID, or pick the team once in Signing & Capabilities and copy it from
+// the DEVELOPMENT_TEAM build setting. A free Apple ID works; its apps
+// expire after 7 days, so reinstall the iOS app on 29–30 December.
+STEMS_TEAM = ABCDE12345
+
+// Bundle IDs must be unique to your account with a free Apple ID.
+STEMS_BUNDLE_PREFIX = com.example

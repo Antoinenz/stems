@@ -1,0 +1,9 @@
+// Shared build settings. Put your own signing team and bundle prefix in
+// apps/apple/Local.xcconfig (gitignored; see Local.xcconfig.example).
+
+STEMS_BUNDLE_PREFIX = nz.antoine
+STEMS_TEAM =
+
+#include? "../Local.xcconfig"
+
+DEVELOPMENT_TEAM = $(STEMS_TEAM)
