@@ -121,6 +121,16 @@ pub struct Media {
     pub video_offset_ms: i64,
 }
 
+/// Why a song is queued: someone sings it (karaoke on) or it is just
+/// played (full mix), e.g. for dancing between singers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueKind {
+    #[default]
+    Sing,
+    Play,
+}
+
 /// One entry in the player's queue (library playback).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueItem {
@@ -133,6 +143,8 @@ pub struct QueueItem {
     /// Who is singing, if anyone said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub singer: Option<String>,
+    #[serde(default)]
+    pub kind: QueueKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -147,6 +159,10 @@ pub struct PlaybackState {
     pub queue: Vec<QueueItem>,
     /// Library key of the playing track, when it comes from the library.
     pub library_key: Option<String>,
+    /// The queue entry playing now (singer, sing or play).
+    pub current: Option<QueueItem>,
+    /// Background music: the queue ran dry and the player picked a song.
+    pub intermission: bool,
     /// Lyrics for `track`, once resolved. `None` while loading or if none found.
     pub lyrics: Option<Lyrics>,
     pub karaoke: KaraokeState,
@@ -207,6 +223,8 @@ pub enum Command {
         key: String,
         #[serde(default)]
         singer: Option<String>,
+        #[serde(default)]
+        kind: QueueKind,
     },
     /// Add a library track to the queue (at the end, or next).
     Enqueue {
@@ -215,6 +233,8 @@ pub enum Command {
         singer: Option<String>,
         #[serde(default)]
         next: bool,
+        #[serde(default)]
+        kind: QueueKind,
     },
     /// Remove a queue entry by its id.
     Dequeue {
@@ -268,7 +288,8 @@ mod tests {
             Command::Enqueue {
                 key: "spotify_x".into(),
                 singer: Some("Sam".into()),
-                next: false
+                next: false,
+                kind: QueueKind::Sing,
             }
         );
         assert!(!Command::SetKaraoke { enabled: true }.is_transport());

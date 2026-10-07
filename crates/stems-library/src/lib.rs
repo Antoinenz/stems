@@ -207,6 +207,23 @@ impl Library {
         wav::read_pcm(&self.files(entry).instrumental)
     }
 
+    /// A small JSON file at the library root (the saved queue, …), if any.
+    pub fn load_state<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
+        let path = self.dir.join(name);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        Ok(Some(
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
+        ))
+    }
+
+    /// Write a small JSON file at the library root, atomically.
+    pub fn save_state<T: serde::Serialize>(&self, name: &str, value: &T) -> Result<()> {
+        write_json(&self.dir.join(name), value)
+    }
+
     /// Total bytes of every file in the library (for the status view).
     pub fn size_bytes(&self) -> u64 {
         fn walk(p: &Path) -> u64 {
@@ -331,6 +348,25 @@ mod tests {
         lib.remove("spotify_a").unwrap();
         assert_eq!(lib.list().unwrap().len(), 1);
         assert!(lib.remove("spotify_a").is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn state_files_roundtrip() {
+        let dir = tmp("state");
+        let lib = Library::open(&dir).unwrap();
+        assert!(
+            lib.load_state::<Vec<String>>("queue.json")
+                .unwrap()
+                .is_none()
+        );
+        lib.save_state("queue.json", &vec!["a".to_string()])
+            .unwrap();
+        assert_eq!(
+            lib.load_state::<Vec<String>>("queue.json").unwrap(),
+            Some(vec!["a".to_string()])
+        );
+        assert!(lib.list().unwrap().is_empty(), "state files are not tracks");
         fs::remove_dir_all(&dir).unwrap();
     }
 

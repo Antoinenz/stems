@@ -53,6 +53,12 @@ pub enum SourceEvent {
     Queue {
         items: Vec<QueueItem>,
     },
+    /// Which queue entry the track that just started belongs to; `None`
+    /// with `intermission` for background music the player picked.
+    NowPlaying {
+        item: Option<QueueItem>,
+        intermission: bool,
+    },
     /// Source-provided media for a track (e.g. Spotify Canvas), resolved
     /// asynchronously after `TrackStarted`.
     Media {

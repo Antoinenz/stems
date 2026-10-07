@@ -92,6 +92,14 @@ pub struct LibraryConfig {
     pub dir: String,
     /// Loudness the player levels every track to (EBU R128 LUFS).
     pub target_lufs: f32,
+    /// When the queue runs dry, play random library songs (karaoke off)
+    /// until someone queues one; a queued song fades them out.
+    pub intermission: bool,
+    /// Level of that background music (0–1 of normal).
+    pub intermission_volume: f32,
+    /// Switch karaoke on for songs queued to sing and off for songs
+    /// queued to play (the host can still switch it by hand).
+    pub auto_karaoke: bool,
 }
 
 impl Default for LibraryConfig {
@@ -99,6 +107,9 @@ impl Default for LibraryConfig {
         Self {
             dir: String::new(),
             target_lufs: -14.0,
+            intermission: true,
+            intermission_volume: 0.5,
+            auto_karaoke: true,
         }
     }
 }

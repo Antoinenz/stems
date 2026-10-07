@@ -24,6 +24,7 @@ pub struct Live {
     pub lyrics_offset_ms: i64,
     pub video: Option<VideoFetcher>,
     pub video_align: bool,
+    pub auto_karaoke: bool,
 }
 
 /// Dotted keys that take effect without a restart.
@@ -42,6 +43,10 @@ const LIVE_KEYS: &[&str] = &[
     "guests.stage",
     "guests.timing",
     "guests.queue",
+    "library.target_lufs",
+    "library.intermission",
+    "library.intermission_volume",
+    "library.auto_karaoke",
 ];
 
 pub struct Settings {
@@ -51,6 +56,8 @@ pub struct Settings {
     live_tx: watch::Sender<Live>,
     /// The pre-buffer governor's limit (f32 bits), once it exists.
     gpu_limit: Mutex<Option<Arc<AtomicU32>>>,
+    /// The library player's settings, in library mode.
+    library: Mutex<Option<Arc<crate::player::LibraryKnobs>>>,
 }
 
 impl Settings {
@@ -62,11 +69,17 @@ impl Settings {
             video_dir,
             live_tx,
             gpu_limit: Mutex::new(None),
+            library: Mutex::new(None),
         })
     }
 
     pub fn live(&self) -> watch::Receiver<Live> {
         self.live_tx.subscribe()
+    }
+
+    /// Let the `[library]` settings reach the running player.
+    pub fn attach_library(&self, knobs: Arc<crate::player::LibraryKnobs>) {
+        *self.library.lock().expect("library knobs") = Some(knobs);
     }
 
     /// Let `karaoke.gpu_limit` reach the running governor.
@@ -78,6 +91,9 @@ impl Settings {
         let _ = self.live_tx.send(live_of(cfg, &self.video_dir));
         if let Some(h) = self.gpu_limit.lock().expect("gpu limit").as_ref() {
             h.store(cfg.karaoke.gpu_limit.to_bits(), Ordering::Relaxed);
+        }
+        if let Some(k) = self.library.lock().expect("library knobs").as_ref() {
+            k.apply(&cfg.library);
         }
     }
 }
@@ -91,6 +107,7 @@ fn live_of(cfg: &Config, video_dir: &std::path::Path) -> Live {
             .enabled
             .then(|| VideoFetcher::new(video_dir, cfg.video.ytdlp.clone(), cfg.video.max_height)),
         video_align: cfg.video.align,
+        auto_karaoke: cfg.library.auto_karaoke,
     }
 }
 
@@ -207,6 +224,9 @@ fn validate(cfg: &Config) -> std::result::Result<(), String> {
     }
     if !(-30.0..=-5.0).contains(&cfg.library.target_lufs) {
         return Err("library.target_lufs must be between -30 and -5".into());
+    }
+    if !(0.0..=1.0).contains(&cfg.library.intermission_volume) {
+        return Err("library.intermission_volume must be between 0 and 1".into());
     }
     Ok(())
 }

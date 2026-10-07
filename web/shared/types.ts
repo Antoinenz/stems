@@ -55,11 +55,15 @@ export interface Media {
   video_offset_ms: number;
 }
 
+/** `sing`: karaoke on when it starts; `play`: the full song. */
+export type QueueKind = 'sing' | 'play';
+
 export interface QueueItem {
   id: number;
   key: string;
   track: TrackRef;
   singer?: string;
+  kind: QueueKind;
 }
 
 export interface PlaybackState {
@@ -71,6 +75,10 @@ export interface PlaybackState {
   queue: QueueItem[];
   /** Library key of the playing track, when it comes from the library. */
   library_key: string | null;
+  /** The queue entry playing now. */
+  current: QueueItem | null;
+  /** Background music between requests. */
+  intermission: boolean;
   lyrics: Lyrics | null;
   karaoke: KaraokeState;
   view_mode: ViewMode;
@@ -102,8 +110,8 @@ export type Command =
   | { cmd: 'pause' }
   | { cmd: 'next' }
   | { cmd: 'seek'; position_ms: number }
-  | { cmd: 'play_track'; key: string; singer?: string | null }
-  | { cmd: 'enqueue'; key: string; singer?: string | null; next?: boolean }
+  | { cmd: 'play_track'; key: string; singer?: string | null; kind?: QueueKind }
+  | { cmd: 'enqueue'; key: string; singer?: string | null; next?: boolean; kind?: QueueKind }
   | { cmd: 'dequeue'; id: number }
   | { cmd: 'move_in_queue'; id: number; to: number }
   | { cmd: 'clear_queue' };

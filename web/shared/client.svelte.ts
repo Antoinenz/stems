@@ -102,6 +102,8 @@ export const EMPTY_STATE: PlaybackState = {
   next_track: null,
   queue: [],
   library_key: null,
+  current: null,
+  intermission: false,
   lyrics: null,
   karaoke: { enabled: false, vocal_gain: 0, backend: null, stems: null },
   view_mode: 'lyrics',

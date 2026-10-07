@@ -116,6 +116,8 @@ pub struct Engine {
     library: Option<Library>,
     /// Stems the library player registers, read by the processor.
     library_stems: Option<Arc<StemStore>>,
+    /// Switch karaoke on for "sing" requests, off for "play" ones.
+    auto_karaoke: bool,
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
@@ -183,6 +185,7 @@ impl Engine {
             live_rx: None,
             library: None,
             library_stems: None,
+            auto_karaoke: true,
             exit_on_end,
             tick_count: 0,
         };
@@ -239,6 +242,7 @@ impl Engine {
 
     /// Follow settings changed at runtime.
     pub fn with_live(mut self, rx: watch::Receiver<Live>) -> Self {
+        self.auto_karaoke = rx.borrow().auto_karaoke;
         self.live_rx = Some(rx);
         self
     }
@@ -451,6 +455,8 @@ impl Engine {
                 tracing::info!("track ended");
                 self.state_tx.send_modify(|s| {
                     s.library_key = None;
+                    s.current = None;
+                    s.intermission = false;
                     s.revision += 1;
                 });
                 self.clock.pause(self.clock.position_ms(self.emitted()));
@@ -475,6 +481,24 @@ impl Engine {
                 });
             }
             SourceEvent::Volume { level } => self.set_volume(level),
+            SourceEvent::NowPlaying { item, intermission } => {
+                let karaoke = item
+                    .as_ref()
+                    .filter(|_| self.auto_karaoke)
+                    .map(|i| i.kind == stems_core::QueueKind::Sing && !intermission);
+                let item = item.map(|mut i| {
+                    i.track = self.localize(i.track);
+                    i
+                });
+                self.state_tx.send_modify(|s| {
+                    s.current = item;
+                    s.intermission = intermission;
+                    s.revision += 1;
+                });
+                if let Some(on) = karaoke {
+                    self.set_karaoke(on);
+                }
+            }
             SourceEvent::Queue { items } => {
                 let items: Vec<_> = items
                     .into_iter()
@@ -527,13 +551,7 @@ impl Engine {
         }
         match cmd {
             Command::SetVolume { level } => self.set_volume(level.clamp(0.0, 1.0)),
-            Command::SetKaraoke { enabled } => {
-                self.processor.control().set_enabled(enabled);
-                self.state_tx.send_modify(|s| {
-                    s.karaoke.enabled = enabled;
-                    s.revision += 1;
-                });
-            }
+            Command::SetKaraoke { enabled } => self.set_karaoke(enabled),
             Command::SetVocalGain { gain } => {
                 let gain = gain.clamp(0.0, 1.0);
                 self.processor.control().set_vocal_gain(gain);
@@ -588,6 +606,18 @@ impl Engine {
                 });
             }
         }
+    }
+
+    fn set_karaoke(&mut self, enabled: bool) {
+        self.processor.control().set_enabled(enabled);
+        self.state_tx.send_if_modified(|s| {
+            if s.karaoke.enabled == enabled {
+                return false;
+            }
+            s.karaoke.enabled = enabled;
+            s.revision += 1;
+            true
+        });
     }
 
     fn on_lyrics(&mut self, id: TrackId, lyrics: Option<Lyrics>) {
@@ -912,6 +942,7 @@ impl Engine {
     /// Apply settings changed from the host remote.
     fn on_live(&mut self, live: Live) {
         self.processor.control().set_fade_ms(live.fade_ms as f32);
+        self.auto_karaoke = live.auto_karaoke;
         if live.lyrics_offset_ms != self.lyrics_offset_ms {
             let delta = live.lyrics_offset_ms - self.lyrics_offset_ms;
             self.lyrics_offset_ms = live.lyrics_offset_ms;

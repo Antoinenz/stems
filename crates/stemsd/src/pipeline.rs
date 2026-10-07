@@ -317,9 +317,10 @@ pub async fn run_library(
         audio,
         cfg.karaoke.fade_ms as f32,
     )?;
+    let knobs = crate::player::LibraryKnobs::new(&cfg.library);
     let source = crate::player::LibraryPlayer::new(
         lib.clone(),
-        cfg.library.target_lufs,
+        knobs.clone(),
         producer,
         flush,
         stems.clone(),
@@ -339,6 +340,7 @@ pub async fn run_library(
         false,
     );
     let settings = settings(cfg)?;
+    settings.attach_library(knobs);
     let engine = engine
         .with_library(lib.clone(), stems)
         .with_live(settings.live());
