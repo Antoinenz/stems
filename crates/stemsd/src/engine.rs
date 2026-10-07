@@ -233,7 +233,10 @@ impl Engine {
 
     pub fn set_volume(&mut self, level: f32) {
         self.sink.set_volume(level);
-        self.state_tx.send_modify(|s| s.volume = level);
+        self.state_tx.send_modify(|s| {
+            s.volume = level;
+            s.revision += 1;
+        });
     }
 
     /// Enable music video lookups.
