@@ -1,0 +1,29 @@
+[
+  {
+    "album": null,
+    "art": null,
+    "artists": [],
+    "duration_ms": 61000,
+    "key": "local_demo_00ff00ff00ff00ff",
+    "lyrics": false,
+    "playable": true,
+    "title": "Demo",
+    "video": false,
+    "words": false
+  },
+  {
+    "album": "Album",
+    "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
+    "artists": [
+      "JAY-Z",
+      "Kanye West"
+    ],
+    "duration_ms": 219333,
+    "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+    "lyrics": true,
+    "playable": true,
+    "title": "Ni**as In Paris",
+    "video": true,
+    "words": true
+  }
+]

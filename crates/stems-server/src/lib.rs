@@ -62,12 +62,21 @@ struct Clients {
 impl Clients {
     fn snapshot(&self) -> serde_json::Value {
         use std::sync::atomic::Ordering::Relaxed;
-        serde_json::json!({
-            "apps": *self.by_app.lock().expect("clients"),
-            "hosts": self.hosts.load(Relaxed),
-            "guests": self.guests.load(Relaxed),
-        })
+        clients_json(
+            &self.by_app.lock().expect("clients"),
+            self.hosts.load(Relaxed),
+            self.guests.load(Relaxed),
+        )
     }
+}
+
+/// The `clients` part of the status: open sessions per `?app=` and role.
+pub fn clients_json(
+    apps: &std::collections::BTreeMap<String, usize>,
+    hosts: usize,
+    guests: usize,
+) -> serde_json::Value {
+    serde_json::json!({ "apps": apps, "hosts": hosts, "guests": guests })
 }
 
 /// Counts a session while it lives.
@@ -263,9 +272,10 @@ pub fn lan_ip() -> Option<std::net::IpAddr> {
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }
 
+/// What the WebSocket sends: `{"type": "state", …}` and so on.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Outbound<'a> {
+pub enum Outbound<'a> {
     State(&'a PlaybackState),
     Clock(&'a ClockTick),
     /// The machines view (hosts only).

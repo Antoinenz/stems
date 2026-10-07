@@ -1,0 +1,77 @@
+{
+  "config": {
+    "device_name": "stems",
+    "guests": {
+      "karaoke": true,
+      "queue": false,
+      "stage": true,
+      "timing": false,
+      "vocals": true,
+      "volume": false
+    },
+    "host_token": "XH7ZT8",
+    "karaoke": {
+      "backend": "dsp",
+      "denoise": false,
+      "device": "auto",
+      "fade_ms": 400,
+      "gpu_limit": 1.0,
+      "hop_ms": 0,
+      "local_fallback": "never",
+      "lookahead_ms": 0,
+      "mode": "streaming",
+      "model": "UVR-MDX-NET-Inst_HQ_3",
+      "remote": "",
+      "slack_ms": 2000,
+      "stem_cache_mb": 4096,
+      "threads": 0,
+      "workers": 1
+    },
+    "library": {
+      "auto_karaoke": true,
+      "dir": "/Volumes/Party/stems-library",
+      "intermission": true,
+      "intermission_volume": 0.5,
+      "target_lufs": -14.0
+    },
+    "lyrics": {
+      "align": true
+    },
+    "lyrics_offset_ms": 0,
+    "port": 7373,
+    "sink": "cpal",
+    "spotify": {
+      "audio_cache_mb": 2048,
+      "bitrate": 320,
+      "device_type": "tv",
+      "enabled": true,
+      "initial_volume_percent": 70
+    },
+    "video": {
+      "align": true,
+      "enabled": false,
+      "max_height": 1080,
+      "ytdlp": "yt-dlp"
+    }
+  },
+  "live_keys": [
+    "host_token",
+    "lyrics_offset_ms",
+    "karaoke.fade_ms",
+    "karaoke.gpu_limit",
+    "video.enabled",
+    "video.align",
+    "video.ytdlp",
+    "video.max_height",
+    "guests.karaoke",
+    "guests.vocals",
+    "guests.volume",
+    "guests.stage",
+    "guests.timing",
+    "guests.queue",
+    "library.target_lufs",
+    "library.intermission",
+    "library.intermission_volume",
+    "library.auto_karaoke"
+  ]
+}

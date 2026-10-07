@@ -1,0 +1,21 @@
+{
+  "current": "JAY-Z, Kanye West — Ni**as In Paris",
+  "errors": [
+    "not a Spotify link or audio file: htps://x"
+  ],
+  "finished": [
+    {
+      "complete": false,
+      "key": "local_demo_00ff00ff00ff00ff",
+      "playable": true,
+      "problems": [
+        "lyrics: no lyrics found on LRCLIB"
+      ],
+      "title": "Demo"
+    }
+  ],
+  "running": true,
+  "waiting": [
+    "Roddy Ricch — The Box"
+  ]
+}

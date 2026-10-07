@@ -1,0 +1,154 @@
+{
+  "current": {
+    "id": 1,
+    "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+    "kind": "sing",
+    "singer": "Mia",
+    "track": {
+      "album": "Album",
+      "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
+      "artists": [
+        "JAY-Z",
+        "Kanye West"
+      ],
+      "duration_ms": 219333,
+      "id": {
+        "id": "1auxYwYrFRqZP7t3s7w4um",
+        "kind": "spotify"
+      },
+      "isrc": "USUM71111621",
+      "title": "Ni**as In Paris"
+    }
+  },
+  "intermission": false,
+  "karaoke": {
+    "backend": "prebuffer",
+    "enabled": true,
+    "stems": {
+      "done": true,
+      "ready_ms": 219333,
+      "speed": 4.099999904632568,
+      "total_ms": 219333
+    },
+    "vocal_gain": 0.15000000596046448
+  },
+  "library_key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+  "lyrics": {
+    "lines": [
+      {
+        "text": "So I ball so hard",
+        "time_ms": 15790,
+        "words": [
+          {
+            "text": "So",
+            "time_ms": 15810
+          },
+          {
+            "text": "I",
+            "time_ms": 16090
+          },
+          {
+            "text": "ball",
+            "time_ms": 16210
+          },
+          {
+            "text": "so",
+            "time_ms": 16500
+          },
+          {
+            "text": "hard",
+            "time_ms": 16800
+          }
+        ]
+      },
+      {
+        "text": "A line without word timings",
+        "time_ms": 19000
+      }
+    ],
+    "offset_ms": -120,
+    "plain": null,
+    "provider": "lrclib"
+  },
+  "media": {
+    "canvas_url": null,
+    "video_offset_ms": 350,
+    "video_url": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/video.mp4"
+  },
+  "next_track": {
+    "album": "Album",
+    "art": "/media/library/spotify_0nbXyq5TXYPCO7pr3N8S4I/cover.jpg",
+    "artists": [
+      "Roddy Ricch"
+    ],
+    "duration_ms": 196652,
+    "id": {
+      "id": "0nbXyq5TXYPCO7pr3N8S4I",
+      "kind": "spotify"
+    },
+    "isrc": "USUM71111621",
+    "title": "The Box"
+  },
+  "queue": [
+    {
+      "id": 3,
+      "key": "spotify_0nbXyq5TXYPCO7pr3N8S4I",
+      "kind": "play",
+      "track": {
+        "album": "Album",
+        "art": "/media/library/spotify_0nbXyq5TXYPCO7pr3N8S4I/cover.jpg",
+        "artists": [
+          "Roddy Ricch"
+        ],
+        "duration_ms": 196652,
+        "id": {
+          "id": "0nbXyq5TXYPCO7pr3N8S4I",
+          "kind": "spotify"
+        },
+        "isrc": "USUM71111621",
+        "title": "The Box"
+      }
+    },
+    {
+      "id": 4,
+      "key": "spotify_4uLU6hMCjMI75M1A2tKUQC",
+      "kind": "sing",
+      "singer": "Sam & Alex",
+      "track": {
+        "album": "Album",
+        "art": "/media/library/spotify_4uLU6hMCjMI75M1A2tKUQC/cover.jpg",
+        "artists": [
+          "Rick Astley"
+        ],
+        "duration_ms": 213573,
+        "id": {
+          "id": "4uLU6hMCjMI75M1A2tKUQC",
+          "kind": "spotify"
+        },
+        "isrc": "USUM71111621",
+        "title": "Never Gonna Give You Up"
+      }
+    }
+  ],
+  "revision": 42,
+  "source": "library",
+  "status": "playing",
+  "track": {
+    "album": "Album",
+    "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
+    "artists": [
+      "JAY-Z",
+      "Kanye West"
+    ],
+    "duration_ms": 219333,
+    "id": {
+      "id": "1auxYwYrFRqZP7t3s7w4um",
+      "kind": "spotify"
+    },
+    "isrc": "USUM71111621",
+    "title": "Ni**as In Paris"
+  },
+  "type": "state",
+  "view_mode": "video",
+  "volume": 0.800000011920929
+}

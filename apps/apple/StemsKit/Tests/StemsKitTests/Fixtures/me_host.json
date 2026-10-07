@@ -1,0 +1,11 @@
+{
+  "permissions": [
+    "karaoke",
+    "vocals",
+    "volume",
+    "stage",
+    "timing",
+    "queue"
+  ],
+  "role": "host"
+}

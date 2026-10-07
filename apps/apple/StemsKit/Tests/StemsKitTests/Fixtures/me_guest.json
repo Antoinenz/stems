@@ -1,0 +1,8 @@
+{
+  "permissions": [
+    "karaoke",
+    "vocals",
+    "stage"
+  ],
+  "role": "guest"
+}

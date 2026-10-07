@@ -1,0 +1,26 @@
+{
+  "current": null,
+  "intermission": false,
+  "karaoke": {
+    "backend": null,
+    "enabled": false,
+    "stems": null,
+    "vocal_gain": 0.0
+  },
+  "library_key": null,
+  "lyrics": null,
+  "media": {
+    "canvas_url": null,
+    "video_offset_ms": 0,
+    "video_url": null
+  },
+  "next_track": null,
+  "queue": [],
+  "revision": 0,
+  "source": null,
+  "status": "idle",
+  "track": null,
+  "type": "state",
+  "view_mode": "lyrics",
+  "volume": 0.0
+}

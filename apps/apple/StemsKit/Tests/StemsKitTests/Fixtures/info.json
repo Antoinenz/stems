@@ -1,0 +1,6 @@
+{
+  "device_name": "stems",
+  "lan_host": "192.168.8.10:7373",
+  "remote_url": "http://192.168.8.10:7373/remote/",
+  "stage_url": "http://192.168.8.10:7373/stage/"
+}

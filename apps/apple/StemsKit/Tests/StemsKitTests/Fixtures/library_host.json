@@ -1,0 +1,86 @@
+[
+  {
+    "added_at": 1791333000,
+    "album": null,
+    "art": null,
+    "artists": [],
+    "complete": false,
+    "duration_ms": 61000,
+    "key": "local_demo_00ff00ff00ff00ff",
+    "loudness_lufs": null,
+    "lyrics": false,
+    "playable": true,
+    "stages": {
+      "audio": {
+        "state": "done"
+      },
+      "cover": {
+        "state": "pending"
+      },
+      "lyrics": {
+        "error": "no lyrics found on LRCLIB",
+        "state": "failed"
+      },
+      "stems": {
+        "state": "done"
+      },
+      "video": {
+        "state": "skipped"
+      },
+      "video_align": {
+        "state": "pending"
+      },
+      "words": {
+        "state": "pending"
+      }
+    },
+    "title": "Demo",
+    "video": false,
+    "video_corr": null,
+    "video_offset_ms": null,
+    "words": false
+  },
+  {
+    "added_at": 1791332963,
+    "album": "Album",
+    "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
+    "artists": [
+      "JAY-Z",
+      "Kanye West"
+    ],
+    "complete": true,
+    "duration_ms": 219333,
+    "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+    "loudness_lufs": -8.899999618530273,
+    "lyrics": true,
+    "playable": true,
+    "stages": {
+      "audio": {
+        "state": "done"
+      },
+      "cover": {
+        "state": "done"
+      },
+      "lyrics": {
+        "state": "done"
+      },
+      "stems": {
+        "state": "done"
+      },
+      "video": {
+        "state": "done"
+      },
+      "video_align": {
+        "state": "done"
+      },
+      "words": {
+        "state": "done"
+      }
+    },
+    "title": "Ni**as In Paris",
+    "video": true,
+    "video_corr": 0.8199999928474426,
+    "video_offset_ms": 350,
+    "words": true
+  }
+]

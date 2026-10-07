@@ -99,6 +99,18 @@ pub struct WorkerStat {
     last_seen: Option<Instant>,
 }
 
+impl WorkerStat {
+    pub fn new(host: &str, model: &str, provider: &str, align: bool) -> Self {
+        Self {
+            host: host.to_string(),
+            model: model.to_string(),
+            provider: provider.to_string(),
+            align,
+            ..Default::default()
+        }
+    }
+}
+
 fn worker_stats_map() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, WorkerStat>> {
     static STATS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::BTreeMap<String, WorkerStat>>,
