@@ -92,6 +92,11 @@ Modes: `lyrics`, `karaoke` (bigger, fewer lines), `video` (music video when reso
 - `GET /api/state` — now playing, lyrics, karaoke state, view mode
 - `GET /api/info` — LAN URLs of the stage and remote; `GET /api/remote-qr.svg` — QR of the latter
 - `GET /api/system` — CPU %, memory and temperature sensors of the box (shown on the remote)
+- `GET /api/status` — host only; the machines view: audio path (latencies, buffer, dropouts
+  while playing), separation workers (connections, requests, failures, time per window),
+  library (drive present, songs ready, free space, import), system load, connected screens.
+  Hosts also receive it over the WebSocket once a second (`{"type":"status",…}`); clients name
+  themselves with `?app=stage|remote|…` on the WebSocket URL
 - `WS /api/ws` — state on change + clock at 10 Hz; accepts commands
 - `POST /api/command` — e.g. `{"cmd":"set_karaoke","enabled":true}`,
   `{"cmd":"set_view_mode","mode":"karaoke"}`, `{"cmd":"set_lyrics_offset","offset_ms":-300}`,
