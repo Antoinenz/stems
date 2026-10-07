@@ -316,6 +316,13 @@ DirectX 12 GPU), the Visual C++ runtime it needs, both models, and `bench.cmd` /
 player. Needs `rustup target add aarch64-pc-windows-msvc` (or `x86_64-…`),
 `cargo install cargo-xwin` and `brew install llvm lld sevenzip`.
 
+### Mac and iPhone apps
+
+`apps/apple/` has a native Mac hub (runs and supervises `stemsd`, menu bar item, the whole
+party in one window) and an iPhone remote for the host that pairs by scanning a code on the
+Mac. See [apps/apple/README.md](apps/apple/README.md). `stemsd config --json` prints the file
+locations, port and host token for apps like these.
+
 ## Building
 
 Requires stable Rust (see `rust-toolchain.toml`).
