@@ -6,8 +6,10 @@
 //! first time a phone picked this device (`<cache>/spotify/credentials.json`),
 //! so no password or OAuth flow is needed.
 
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use librespot_core::cache::Cache;
@@ -158,9 +160,13 @@ impl ImportSession {
         let (collection, uris): (Option<Collection>, Vec<SpotifyUri>) = match link {
             Link::Track(id) => (None, vec![uri("track", id)?]),
             Link::Album(id) => {
-                let album = Album::get(&self.session, &uri("album", id)?)
-                    .await
-                    .map_err(|e| anyhow!("album {id}: {e}"))?;
+                let album_uri = uri("album", id)?;
+                let album = retrying(&format!("album {id}"), || async {
+                    Album::get(&self.session, &album_uri)
+                        .await
+                        .map_err(|e| anyhow!("album {id}: {e}"))
+                })
+                .await?;
                 let c = Collection {
                     kind: "album",
                     id: id.clone(),
@@ -176,9 +182,13 @@ impl ImportSession {
                 (Some(c), album.tracks().cloned().collect())
             }
             Link::Playlist(id) => {
-                let list = Playlist::get(&self.session, &uri("playlist", id)?)
-                    .await
-                    .map_err(|e| anyhow!("playlist {id}: {e}"))?;
+                let list_uri = uri("playlist", id)?;
+                let list = retrying(&format!("playlist {id}"), || async {
+                    Playlist::get(&self.session, &list_uri)
+                        .await
+                        .map_err(|e| anyhow!("playlist {id}: {e}"))
+                })
+                .await?;
                 let c = Collection {
                     kind: "playlist",
                     id: id.clone(),
@@ -196,9 +206,13 @@ impl ImportSession {
         };
         let mut tracks = Vec::with_capacity(uris.len());
         for u in uris {
+            // a big playlist is two requests per track: don't hammer
+            tokio::time::sleep(PACE).await;
             match self.track_ref(&u).await {
                 Ok(t) => tracks.push(t),
-                Err(e) if !matches!(link, Link::Track(_)) => {
+                // still rate limited after every retry: fail the whole link
+                // (and retry it later) rather than lose the track
+                Err(e) if !matches!(link, Link::Track(_)) && !is_rate_limited(&e) => {
                     tracing::warn!(uri = %u, "skipping unavailable track: {e:#}")
                 }
                 Err(e) => return Err(e),
@@ -208,16 +222,25 @@ impl ImportSession {
     }
 
     async fn track_ref(&self, u: &SpotifyUri) -> Result<ResolvedTrack> {
-        let item = AudioItem::get_file(&self.session, u.clone())
-            .await
-            .map_err(|e| anyhow!("track metadata: {e}"))?;
+        let item = retrying("track metadata", || async {
+            AudioItem::get_file(&self.session, u.clone())
+                .await
+                .map_err(|e| anyhow!("track metadata: {e}"))
+        })
+        .await?;
         let mut track = track_ref_from_item(&item);
         let mut info = TrackInfo::default();
         if let UniqueFields::Track { popularity, .. } = &item.unique_fields {
             info.popularity = Some(*popularity);
         }
         // the full track record: ISRC, album date and label, explicit…
-        match Track::get(&self.session, u).await {
+        let full = retrying("track record", || async {
+            Track::get(&self.session, u)
+                .await
+                .map_err(|e| anyhow!("track record: {e}"))
+        })
+        .await;
+        match full {
             Ok(full) => {
                 track.isrc = full
                     .external_ids
@@ -233,7 +256,10 @@ impl ImportSession {
 
     /// Download a track's audio file (whole, decrypted).
     pub async fn download(&self, base62: &str) -> Result<Download> {
-        let opened = open_decrypted(&self.session, base62, self.bitrate).await?;
+        let opened = retrying("audio file", || {
+            open_decrypted(&self.session, base62, self.bitrate)
+        })
+        .await?;
         let ext = if AudioFiles::is_ogg_vorbis(opened.format) {
             "ogg"
         } else if AudioFiles::is_mp3(opened.format) {
@@ -257,6 +283,43 @@ impl ImportSession {
             bail!("empty audio file");
         }
         Ok(Download { bytes, ext })
+    }
+}
+
+/// Pause between per-track metadata requests.
+const PACE: Duration = Duration::from_millis(60);
+/// Retries of a rate-limited request, waiting 2, 4, 8 … 60 s in between.
+const RATE_LIMIT_RETRIES: u32 = 10;
+
+/// Spotify answers too many requests with "resource exhausted / rate
+/// limited"; that is a wait, not a missing track.
+fn is_rate_limited(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}").to_ascii_lowercase();
+    msg.contains("exhausted") || msg.contains("rate limit") || msg.contains("429")
+}
+
+async fn retrying<T, F, Fut>(what: &str, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut wait = Duration::from_secs(2);
+    let mut attempt = 0;
+    loop {
+        match f().await {
+            Err(e) if is_rate_limited(&e) && attempt < RATE_LIMIT_RETRIES => {
+                attempt += 1;
+                tracing::warn!(
+                    what,
+                    wait_s = wait.as_secs(),
+                    attempt,
+                    "spotify is rate limiting; waiting"
+                );
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(60));
+            }
+            other => return other,
+        }
     }
 }
 
@@ -325,6 +388,14 @@ mod tests {
             Link::parse(&format!("spotify:album:{ID}")),
             Some(Link::Album(ID.into()))
         );
+    }
+
+    #[test]
+    fn rate_limits_are_recognised() {
+        assert!(is_rate_limited(&anyhow!(
+            "track metadata: Resource has been exhausted {{ rate limited for at least another 0 seconds }}"
+        )));
+        assert!(!is_rate_limited(&anyhow!("track metadata: not found")));
     }
 
     #[test]
