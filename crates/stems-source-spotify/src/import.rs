@@ -12,12 +12,12 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use librespot_core::cache::Cache;
 use librespot_core::{Session, SessionConfig, SpotifyUri};
-use librespot_metadata::audio::{AudioFiles, AudioItem};
-use librespot_metadata::{Album, Metadata, Playlist};
+use librespot_metadata::audio::{AudioFiles, AudioItem, UniqueFields};
+use librespot_metadata::{Album, Metadata, Playlist, Track};
 use librespot_playback::config::Bitrate;
-use stems_core::TrackRef;
+use stems_core::{TrackInfo, TrackRef};
 
-use crate::events::{fetch_isrc, track_ref_from_item};
+use crate::events::track_ref_from_item;
 use crate::fetch::open_decrypted;
 
 /// What a link points at.
@@ -71,6 +71,50 @@ impl Link {
     }
 }
 
+impl Link {
+    pub fn id(&self) -> &str {
+        match self {
+            Link::Track(id) | Link::Album(id) | Link::Playlist(id) => id,
+        }
+    }
+
+    /// `https://open.spotify.com/<kind>/<id>`
+    pub fn url(&self) -> String {
+        let kind = match self {
+            Link::Track(_) => "track",
+            Link::Album(_) => "album",
+            Link::Playlist(_) => "playlist",
+        };
+        format!("https://open.spotify.com/{kind}/{}", self.id())
+    }
+}
+
+/// An album or playlist a link resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collection {
+    /// `playlist` or `album`.
+    pub kind: &'static str,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub url: String,
+}
+
+/// One track of a resolved link, with its catalogue facts.
+#[derive(Debug, Clone)]
+pub struct ResolvedTrack {
+    pub track: TrackRef,
+    pub info: TrackInfo,
+}
+
+/// What a link points at: its tracks in order, and the album or playlist
+/// itself when it is one.
+#[derive(Debug, Clone)]
+pub struct Resolution {
+    pub collection: Option<Collection>,
+    pub tracks: Vec<ResolvedTrack>,
+}
+
 /// The original audio of a track as Spotify serves it, decrypted, with
 /// Spotify's own header removed: a normal Ogg Vorbis / MP3 / FLAC file.
 pub struct Download {
@@ -107,47 +151,84 @@ impl ImportSession {
         Ok(Self { session, bitrate })
     }
 
-    /// Every track a link points at, in order. Unavailable tracks in an
-    /// album or playlist are logged and skipped.
-    pub async fn resolve(&self, link: &Link) -> Result<Vec<TrackRef>> {
-        let uris: Vec<SpotifyUri> = match link {
-            Link::Track(id) => vec![uri("track", id)?],
+    /// Every track a link points at, in order, with the album or
+    /// playlist it came from. Unavailable tracks in an album or playlist
+    /// are logged and skipped.
+    pub async fn resolve(&self, link: &Link) -> Result<Resolution> {
+        let (collection, uris): (Option<Collection>, Vec<SpotifyUri>) = match link {
+            Link::Track(id) => (None, vec![uri("track", id)?]),
             Link::Album(id) => {
                 let album = Album::get(&self.session, &uri("album", id)?)
                     .await
                     .map_err(|e| anyhow!("album {id}: {e}"))?;
-                album.tracks().cloned().collect()
+                let c = Collection {
+                    kind: "album",
+                    id: id.clone(),
+                    name: album.name.clone(),
+                    description: album
+                        .artists
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    url: link.url(),
+                };
+                (Some(c), album.tracks().cloned().collect())
             }
             Link::Playlist(id) => {
                 let list = Playlist::get(&self.session, &uri("playlist", id)?)
                     .await
                     .map_err(|e| anyhow!("playlist {id}: {e}"))?;
-                list.tracks()
+                let c = Collection {
+                    kind: "playlist",
+                    id: id.clone(),
+                    name: list.name().to_string(),
+                    description: list.attributes.description.clone(),
+                    url: link.url(),
+                };
+                let uris = list
+                    .tracks()
                     .filter(|u| matches!(u, SpotifyUri::Track { .. }))
                     .cloned()
-                    .collect()
+                    .collect();
+                (Some(c), uris)
             }
         };
-        let mut out = Vec::with_capacity(uris.len());
+        let mut tracks = Vec::with_capacity(uris.len());
         for u in uris {
             match self.track_ref(&u).await {
-                Ok(t) => out.push(t),
+                Ok(t) => tracks.push(t),
                 Err(e) if !matches!(link, Link::Track(_)) => {
                     tracing::warn!(uri = %u, "skipping unavailable track: {e:#}")
                 }
                 Err(e) => return Err(e),
             }
         }
-        Ok(out)
+        Ok(Resolution { collection, tracks })
     }
 
-    async fn track_ref(&self, u: &SpotifyUri) -> Result<TrackRef> {
+    async fn track_ref(&self, u: &SpotifyUri) -> Result<ResolvedTrack> {
         let item = AudioItem::get_file(&self.session, u.clone())
             .await
             .map_err(|e| anyhow!("track metadata: {e}"))?;
-        let mut t = track_ref_from_item(&item);
-        t.isrc = fetch_isrc(&self.session, u).await;
-        Ok(t)
+        let mut track = track_ref_from_item(&item);
+        let mut info = TrackInfo::default();
+        if let UniqueFields::Track { popularity, .. } = &item.unique_fields {
+            info.popularity = Some(*popularity);
+        }
+        // the full track record: ISRC, album date and label, explicit…
+        match Track::get(&self.session, u).await {
+            Ok(full) => {
+                track.isrc = full
+                    .external_ids
+                    .iter()
+                    .find(|e| e.external_type.eq_ignore_ascii_case("isrc"))
+                    .map(|e| e.id.clone());
+                fill_info(&mut info, &full, &track);
+            }
+            Err(e) => tracing::debug!(uri = %u, "track record: {e}"),
+        }
+        Ok(ResolvedTrack { track, info })
     }
 
     /// Download a track's audio file (whole, decrypted).
@@ -176,6 +257,31 @@ impl ImportSession {
             bail!("empty audio file");
         }
         Ok(Download { bytes, ext })
+    }
+}
+
+fn fill_info(info: &mut TrackInfo, full: &Track, track: &TrackRef) {
+    let d = &full.album.date;
+    if d.year() > 1000 {
+        info.release_date = Some(format!(
+            "{:04}-{:02}-{:02}",
+            d.year(),
+            u8::from(d.month()),
+            d.day()
+        ));
+    }
+    let label = full.album.label.trim();
+    if !label.is_empty() {
+        info.label = Some(label.to_string());
+    }
+    if info.popularity.is_none() && full.popularity > 0 {
+        info.popularity = Some(full.popularity.clamp(0, 100) as u8);
+    }
+    info.explicit = Some(full.is_explicit);
+    info.languages = full.language_of_performance.clone();
+    let album_artists: Vec<String> = full.album.artists.iter().map(|a| a.name.clone()).collect();
+    if !album_artists.is_empty() && album_artists != track.artists {
+        info.album_artists = album_artists;
     }
 }
 
