@@ -4,6 +4,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Antoinenz/stems/main/farm/cloud/setup.sh | bash
 #   # or, from a checkout: farm/cloud/setup.sh
+#   # or, for a private repo, from a machine with a checkout:
+#   git archive HEAD | ssh <box> 'mkdir -p ~/stems-farm/repo && tar -x -C ~/stems-farm/repo'
+#   ssh <box> 'bash ~/stems-farm/repo/farm/cloud/setup.sh'
 #
 # Then copy your Spotify login (from a machine where stems already works;
 # librespot keeps it in a folder named credentials.json):
@@ -37,6 +40,10 @@ export PATH="$HOME/.cargo/bin:$PATH"
 echo "==> stems source"
 if [ -d "$FARM_HOME/repo/.git" ]; then
   git -C "$FARM_HOME/repo" pull --ff-only -q
+elif [ -f "$FARM_HOME/repo/Cargo.toml" ]; then
+  # copied in (e.g. `git archive HEAD | ssh box tar -x -C ~/stems-farm/repo`
+  # when the repository is private)
+  echo "    using the source already in $FARM_HOME/repo"
 else
   git clone -q "$REPO_URL" "$FARM_HOME/repo"
 fi
