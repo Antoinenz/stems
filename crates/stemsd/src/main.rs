@@ -3,6 +3,7 @@
 //! Phase 1: a CLI that wires one source to one sink and logs transport
 //! events. The HTTP/WS server, separation and the stage come next.
 
+mod awake;
 mod config;
 mod engine;
 mod import;
@@ -205,6 +206,8 @@ fn main() -> Result<()> {
             rt.block_on(pipeline::run_bench(&cfg, windows, hop_ms))
         }
         Cmd::Worker { bind, connect } => {
+            // the main thread blocks below for the worker's whole life
+            awake::keep_awake();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pipeline::run_worker(&cfg, &bind, connect.as_deref()))
         }
