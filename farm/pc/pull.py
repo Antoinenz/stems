@@ -40,6 +40,8 @@ log = logging.getLogger("pull")
 CLOUD_STAGES = ("audio", "stems", "analysis")
 CLOUD_FIELDS = ("track", "mix_file", "frames", "loudness_lufs", "info", "stems_model", "analysis")
 FINISH_STAGES = "lyrics,words,video,video_align,cover"
+# a finish run whose log hasn't grown for this long is stuck
+STALL_S = 15 * 60
 
 
 def find_ssh(configured: str | None) -> str:
@@ -272,13 +274,29 @@ def finish(cfg: Config) -> None:
     log.info("finishing tracks: %s", FINISH_STAGES)
     logfile = cfg.root / "logs" / f"stemsd-{dt.date.today():%Y-%m-%d}.log"
     with open(logfile, "ab") as out:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             [str(cfg.stemsd), "import", "--resume", "--stages", FINISH_STAGES],
             env=stemsd_env(cfg),
             stdout=out,
             stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        # watchdog: a run whose log stops growing is stuck (a hung download);
+        # kill it — every track's progress is saved, the next run goes on
+        last_size, last_change = -1, time.monotonic()
+        while proc.poll() is None:
+            time.sleep(30)
+            size = logfile.stat().st_size
+            if size != last_size:
+                last_size, last_change = size, time.monotonic()
+            elif time.monotonic() - last_change > STALL_S:
+                log.warning("stemsd made no progress for %d min; stopping it", STALL_S // 60)
+                proc.kill()
+                for name in ("yt-dlp.exe", "deno.exe"):
+                    subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True)
+                break
+        proc.wait()
+        r = proc
     log.info("stemsd finished with %d (log: %s)", r.returncode, logfile.name)
 
 
@@ -429,6 +447,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, default=here.parent / "farm.json")
     ap.add_argument("--no-finish", action="store_true", help="only download, no lyrics/video")
+    ap.add_argument("--finish-only", action="store_true", help="only lyrics/video/cover and the catalog, no download")
     ap.add_argument("--catalog-only", action="store_true")
     args = ap.parse_args()
     cfg = Config(args.config)
@@ -441,23 +460,29 @@ def main() -> None:
             *([logging.StreamHandler(sys.stdout)] if sys.stdout else []),
         ],
     )
-    lock = cfg.root / "logs" / "pull.lock"
+    # downloading and finishing run as separate tasks with separate locks,
+    # so a long stretch of video downloads never holds up collecting songs
+    # from the box (which is rented by the hour)
+    mode = "finish" if (args.finish_only or args.catalog_only) else "download" if args.no_finish else "sync"
+    lock = cfg.root / "logs" / f"{mode}.lock"
     if lock.exists() and time.time() - lock.stat().st_mtime < 6 * 3600:
-        log.info("another run is in progress (%s)", lock)
+        log.info("another %s run is in progress (%s)", mode, lock)
         return
     lock.write_text(str(os.getpid()))
     try:
-        if not args.catalog_only:
+        if not (args.catalog_only or args.finish_only):
             try:
-                pull(cfg)
+                # keep going while the box has more (a backlog drains in one run)
+                while pull(cfg) and args.no_finish:
+                    pass
             except Exception:  # noqa: BLE001 - finish what we have anyway
                 log.exception("pulling from the box failed")
-            if not args.no_finish:
-                finish(cfg)
-        write_catalog(cfg)
+        if not (args.no_finish or args.catalog_only):
+            finish(cfg)
+        if not args.no_finish:
+            write_catalog(cfg)
     finally:
         lock.unlink(missing_ok=True)
-
 
 if __name__ == "__main__":
     main()

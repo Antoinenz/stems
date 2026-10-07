@@ -78,9 +78,11 @@ impl VideoFetcher {
             h = self.max_height
         );
         tracing::info!(query, "fetching music video");
-        let output = Command::new(&self.ytdlp)
+        let run = Command::new(&self.ytdlp)
             .args([
                 "--no-playlist",
+                "--socket-timeout",
+                "30",
                 "--no-progress",
                 "--quiet",
                 "--merge-output-format",
@@ -95,8 +97,12 @@ impl VideoFetcher {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output()
+            .output();
+        // a stuck download (YouTube challenge, dead connection) must not
+        // hold up a whole import run: give up and record the stage failed
+        let output = tokio::time::timeout(DOWNLOAD_LIMIT, run)
             .await
+            .map_err(|_| anyhow!("yt-dlp took longer than {} minutes; gave up", DOWNLOAD_LIMIT.as_secs() / 60))?
             .with_context(|| format!("run `{}` (is yt-dlp installed?)", self.ytdlp))?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
@@ -113,6 +119,9 @@ impl VideoFetcher {
         }
     }
 }
+
+/// Longest a single music video download may take.
+const DOWNLOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Drop `(feat. …)`, `- Remastered 2011`, `[Live]` etc. from a title.
 pub fn strip_noise(title: &str) -> String {

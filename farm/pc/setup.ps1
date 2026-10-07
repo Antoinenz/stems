@@ -93,17 +93,19 @@ if ($NoTask) {
 } else {
 $pythonw = (Get-Command pythonw).Source
 $pull = Join-Path $Root "farm\pull.py"
-$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$pull`"" -WorkingDirectory $Root
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes)
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12) -StartWhenAvailable
-# S4U: runs whether or not anyone is logged in (needs an admin shell);
-# otherwise only while this user is logged in
-try {
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-    Register-ScheduledTask -TaskName "stems farm sync" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-} catch {
-    Write-Host "(registering for this login session only: $($_.Exception.Message))"
-    Register-ScheduledTask -TaskName "stems farm sync" -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+# two tasks: collecting songs from the box never waits for video downloads
+foreach ($t in @(@{ Name = "stems farm sync"; Args = "--no-finish" }, @{ Name = "stems farm finish"; Args = "--finish-only" })) {
+    $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$pull`" $($t.Args)" -WorkingDirectory $Root
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes)
+    # S4U: runs whether or not anyone is logged in (needs an admin shell);
+    # otherwise only while this user is logged in
+    try {
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+        Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    } catch {
+        Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    }
 }
 }
 
