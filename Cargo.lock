@@ -3555,6 +3555,7 @@ dependencies = [
  "stems-server",
  "stems-source-file",
  "stems-source-spotify",
+ "sysinfo",
  "tokio",
  "toml",
  "toml_edit",

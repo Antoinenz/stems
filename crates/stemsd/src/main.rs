@@ -6,6 +6,8 @@
 mod awake;
 mod config;
 mod engine;
+#[cfg(test)]
+mod fixtures;
 mod import;
 mod library;
 mod pipeline;
@@ -104,7 +106,12 @@ enum Cmd {
     },
     /// Print the effective configuration and file locations (writes a
     /// default stems.toml if none exists).
-    Config,
+    Config {
+        /// One JSON object instead (for apps that run stemsd): file
+        /// locations, port and host token, plus the whole config.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -122,9 +129,11 @@ fn main() -> Result<()> {
                 .expect("valid directive"),
         )
         .add_directive("symphonia_core=error".parse().expect("valid directive"));
+    // logs go to stderr so stdout stays clean for `config --json` & co.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     // librespot uses ring; reqwest is built without a provider so both
@@ -153,9 +162,17 @@ fn main() -> Result<()> {
     let sink: SinkKind = cfg.sink.parse().map_err(anyhow::Error::msg)?;
 
     match cli.cmd.unwrap_or(Cmd::Spotify { name: None }) {
-        Cmd::Config => {
+        Cmd::Config { json } => {
             let p = config::paths()?;
             let created = Config::ensure_exists()?;
+            if json {
+                let file = cli.config.clone().unwrap_or(created);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cfg.describe(&file, &p)?)?
+                );
+                return Ok(());
+            }
             println!("config file: {} ", created.display());
             println!("cache dir:   {}", p.cache_dir.display());
             println!("models:      {}", p.models_dir.display());

@@ -316,6 +316,26 @@ fn paths_under(home: &std::path::Path) -> Paths {
 }
 
 impl Config {
+    /// What `stemsd config --json` prints, for apps that run stemsd:
+    /// where things are, the port and host token, and the whole config.
+    pub fn describe(
+        &self,
+        config_file: &std::path::Path,
+        paths: &Paths,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "config_file": config_file,
+            "cache_dir": paths.cache_dir,
+            "models_dir": paths.models_dir,
+            "library_dir": self.library_dir()?,
+            "portable": std::env::var_os(HOME_ENV).is_some_and(|h| !h.is_empty()),
+            "port": self.port,
+            "host_token": self.host_token,
+            "device_name": self.device_name,
+            "config": self,
+        }))
+    }
+
     /// Where the track library lives: `[library] dir`, else the default.
     pub fn library_dir(&self) -> Result<PathBuf> {
         let dir = self.library.dir.trim();
