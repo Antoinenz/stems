@@ -19,7 +19,7 @@ pub async fn build(cfg: &KaraokeConfig, models_dir: PathBuf) -> Result<Box<dyn S
         return Ok(Box::new(CentreCancel::default()));
     }
     let opts = stream_opts(cfg);
-    let r = build_runners(cfg, models_dir, None).await?;
+    let r = build_runners(cfg, models_dir, None, false).await?;
     let sep = stems_sep::MdxSeparator::with_runners(r.params, r.provider, r.runners, opts);
     tracing::info!(
         backend = cfg.backend,
@@ -49,7 +49,7 @@ pub async fn build_offline(
     // the worker's GPU is not ours to protect.
     let gov = Arc::new(Governor::new(limit));
     let limit_handle = gov.limit_handle();
-    let r = build_runners(cfg, models_dir, Some(gov)).await?;
+    let r = build_runners(cfg, models_dir, Some(gov), true).await?;
     let runners = r.runners;
     let disk = match stems_dir.filter(|_| cfg.stem_cache_mb > 0) {
         Some(stems_dir) => {
@@ -309,9 +309,17 @@ impl WorkerTargets {
         Ok(Self { dial, hub })
     }
 
-    /// The connection(s) for runner `i`.
-    fn link(&self, i: usize, params: &stems_sep::MdxParams, denoise: bool) -> WorkerLink {
+    /// The connection(s) for runner `i`. `patience`: how long a request
+    /// waits for a worker to (re)appear before failing.
+    fn link(
+        &self,
+        i: usize,
+        params: &stems_sep::MdxParams,
+        denoise: bool,
+        patience: Duration,
+    ) -> WorkerLink {
         WorkerLink {
+            patience,
             hub: self.hub.clone(),
             dial: (!self.dial.is_empty()).then(|| {
                 stems_sep::remote::ResilientRemote::new(
@@ -343,9 +351,14 @@ fn listen_addr(rest: &str) -> String {
 /// connected at all it fails at once (so a fallback can take over).
 const HUB_WAIT: Duration = Duration::from_secs(30);
 
+/// How long an import waits for a worker that is not there (still
+/// starting, reconnecting after a blip) when nothing else may separate.
+const IMPORT_PATIENCE: Duration = Duration::from_secs(60);
+
 /// One runner's way to the workers: those that dialled in, then those
 /// to dial.
 struct WorkerLink {
+    patience: Duration,
     hub: Option<Arc<WorkerHub>>,
     dial: Option<stems_sep::remote::ResilientRemote>,
     denoise: bool,
@@ -366,10 +379,35 @@ impl WorkerLink {
         self.call(|c| c.align(audio16k, words), |d| d.align(audio16k, words))
     }
 
+    /// One request, retried until `patience` runs out while no worker is
+    /// there to take it. A worker that answers with an error is final.
     fn call<T>(
         &mut self,
-        on_hub: impl FnMut(&mut stems_sep::remote::RemoteRunner) -> Result<T>,
-        on_dial: impl FnOnce(&mut stems_sep::remote::ResilientRemote) -> Result<T>,
+        mut on_hub: impl FnMut(&mut stems_sep::remote::RemoteRunner) -> Result<T>,
+        mut on_dial: impl FnMut(&mut stems_sep::remote::ResilientRemote) -> Result<T>,
+    ) -> Result<T> {
+        let deadline = Instant::now() + self.patience;
+        let mut announced = false;
+        loop {
+            match self.try_call(&mut on_hub, &mut on_dial) {
+                Ok(v) => return Ok(v),
+                Err(e) if e.to_string().starts_with("worker: ") => return Err(e),
+                Err(e) if Instant::now() >= deadline => return Err(e),
+                Err(e) => {
+                    if !announced {
+                        announced = true;
+                        tracing::info!("waiting for a separation worker: {e:#}");
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
+    fn try_call<T>(
+        &mut self,
+        on_hub: &mut impl FnMut(&mut stems_sep::remote::RemoteRunner) -> Result<T>,
+        on_dial: &mut impl FnMut(&mut stems_sep::remote::ResilientRemote) -> Result<T>,
     ) -> Result<T> {
         if let Some(h) = &self.hub {
             // with addresses to dial as well, only wait on the hub when a
@@ -396,6 +434,7 @@ async fn build_runners(
     cfg: &KaraokeConfig,
     models_dir: PathBuf,
     gov: Option<Arc<Governor>>,
+    offline: bool,
 ) -> Result<Runners> {
     use stems_sep::WindowRunner;
     match cfg.backend.as_str() {
@@ -460,12 +499,21 @@ async fn build_runners(
             }
             let n = cfg.workers.max(1);
             let denoise = cfg.denoise;
+            // a whole-track job can wait for a worker to come (back);
+            // live separation, or a policy with a fallback, cannot
+            let patience = if offline && policy == Fallback::Never {
+                IMPORT_PATIENCE
+            } else {
+                Duration::ZERO
+            };
             #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
             let mut runners: Vec<WindowRunner> = (0..n)
                 .map(|i| -> WindowRunner {
-                    let mut remote = targets.link(i, &params, denoise);
+                    let mut remote = targets.link(i, &params, denoise, patience);
                     #[cfg(feature = "onnx")]
-                    let fallback = local.clone().filter(|_| policy == Fallback::WhenNoWorker);
+                    // "always" also falls back: the local runner helps, and
+                    // a missing worker must not fail the windows given to it
+                    let fallback = local.clone();
                     #[cfg(feature = "onnx")]
                     let gov = gov.clone();
                     Box::new(move |w: &[f32]| match remote.run(w) {
@@ -518,8 +566,15 @@ pub async fn build_align_backend(
     }
     let (_, params) = stems_sep::known_model(&cfg.model)
         .ok_or_else(|| anyhow!("unknown MDX model `{}`", cfg.model))?;
-    let remote = WorkerTargets::parse(&cfg.remote, &params)?.link(0, &params, cfg.denoise);
-    let local = match Fallback::parse(&cfg.local_fallback)? {
+    let policy = Fallback::parse(&cfg.local_fallback)?;
+    let patience = if policy == Fallback::Never {
+        IMPORT_PATIENCE
+    } else {
+        Duration::ZERO
+    };
+    let remote =
+        WorkerTargets::parse(&cfg.remote, &params)?.link(0, &params, cfg.denoise, patience);
+    let local = match policy {
         Fallback::Never => None,
         _ => Some(build_aligner(models_dir, cfg.threads).await?),
     };
