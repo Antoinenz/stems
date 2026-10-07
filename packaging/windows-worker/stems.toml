@@ -1,0 +1,15 @@
+# stems worker settings. Only this folder uses them.
+
+[karaoke]
+backend = "mdx"
+# must match the model the Mac uses
+model = "UVR-MDX-NET-Inst_HQ_3"
+# "directml" = the GPU (fast); "cpu" if DirectML misbehaves (much slower)
+device = "directml"
+# model sessions run side by side; 1 if the GPU runs out of memory
+workers = 2
+threads = 0
+
+[lyrics]
+# also place lyric words for the Mac (a second, smaller model)
+align = true
