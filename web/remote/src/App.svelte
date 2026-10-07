@@ -136,6 +136,13 @@
       <div class="meta">
         <div class="title">{track.title}</div>
         <div class="artists">{track.artists.join(', ')}</div>
+        {#if ps.intermission}
+          <div class="who">♫ background music · queue a song to start the next singer</div>
+        {:else if ps.current?.singer}
+          <div class="who">🎤 {ps.current.singer}</div>
+        {:else if ps.current?.kind === 'play'}
+          <div class="who">♫ just playing</div>
+        {/if}
         <div class="bar"><div class="fill" style:width="{progress * 100}%"></div></div>
         <div class="time">{fmt(position)} / {fmt(track.duration_ms)}</div>
       </div>
@@ -258,7 +265,8 @@
             <div class="meta">
               <div class="qtitle">{item.track.title}</div>
               <div class="qsub">
-                {item.track.artists.join(', ')}{#if item.singer} · 🎤 {item.singer}{/if}
+                {item.kind === 'play' ? '♫' : '🎤'}
+                {item.track.artists.join(', ')}{#if item.singer} · {item.singer}{/if}
               </div>
             </div>
             {#if can('queue')}
@@ -280,8 +288,8 @@
   {#if isLibrary && can('queue')}
     <Library
       host={me.role === 'host'}
-      onqueue={(key, singer) => client.send({ cmd: 'enqueue', key, singer })}
-      onplay={(key, singer) => client.send({ cmd: 'play_track', key, singer })}
+      onqueue={(key, singer, kind) => client.send({ cmd: 'enqueue', key, singer, kind })}
+      onplay={(key, singer, kind) => client.send({ cmd: 'play_track', key, singer, kind })}
     />
   {/if}
 
@@ -344,6 +352,7 @@
   .bar { height: 4px; background: rgba(255,255,255,.15); border-radius: 4px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); }
   .time { font-size: 12px; color: var(--dim); margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .who { font-size: 13px; color: var(--accent); margin: -4px 0 8px; }
   .idle { color: var(--dim); line-height: 1.5; }
 
   .card { background: var(--card); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }

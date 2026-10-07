@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { fetchLibrary } from '../../shared/client.svelte';
-  import type { LibraryTrack } from '../../shared/types';
+  import type { LibraryTrack, QueueKind } from '../../shared/types';
 
   let {
     host,
@@ -9,14 +9,15 @@
     onplay
   }: {
     host: boolean;
-    onqueue: (key: string, singer: string | null) => void;
-    onplay: (key: string, singer: string | null) => void;
+    onqueue: (key: string, singer: string | null, kind: QueueKind) => void;
+    onplay: (key: string, singer: string | null, kind: QueueKind) => void;
   } = $props();
 
   let q = $state('');
   let tracks = $state<LibraryTrack[]>([]);
   let error = $state<string | null>(null);
   let singer = $state(localStorage.getItem('stems.singer') ?? '');
+  let kind = $state<QueueKind>('sing');
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   async function load() {
@@ -48,7 +49,13 @@
 <section class="card">
   <div class="label">Library · {tracks.length} songs</div>
   <input type="search" placeholder="Search songs or artists" bind:value={q} oninput={search} />
-  <input type="text" placeholder="Singer (optional)" bind:value={singer} />
+  <div class="row">
+    <div class="kind">
+      <button class:on={kind === 'sing'} onclick={() => (kind = 'sing')}>🎤 Sing</button>
+      <button class:on={kind === 'play'} onclick={() => (kind = 'play')}>♫ Just play</button>
+    </div>
+    <input type="text" placeholder="Singer (optional)" bind:value={singer} disabled={kind === 'play'} />
+  </div>
   {#if error}<div class="err">{error}</div>{/if}
   <ul>
     {#each shown as t (t.key)}
@@ -67,8 +74,8 @@
             {/if}
           </div>
         </div>
-        <button disabled={!t.playable} onclick={() => onqueue(t.key, who())}>+</button>
-        <button disabled={!t.playable} onclick={() => onplay(t.key, who())}>▶</button>
+        <button disabled={!t.playable} onclick={() => onqueue(t.key, kind === 'sing' ? who() : null, kind)}>+</button>
+        <button disabled={!t.playable} onclick={() => onplay(t.key, kind === 'sing' ? who() : null, kind)}>▶</button>
       </li>
     {/each}
   </ul>
@@ -90,5 +97,10 @@
   .badges b.warn { color: #e96; }
   li button { width: 40px; height: 40px; padding: 0; font-size: 18px; flex: none; }
   .err { color: #e96; font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1; }
+  .row input:disabled { opacity: 0.4; }
+  .kind { display: flex; gap: 4px; flex: none; }
+  .kind button { padding: 8px 10px; font-size: 13px; white-space: nowrap; }
   .more { color: var(--dim); font-size: 12px; text-align: center; }
 </style>
