@@ -147,7 +147,13 @@ def stop() -> None:
     for name in ("runner", "separator"):
         pid = pid_alive(name)
         if pid:
-            os.killpg(pid, signal.SIGTERM)
+            # the runner's whole group (it and the stemsd it runs); the
+            # separator alone, so it finishes its song and its ffmpeg
+            # encoder isn't killed mid-file
+            if name == "runner":
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
             print(f"stopping {name} (pid {pid})")
 
 

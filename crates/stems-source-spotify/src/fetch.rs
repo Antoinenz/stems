@@ -91,13 +91,36 @@ pub(crate) async fn open_decrypted(
 ) -> Result<Opened> {
     let uri = SpotifyUri::from_uri(&format!("spotify:track:{base62}"))
         .map_err(|e| anyhow!("track uri: {e}"))?;
-    let track_id: SpotifyId = (&uri).try_into().map_err(|e| anyhow!("track id: {e}"))?;
+    let mut track_id: SpotifyId = (&uri).try_into().map_err(|e| anyhow!("track id: {e}"))?;
 
     let audio_item = AudioItem::get_file(session, uri)
         .await
         .map_err(|e| anyhow!("track metadata: {e}"))?;
-    let (format, file_id) = pick_file(&audio_item.files, bitrate)
-        .ok_or_else(|| anyhow!("no playable file for {}", audio_item.name))?;
+    let mut picked = pick_file(&audio_item.files, bitrate);
+    if picked.is_none() {
+        // Not available in this account's country under this id: Spotify
+        // lists the same recording released elsewhere as alternatives
+        // (its own player "relinks" to them).
+        for alt in audio_item.alternatives.iter().flat_map(|t| t.iter()) {
+            let Ok(item) = AudioItem::get_file(session, alt.clone()).await else {
+                continue;
+            };
+            if let Some(p) = pick_file(&item.files, bitrate) {
+                tracing::info!(track = %audio_item.name, alternative = %alt, "using an alternative release");
+                track_id = alt.try_into().map_err(|e| anyhow!("track id: {e}"))?;
+                picked = Some(p);
+                break;
+            }
+        }
+    }
+    let (format, file_id) = picked.ok_or_else(|| {
+        anyhow!(
+            "no playable file for {} (formats: {:?}, {} alternatives)",
+            audio_item.name,
+            audio_item.files.keys().collect::<Vec<_>>(),
+            audio_item.alternatives.as_ref().map_or(0, |t| t.len())
+        )
+    })?;
 
     // A generous rate makes the loader prefetch far ahead of the reader.
     let bytes_per_second = 8 * 40_000;
