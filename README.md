@@ -67,9 +67,18 @@ Spotify imports log in with the credentials Spotify Connect saved the first time
 picked this device, so run `stemsd spotify` and connect once before importing. Saving
 decoded Spotify audio is against Spotify's terms: keep the library for your own private use.
 
-In library mode the remote has play/pause/skip, the queue (with an optional singer name per
-song), a searchable song list and, for the host, an import box; songs can be imported while
-the party runs. Each song is decoded into memory before it plays (and the next one ahead of
+In library mode the remote has play/pause/skip, the queue, a searchable song list and, for the
+host, an import box; songs can be imported while the party runs. A song is queued to **sing**
+(with the singer's name; karaoke switches on when it starts) or to **just play** (karaoke off),
+unless `auto_karaoke = false`. The queue is saved in the library (`queue.json`) and comes back,
+paused, after a restart or a crash.
+
+```toml
+[library]
+intermission = true          # empty queue → random library songs, quieter, until a request
+intermission_volume = 0.5    # their level (0–1); a queued song fades them out
+auto_karaoke = true
+``` Each song is decoded into memory before it plays (and the next one ahead of
 time), so a slow or briefly unplugged disk does not interrupt the music.
 
 ### Stage view modes
