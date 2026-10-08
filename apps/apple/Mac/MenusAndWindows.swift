@@ -10,7 +10,7 @@ import SwiftUI
 struct StemsCommands: Commands {
     let model: AppModel
     static let places: [(LocalizedStringKey, Destination)] = [
-        ("Now Playing", .show), ("Songs", .songs), ("Machines", .machines), ("Guests", .guests),
+        ("Now Playing", .show), ("Songs", .library), ("Machines", .machines), ("Guests", .guests),
     ]
     @Environment(\.openWindow) private var openWindow
 

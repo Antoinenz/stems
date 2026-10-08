@@ -8,62 +8,44 @@ import SwiftUI
 
 /// Where the main window is.
 enum Destination: Hashable {
-    case show, songs, playlist(String), genre(String), machines, guests
+    case show, library, machines, guests
+}
+
+/// What the library shows: everything, one playlist, or one genre.
+enum LibrarySelection: Hashable {
+    case all, playlist(String), genre(String)
 }
 
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(StemsClient.self) private var client
-    @State private var playlists: [PlaylistRow] = []
-    @State private var genres: [GenreCount] = []
 
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            List(selection: Binding($model.destination)) {
+            List(selection: $model.destination) {
                 Section("Party") {
-                    Label("Now Playing", systemImage: "play.circle").tag(Destination.show)
+                    // badge before tag: the tag must be on the row itself
+                    Label("Now Playing", systemImage: "play.circle")
                         .badge(client.state.queue.count)
+                        .tag(Destination.show)
                 }
                 Section("Library") {
-                    Label("Songs", systemImage: "music.note.list").tag(Destination.songs)
-                }
-                if !playlists.isEmpty {
-                    Section("Playlists") {
-                        ForEach(playlists) { p in
-                            Label(p.displayName, systemImage: p.kind == "album" ? "square.stack" : "music.note.list")
-                                .lineLimit(1)
-                                .help("\(p.playable) of \(p.songs) songs ready")
-                                .tag(Destination.playlist(p.id))
-                        }
-                    }
-                }
-                if !genres.isEmpty {
-                    Section("Genres") {
-                        ForEach(genres) { g in
-                            Label(g.name, systemImage: "guitars").tag(Destination.genre(g.name))
-                                .badge(g.songs)
-                        }
-                    }
+                    Label("Songs", systemImage: "music.note.list")
+                        .tag(Destination.library)
                 }
                 Section("System") {
-                    Label("Machines", systemImage: "server.rack").tag(Destination.machines)
+                    Label("Machines", systemImage: "server.rack")
                         .badge(problems)
-                    Label("Guests", systemImage: "person.2").tag(Destination.guests)
+                        .tag(Destination.machines)
+                    Label("Guests", systemImage: "person.2")
+                        .tag(Destination.guests)
                 }
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
-            .task(id: client.connection.isConnected) {
-                // new imports add playlists and genres
-                while !Task.isCancelled {
-                    if let p = try? await client.api.playlists() { playlists = p }
-                    if let g = try? await client.api.genres() { genres = g }
-                    try? await Task.sleep(for: .seconds(60))
-                }
-            }
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
         } detail: {
             NavigationStack {
-                detail(model.destination)
+                detail(model.destination ?? .show)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(spacing: 0) {
@@ -111,11 +93,7 @@ struct MainWindow: View {
     private func detail(_ d: Destination) -> some View {
         switch d {
         case .show: ShowView()
-        case .songs: SongsView(title: "Songs", query: SongQuery()).id("songs")
-        case .playlist(let id):
-            SongsView(title: playlists.first { $0.id == id }?.displayName ?? "Playlist", query: SongQuery(playlist: id))
-                .id(id)
-        case .genre(let g): SongsView(title: g, query: SongQuery(genre: g)).id("genre-" + g)
+        case .library: LibraryScreen()
         case .machines: MachinesView { ThisMacSection() }
         case .guests: GuestsView()
         }

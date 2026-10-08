@@ -15,7 +15,8 @@ final class AppModel {
 
     let supervisor = ServerSupervisor()
     let client: StemsClient
-    var destination: Destination = .show
+    var destination: Destination? = .show
+    var librarySelection: LibrarySelection? = .all
 
     private init() {
         let port = UserDefaults.standard.integer(forKey: "lastPort")
