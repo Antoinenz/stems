@@ -22,20 +22,15 @@ struct StemsCommands: Commands {
         CommandGroup(replacing: .newItem) {}
 
         CommandMenu("Controls") {
+            // no keyboard shortcuts for playback: a bumped key or a stray
+            // space while typing must never stop the music
             let client = model.client
-            // Space is handled by the main window (onKeyPress) rather than
-            // here: a bare-Space menu shortcut would eat spaces typed in
-            // the search field
             Button(client.state.status == .playing ? "Pause" : "Play") { client.togglePlayPause() }
             Button("Next Song") { client.send(.next) }
-                .keyboardShortcut(.rightArrow, modifiers: .command)
             Divider()
             Toggle("Karaoke", isOn: Binding(get: { client.state.karaoke.enabled }, set: { client.send(.setKaraoke($0)) }))
-                .keyboardShortcut("k", modifiers: .command)
             Button("Volume Up") { client.sendThrottled(.setVolume(min(1, client.state.volume + 0.05)), key: "volume") }
-                .keyboardShortcut(.upArrow, modifiers: .command)
             Button("Volume Down") { client.sendThrottled(.setVolume(max(0, client.state.volume - 0.05)), key: "volume") }
-                .keyboardShortcut(.downArrow, modifiers: .command)
             Divider()
             Button("Restart Server") { model.supervisor.restart() }
         }

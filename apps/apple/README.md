@@ -58,8 +58,8 @@ background music and its level, loudness target, music videos).
 If a `stemsd` is already running on the configured port (started from a terminal), the app
 uses it instead of starting another, and takes over if it stops.
 
-Keyboard: Space plays or pauses, ⌘→ skips, ⌘K toggles karaoke, ⌘↑/⌘↓ change the volume,
-⌘1…⌘5 switch screens, ⌥⌘L opens the server log.
+Playback has no keyboard shortcuts on purpose (a bumped key or a space typed in the wrong
+place must never stop the music). ⌘1…⌘4 switch screens, ⌥⌘L opens the server log.
 
 ## Code
 

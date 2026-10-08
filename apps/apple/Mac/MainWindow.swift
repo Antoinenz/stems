@@ -55,12 +55,6 @@ struct MainWindow: View {
             }
             .stemsErrorToast()
         }
-        // Space plays/pauses unless a text field has focus (it gets the key first)
-        .onKeyPress(.space) {
-            guard client.connection.isConnected else { return .ignored }
-            client.togglePlayPause()
-            return .handled
-        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -70,11 +64,11 @@ struct MainWindow: View {
                         client.state.status == .playing ? "Pause" : "Play",
                         systemImage: client.state.status == .playing ? "pause.fill" : "play.fill")
                 }
-                .help("Play or pause (Space)")
+                .help("Play or pause")
                 .disabled(!client.connection.isConnected)
 
                 Button("Next Song", systemImage: "forward.fill") { client.send(.next) }
-                    .help("Skip to the next request (⌘→)")
+                    .help("Skip to the next request")
                     .disabled(!client.connection.isConnected)
             }
             ToolbarItem(placement: .primaryAction) {
@@ -83,7 +77,7 @@ struct MainWindow: View {
                 ) {
                     Label("Karaoke", systemImage: "music.mic")
                 }
-                .help("Vocal removal on or off (⌘K)")
+                .help("Vocal removal on or off")
                 .disabled(!client.connection.isConnected || client.state.karaoke.backend == nil)
             }
         }
