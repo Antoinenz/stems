@@ -1,0 +1,96 @@
+{
+  "added_at": 1791332963,
+  "album": "Album",
+  "analysis": {
+    "analyzer": "essentia",
+    "bpm": 140.10000610351562,
+    "danceability": 0.8600000143051147,
+    "genres": [
+      {
+        "name": "Hip Hop / Trap",
+        "score": 0.6399999856948853
+      }
+    ],
+    "key": "D minor",
+    "moods": {
+      "happy": 0.3199999928474426,
+      "party": 0.7099999785423279
+    }
+  },
+  "art": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/cover.jpg",
+  "artists": [
+    "JAY-Z",
+    "Kanye West"
+  ],
+  "bpm": 140.10000610351562,
+  "complete": true,
+  "danceability": 0.8600000143051147,
+  "duration_ms": 219333,
+  "genre": "Hip Hop",
+  "info": {
+    "explicit": true,
+    "label": "Roc-A-Fella",
+    "popularity": 78,
+    "release_date": "2011-08-08"
+  },
+  "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+  "loudness_lufs": -8.899999618530273,
+  "lyrics": true,
+  "lyrics_text": null,
+  "playable": true,
+  "playlists": [
+    {
+      "description": "The best of the 1980s",
+      "id": "spotify_playlist_19PgP2QSGPcm6Ve8VhbtpG",
+      "kind": "playlist",
+      "name": "80s HITS",
+      "playable": 1,
+      "songs": 2,
+      "url": "https://open.spotify.com/playlist/19PgP2QSGPcm6Ve8VhbtpG"
+    }
+  ],
+  "plays": [
+    {
+      "at": 1791400000,
+      "background": false,
+      "completed": true,
+      "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+      "kind": "sing",
+      "played_ms": 200000,
+      "singer": "Mia"
+    }
+  ],
+  "stages": {
+    "analysis": {
+      "state": "done"
+    },
+    "audio": {
+      "state": "done"
+    },
+    "cover": {
+      "state": "done"
+    },
+    "lyrics": {
+      "state": "done"
+    },
+    "stems": {
+      "state": "done"
+    },
+    "video": {
+      "state": "done"
+    },
+    "video_align": {
+      "state": "done"
+    },
+    "words": {
+      "state": "done"
+    }
+  },
+  "stems_model": "model_bs_roformer_ep_317_sdr_12.9755",
+  "title": "Ni**as In Paris",
+  "video": true,
+  "video_corr": 0.8199999928474426,
+  "video_offset_ms": 350,
+  "words": true,
+  "year": 2011
+}

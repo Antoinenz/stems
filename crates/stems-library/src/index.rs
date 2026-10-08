@@ -29,7 +29,7 @@ use crate::{
 };
 
 pub const INDEX_FILE: &str = "library.sqlite";
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -136,6 +136,23 @@ CREATE VIRTUAL TABLE search USING fts5(
 );
 
 -- a playlist's songs in order, with what's known about them
+-- history.jsonl; songs may have left the library since: no foreign key
+CREATE TABLE plays (
+    key        TEXT NOT NULL,
+    at         INTEGER NOT NULL,
+    played_ms  INTEGER NOT NULL,
+    completed  INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    singer     TEXT,
+    background INTEGER NOT NULL
+);
+CREATE INDEX plays_key ON plays(key, at);
+
+-- requests and played-for-everyone songs, not background music
+CREATE VIEW track_stats AS
+    SELECT key, count(*) AS plays, max(at) AS last_played
+    FROM plays WHERE NOT background GROUP BY key;
+
 CREATE VIEW playlist_songs AS
     SELECT p.id AS playlist_id, p.name AS playlist, pt.position, pt.track_key,
            t.title, t.artist_line, t.playable, t.danceability, t.bpm, t.main_genre, t.year
@@ -280,6 +297,38 @@ pub fn update(lib: &Library) -> Result<IndexStats> {
         "DELETE FROM artists WHERE id NOT IN (SELECT artist_id FROM track_artists)",
         [],
     )?;
+
+    // ---- play history: append-only, re-read whole when it changed
+    let history = lib.dir().join(crate::history::HISTORY_FILE);
+    let hstamp = stamp(&history)
+        .map(|(s, m)| format!("{s}:{m}"))
+        .unwrap_or_default();
+    let known_h: Option<String> = tx
+        .query_row("SELECT value FROM meta WHERE key = 'history'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if known_h.as_deref() != Some(hstamp.as_str()) {
+        tx.execute("DELETE FROM plays", [])?;
+        let mut ins = tx.prepare(
+            "INSERT INTO plays(key, at, played_ms, completed, kind, singer, background) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        )?;
+        for p in lib.plays() {
+            ins.execute(params![
+                p.key,
+                p.at as i64,
+                p.played_ms as i64,
+                p.completed,
+                p.kind,
+                p.singer,
+                p.background
+            ])?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('history', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![hstamp],
+        )?;
+    }
 
     // ---- playlists
     let mut known_pl: HashMap<String, (i64, i64)> = HashMap::new();
@@ -736,6 +785,151 @@ mod tests {
     }
 
     #[test]
+    fn song_queries_sort_filter_page_and_count_plays() {
+        let dir = tmp("queries");
+        let lib = Library::open(&dir).unwrap();
+        add(
+            &lib,
+            "a",
+            "Mr. Brightside",
+            &["The Killers"],
+            0.6,
+            "Rock / Indie Rock",
+        );
+        add(
+            &lib,
+            "b",
+            "Uptown Funk",
+            &["Mark Ronson", "Bruno Mars"],
+            0.9,
+            "Funk / Soul / Funk",
+        );
+        add(
+            &lib,
+            "c",
+            "24K Magic",
+            &["Bruno Mars"],
+            0.85,
+            "Funk / Soul / Funk",
+        );
+        for (key, at, bg) in [
+            ("spotify_c", 1, false),
+            ("spotify_c", 2, false),
+            ("spotify_a", 3, false),
+            ("spotify_a", 4, true),
+        ] {
+            lib.append_play(&crate::Play {
+                key: key.into(),
+                at,
+                played_ms: 60_000,
+                completed: true,
+                kind: "play".into(),
+                singer: None,
+                background: bg,
+            })
+            .unwrap();
+        }
+        lib.save_playlist(&Playlist {
+            id: "p".into(),
+            kind: "playlist".into(),
+            name: "Party".into(),
+            url: None,
+            description: String::new(),
+            tracks: vec!["spotify_c".into(), "spotify_a".into()],
+            updated_at: 1,
+        })
+        .unwrap();
+        update(&lib).unwrap();
+        let conn = open(&lib).unwrap();
+        let titles = |q: &SongQuery| -> Vec<String> {
+            songs(&conn, q)
+                .unwrap()
+                .songs
+                .into_iter()
+                .map(|s| s.title)
+                .collect()
+        };
+
+        assert_eq!(
+            titles(&SongQuery::default()),
+            ["24K Magic", "Uptown Funk", "Mr. Brightside"],
+            "by artist"
+        );
+        let by_dance = SongQuery {
+            sort: SongSort::Danceability,
+            desc: true,
+            ..Default::default()
+        };
+        assert_eq!(titles(&by_dance)[0], "Uptown Funk");
+        let funk = SongQuery {
+            genre: Some("Funk".into()),
+            ..Default::default()
+        };
+        assert_eq!(songs(&conn, &funk).unwrap().total, 2);
+        let bruno = SongQuery {
+            artist: Some("bruno mars".into()),
+            ..Default::default()
+        };
+        assert_eq!(songs(&conn, &bruno).unwrap().total, 2);
+        let list = SongQuery {
+            playlist: Some("p".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            titles(&list),
+            ["24K Magic", "Mr. Brightside"],
+            "playlist order"
+        );
+        let page = SongQuery {
+            limit: 1,
+            offset: 1,
+            ..Default::default()
+        };
+        let p = songs(&conn, &page).unwrap();
+        assert_eq!(
+            (p.total, p.songs.len(), p.songs[0].title.as_str()),
+            (3, 1, "Uptown Funk")
+        );
+        let search = SongQuery {
+            q: "magic".into(),
+            ..Default::default()
+        };
+        assert_eq!(titles(&search), ["24K Magic"]);
+        assert_eq!(
+            songs(
+                &conn,
+                &SongQuery {
+                    q: "!!!".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .total,
+            3
+        );
+
+        // plays: background music doesn't count
+        let by_plays = SongQuery {
+            sort: SongSort::Plays,
+            desc: true,
+            ..Default::default()
+        };
+        let rows = songs(&conn, &by_plays).unwrap().songs;
+        assert_eq!(
+            (rows[0].title.as_str(), rows[0].plays, rows[0].last_played),
+            ("24K Magic", 2, Some(2))
+        );
+        assert_eq!(rows[1].plays, 1);
+
+        let pls = playlists(&conn).unwrap();
+        assert_eq!((pls[0].songs, pls[0].playable), (2, 2));
+        let (in_lists, plays) = song_links(&conn, "spotify_a").unwrap();
+        assert_eq!((in_lists.len(), plays.len()), (1, 2));
+        assert_eq!(genre_counts(&conn).unwrap()[0], ("Funk".to_string(), 2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_schema_change_rebuilds() {
         let dir = tmp("schema");
         let lib = Library::open(&dir).unwrap();
@@ -753,4 +947,308 @@ mod tests {
         assert_eq!(s.tracks_changed, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+// ---- queries --------------------------------------------------------------
+
+/// Columns songs can be sorted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SongSort {
+    /// Search relevance with a query, else artist.
+    #[default]
+    Default,
+    Title,
+    Artist,
+    Album,
+    Year,
+    Duration,
+    Bpm,
+    Key,
+    Danceability,
+    Genre,
+    Plays,
+    LastPlayed,
+    Added,
+    Popularity,
+    /// Playlist order (with `playlist`).
+    Position,
+}
+
+/// A page of songs: search, filters, sort.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct SongQuery {
+    /// Full-text: titles, artists, albums, lyrics.
+    pub q: String,
+    pub sort: SongSort,
+    pub desc: bool,
+    pub limit: usize,
+    pub offset: usize,
+    /// Only songs karaoke works for (audio + instrumental).
+    pub playable: bool,
+    /// Songs of one playlist (in its order with `sort=position`).
+    pub playlist: Option<String>,
+    /// Top genre's parent, e.g. `Rock`.
+    pub genre: Option<String>,
+    pub artist: Option<String>,
+    pub year_from: Option<i64>,
+    pub year_to: Option<i64>,
+    pub bpm_from: Option<f64>,
+    pub bpm_to: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SongRow {
+    pub key: String,
+    pub title: String,
+    pub artists: String,
+    pub album: Option<String>,
+    pub year: Option<i64>,
+    pub duration_ms: i64,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub danceability: Option<f64>,
+    pub genre: Option<String>,
+    /// Most likely style, e.g. `Rock / Alternative Rock`.
+    pub style: Option<String>,
+    pub plays: i64,
+    pub last_played: Option<i64>,
+    pub playable: bool,
+    pub has_lyrics: bool,
+    pub has_words: bool,
+    pub has_video: bool,
+    pub popularity: Option<i64>,
+    pub added_at: i64,
+    /// Place in the playlist, when listing one.
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SongPage {
+    pub total: usize,
+    pub offset: usize,
+    pub songs: Vec<SongRow>,
+}
+
+pub fn songs(conn: &Connection, q: &SongQuery) -> Result<SongPage> {
+    let mut from = String::from(
+        "FROM tracks t LEFT JOIN track_stats st ON st.key = t.key
+         LEFT JOIN genres g ON g.track_key = t.key AND g.rank = 0",
+    );
+    let mut wh: Vec<String> = Vec::new();
+    let mut args: Vec<rusqlite::types::Value> = Vec::new();
+    let mut arg = |v: rusqlite::types::Value| {
+        args.push(v);
+        format!("?{}", args.len())
+    };
+    let terms = fts_terms(&q.q);
+    let searching = !terms.is_empty();
+    if searching {
+        from.push_str(" JOIN search s ON s.key = t.key");
+        let p = arg(terms.into());
+        wh.push(format!("search MATCH {p}"));
+    }
+    let mut position = "NULL".to_string();
+    if let Some(pl) = &q.playlist {
+        from.push_str(" JOIN playlist_tracks pt ON pt.track_key = t.key");
+        let p = arg(pl.clone().into());
+        wh.push(format!("pt.playlist_id = {p}"));
+        position = "pt.position".into();
+    }
+    if q.playable {
+        wh.push("t.playable".into());
+    }
+    if let Some(gn) = &q.genre {
+        let p = arg(gn.clone().into());
+        wh.push(format!("g.parent = {p}"));
+    }
+    if let Some(a) = &q.artist {
+        let p = arg(a.clone().into());
+        wh.push(format!(
+            "t.key IN (SELECT ta.track_key FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id WHERE ar.name = {p})"
+        ));
+    }
+    if let Some(y) = q.year_from {
+        let p = arg(y.into());
+        wh.push(format!("t.year >= {p}"));
+    }
+    if let Some(y) = q.year_to {
+        let p = arg(y.into());
+        wh.push(format!("t.year <= {p}"));
+    }
+    if let Some(b) = q.bpm_from {
+        let p = arg(b.into());
+        wh.push(format!("t.bpm >= {p}"));
+    }
+    if let Some(b) = q.bpm_to {
+        let p = arg(b.into());
+        wh.push(format!("t.bpm <= {p}"));
+    }
+    let where_sql = if wh.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", wh.join(" AND "))
+    };
+    let dir = if q.desc { "DESC" } else { "ASC" };
+    let order = match q.sort {
+        SongSort::Default if searching => "s.rank".to_string(),
+        SongSort::Default if q.playlist.is_some() => format!("pt.position {dir}"),
+        SongSort::Default | SongSort::Artist => {
+            format!("t.artist_line COLLATE NOCASE {dir}, t.title COLLATE NOCASE")
+        }
+        SongSort::Title => format!("t.title COLLATE NOCASE {dir}"),
+        SongSort::Album => format!("t.album COLLATE NOCASE {dir}, t.title COLLATE NOCASE"),
+        // unknowns last whichever way
+        SongSort::Year => format!("t.year IS NULL, t.year {dir}"),
+        SongSort::Duration => format!("t.duration_ms {dir}"),
+        SongSort::Bpm => format!("t.bpm IS NULL, t.bpm {dir}"),
+        SongSort::Key => format!("t.musical_key IS NULL, t.musical_key {dir}"),
+        SongSort::Danceability => format!("t.danceability IS NULL, t.danceability {dir}"),
+        SongSort::Genre => format!("g.name IS NULL, g.name COLLATE NOCASE {dir}"),
+        SongSort::Plays => format!("coalesce(st.plays, 0) {dir}"),
+        SongSort::LastPlayed => format!("st.last_played IS NULL, st.last_played {dir}"),
+        SongSort::Added => format!("t.added_at {dir}"),
+        SongSort::Popularity => format!("t.popularity IS NULL, t.popularity {dir}"),
+        SongSort::Position if q.playlist.is_some() => format!("pt.position {dir}"),
+        SongSort::Position => format!("t.artist_line COLLATE NOCASE {dir}"),
+    };
+    let total: i64 = conn.query_row(
+        &format!("SELECT count(*) {from} {where_sql}"),
+        rusqlite::params_from_iter(args.iter()),
+        |r| r.get(0),
+    )?;
+    let limit = if q.limit == 0 { 200 } else { q.limit.min(1000) };
+    let sql = format!(
+        "SELECT t.key, t.title, t.artist_line, t.album, t.year, t.duration_ms, t.bpm, t.musical_key,
+                t.danceability, t.main_genre, g.name, coalesce(st.plays, 0), st.last_played, t.playable,
+                t.has_lyrics, t.has_words, t.has_video, t.popularity, t.added_at, {position}
+         {from} {where_sql} ORDER BY {order} LIMIT {limit} OFFSET {}",
+        q.offset
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let songs = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            Ok(SongRow {
+                key: r.get(0)?,
+                title: r.get(1)?,
+                artists: r.get(2)?,
+                album: r.get(3)?,
+                year: r.get(4)?,
+                duration_ms: r.get(5)?,
+                bpm: r.get(6)?,
+                musical_key: r.get(7)?,
+                danceability: r.get(8)?,
+                genre: r.get(9)?,
+                style: r.get(10)?,
+                plays: r.get(11)?,
+                last_played: r.get(12)?,
+                playable: r.get(13)?,
+                has_lyrics: r.get(14)?,
+                has_words: r.get(15)?,
+                has_video: r.get(16)?,
+                popularity: r.get(17)?,
+                added_at: r.get(18)?,
+                position: r.get(19)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(SongPage {
+        total: total as usize,
+        offset: q.offset,
+        songs,
+    })
+}
+
+/// `"word"*` per word, for prefix matching every word.
+fn fts_terms(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{w}\"*"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PlaylistRow {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub url: Option<String>,
+    pub description: String,
+    /// Songs in the list.
+    pub songs: i64,
+    /// Of those, in the library and playable.
+    pub playable: i64,
+}
+
+pub fn playlists(conn: &Connection) -> Result<Vec<PlaylistRow>> {
+    let mut q = conn.prepare(
+        "SELECT p.id, p.kind, p.name, p.url, p.description, count(pt.track_key),
+                count(CASE WHEN t.playable THEN 1 END)
+         FROM playlists p LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+         LEFT JOIN tracks t ON t.key = pt.track_key
+         GROUP BY p.id ORDER BY p.name COLLATE NOCASE",
+    )?;
+    let rows = q
+        .query_map([], |r| {
+            Ok(PlaylistRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                name: r.get(2)?,
+                url: r.get(3)?,
+                description: r.get(4)?,
+                songs: r.get(5)?,
+                playable: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Genres (top-genre parents) with how many songs each.
+pub fn genre_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut q = conn.prepare(
+        "SELECT parent, count(*) n FROM genres WHERE rank = 0 GROUP BY parent ORDER BY n DESC",
+    )?;
+    let rows = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Which playlists a song is in, and its plays (newest first).
+pub fn song_links(conn: &Connection, key: &str) -> Result<(Vec<PlaylistRow>, Vec<crate::Play>)> {
+    let lists = playlists(conn)?;
+    let mut q =
+        conn.prepare("SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_key = ?1")?;
+    let ids: std::collections::HashSet<String> = q
+        .query_map(params![key], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut q = conn.prepare(
+        "SELECT key, at, played_ms, completed, kind, singer, background FROM plays WHERE key = ?1 ORDER BY at DESC LIMIT 50",
+    )?;
+    let plays = q
+        .query_map(params![key], |r| {
+            Ok(crate::Play {
+                key: r.get(0)?,
+                at: r.get::<_, i64>(1)? as u64,
+                played_ms: r.get::<_, i64>(2)? as u64,
+                completed: r.get(3)?,
+                kind: r.get(4)?,
+                singer: r.get(5)?,
+                background: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((
+        lists.into_iter().filter(|p| ids.contains(&p.id)).collect(),
+        plays,
+    ))
 }

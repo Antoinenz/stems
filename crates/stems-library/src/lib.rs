@@ -14,6 +14,8 @@
 //!   cover.jpg
 //!   .sent               handed off to another machine: only track.json is
 //!                       left here, and imports skip the track
+//! <library>/history.jsonl
+//!                       every song played (when, how far, who sang)
 //! <library>/library.sqlite
 //!                       a searchable index of all of it, rebuilt from the
 //!                       folders whenever they change (see [`index`])
@@ -28,6 +30,7 @@
 pub mod analysis;
 pub mod entry;
 pub mod flac;
+pub mod history;
 pub mod index;
 pub mod playlist;
 pub mod wav;
@@ -40,6 +43,7 @@ use stems_core::{Lyrics, TrackId};
 
 pub use analysis::{Analysis, Genre};
 pub use entry::{Entry, Stage, Stages};
+pub use history::Play;
 pub use playlist::Playlist;
 
 pub const TRACKS_DIR: &str = "tracks";

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use stems_library::{Entry, Library};
+use stems_library::{Entry, Library, index};
 use stems_server::LibraryApi;
 use tokio::sync::mpsc;
 
@@ -68,6 +68,7 @@ impl LibraryService {
         let (tx, rx) = mpsc::unbounded_channel();
         let status = Arc::new(Mutex::new(ImportStatus::default()));
         tokio::spawn(worker(cfg.clone(), lib.clone(), rx, status.clone()));
+        tokio::spawn(keep_index_fresh(lib.clone()));
         Arc::new(Self {
             lib,
             tx,
@@ -206,6 +207,63 @@ impl LibraryApi for LibraryService {
     fn import_status(&self) -> Value {
         json!(self.status.lock().expect("import status").clone())
     }
+
+    fn songs(
+        &self,
+        params: &std::collections::HashMap<String, String>,
+        guest: bool,
+    ) -> Result<Value, String> {
+        let q = song_query(params, guest);
+        let conn = index::open(&self.lib).map_err(|e| format!("{e:#}"))?;
+        let page = index::songs(&conn, &q).map_err(|e| format!("{e:#}"))?;
+        Ok(json!(page))
+    }
+
+    fn song(&self, key: &str) -> Result<Option<Value>, String> {
+        let Some(e) = self.lib.get(key).map_err(|e| format!("{e:#}"))? else {
+            return Ok(None);
+        };
+        let mut v = summary(&self.lib, &e, true);
+        v["info"] = json!(e.info);
+        v["lyrics_text"] = json!(self.lib.load_lyrics(&e).ok().flatten().map(|l| {
+            if l.lines.is_empty() {
+                l.plain.unwrap_or_default()
+            } else {
+                l.lines
+                    .iter()
+                    .map(|x| x.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }));
+        if let Ok(conn) = index::open(&self.lib) {
+            if let Ok((lists, plays)) = index::song_links(&conn, key) {
+                v["playlists"] = json!(lists);
+                v["plays"] = json!(plays);
+            }
+        }
+        Ok(Some(v))
+    }
+
+    fn playlists(&self) -> Result<Value, String> {
+        let conn = index::open(&self.lib).map_err(|e| format!("{e:#}"))?;
+        index::playlists(&conn)
+            .map(|p| json!(p))
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    fn genres(&self) -> Result<Value, String> {
+        let conn = index::open(&self.lib).map_err(|e| format!("{e:#}"))?;
+        index::genre_counts(&conn)
+            .map(|g| {
+                json!(
+                    g.into_iter()
+                        .map(|(name, songs)| json!({"name": name, "songs": songs}))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .map_err(|e| format!("{e:#}"))
+    }
 }
 
 async fn worker(
@@ -289,5 +347,56 @@ async fn worker(
             s.current = None;
             s.running = !s.waiting.is_empty();
         });
+    }
+}
+
+/// Query-string parameters → a song query (unknown or malformed values are
+/// ignored). Guests only ever see playable songs.
+fn song_query(p: &std::collections::HashMap<String, String>, guest: bool) -> index::SongQuery {
+    let num = |k: &str| p.get(k).and_then(|v| v.parse::<f64>().ok());
+    let flag = |k: &str| p.get(k).is_some_and(|v| v == "1" || v == "true");
+    let text = |k: &str| {
+        p.get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    index::SongQuery {
+        q: p.get("q").cloned().unwrap_or_default(),
+        sort: p
+            .get("sort")
+            .and_then(|s| serde_json::from_value(json!(s)).ok())
+            .unwrap_or_default(),
+        desc: flag("desc"),
+        limit: num("limit").map_or(0, |n| n as usize),
+        offset: num("offset").map_or(0, |n| n as usize),
+        playable: guest || flag("playable"),
+        playlist: text("playlist"),
+        genre: text("genre"),
+        artist: text("artist"),
+        year_from: num("year_from").map(|n| n as i64),
+        year_to: num("year_to").map(|n| n as i64),
+        bpm_from: num("bpm_from"),
+        bpm_to: num("bpm_to"),
+    }
+}
+
+/// Keep library.sqlite in step with the folders (new imports, edits by
+/// hand, plays) while the server runs: an incremental update is a few
+/// milliseconds when nothing changed.
+async fn keep_index_fresh(lib: Library) {
+    loop {
+        let l = lib.clone();
+        match tokio::task::spawn_blocking(move || index::update(&l)).await {
+            Ok(Ok(s)) if s.tracks_changed + s.tracks_removed + s.playlists_changed > 0 => {
+                tracing::info!(
+                    tracks = s.tracks,
+                    changed = s.tracks_changed,
+                    "library index updated"
+                )
+            }
+            Ok(Err(e)) => tracing::warn!("library index: {e:#}"),
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     }
 }

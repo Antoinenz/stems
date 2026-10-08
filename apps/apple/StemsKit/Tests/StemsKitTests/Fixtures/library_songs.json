@@ -1,0 +1,50 @@
+{
+  "offset": 0,
+  "songs": [
+    {
+      "added_at": 1791332963,
+      "album": "Album",
+      "artists": "JAY-Z, Kanye West",
+      "bpm": 140.10000610351562,
+      "danceability": 0.8600000143051147,
+      "duration_ms": 219333,
+      "genre": "Hip Hop",
+      "has_lyrics": true,
+      "has_video": false,
+      "has_words": true,
+      "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
+      "last_played": 1791400000,
+      "musical_key": "D minor",
+      "playable": true,
+      "plays": 1,
+      "popularity": 78,
+      "position": null,
+      "style": "Hip Hop / Trap",
+      "title": "Ni**as In Paris",
+      "year": 2011
+    },
+    {
+      "added_at": 1791332963,
+      "album": null,
+      "artists": "",
+      "bpm": null,
+      "danceability": null,
+      "duration_ms": 61000,
+      "genre": null,
+      "has_lyrics": false,
+      "has_video": false,
+      "has_words": false,
+      "key": "local_demo_00ff00ff00ff00ff",
+      "last_played": null,
+      "musical_key": null,
+      "playable": true,
+      "plays": 0,
+      "popularity": null,
+      "position": null,
+      "style": null,
+      "title": "Demo",
+      "year": null
+    }
+  ],
+  "total": 2
+}

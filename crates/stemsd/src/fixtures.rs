@@ -351,6 +351,50 @@ async fn api_fixtures_are_current() {
 
     // library
     put("library_host", service.list("", true).unwrap());
+    // the indexed views (library.sqlite)
+    lib.append_play(&stems_library::Play {
+        key: "spotify_1auxYwYrFRqZP7t3s7w4um".into(),
+        at: 1_791_400_000,
+        played_ms: 200_000,
+        completed: true,
+        kind: "sing".into(),
+        singer: Some("Mia".into()),
+        background: false,
+    })
+    .unwrap();
+    lib.save_playlist(&stems_library::Playlist {
+        id: "spotify_playlist_19PgP2QSGPcm6Ve8VhbtpG".into(),
+        kind: "playlist".into(),
+        name: "80s HITS".into(),
+        url: Some("https://open.spotify.com/playlist/19PgP2QSGPcm6Ve8VhbtpG".into()),
+        description: "The best of the 1980s".into(),
+        tracks: vec![
+            "spotify_1auxYwYrFRqZP7t3s7w4um".into(),
+            "spotify_missing".into(),
+        ],
+        updated_at: 1_791_332_000,
+    })
+    .unwrap();
+    stems_library::index::update(&lib).unwrap();
+    let params: std::collections::HashMap<String, String> = [
+        ("sort".to_string(), "danceability".to_string()),
+        ("desc".to_string(), "1".to_string()),
+    ]
+    .into();
+    let mut page = service.songs(&params, false).unwrap();
+    for s in page["songs"].as_array_mut().unwrap() {
+        s["added_at"] = json!(1_791_332_963u64); // machine-independent
+    }
+    put("library_songs", page);
+    put("library_playlists", service.playlists().unwrap());
+    put("library_genres", service.genres().unwrap());
+    put(
+        "library_song",
+        service
+            .song("spotify_1auxYwYrFRqZP7t3s7w4um")
+            .unwrap()
+            .unwrap(),
+    );
     put("library_guest", service.list("", false).unwrap());
     put("import_status_idle", service.import_status());
     let mut busy = crate::library::ImportStatus {

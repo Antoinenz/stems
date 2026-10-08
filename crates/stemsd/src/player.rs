@@ -217,6 +217,8 @@ struct Current {
     item: QueueItem,
     /// Background music: played quieter, no karaoke, not saved.
     intermission: bool,
+    /// Unix seconds when it started (for the play history).
+    started_at: u64,
 }
 
 /// Fading the current track out, then starting the next one.
@@ -440,11 +442,16 @@ impl Player {
         while self.recent.len() > RECENT {
             self.recent.pop_front();
         }
+        self.log_play();
         self.current = Some(Current {
             loaded,
             pos: 0,
             item: item.clone(),
             intermission,
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         });
         self.playing = true;
         self.draining = false;
@@ -526,8 +533,35 @@ impl Player {
         self.maybe_preload();
     }
 
+    /// Record the current song in the play history (when it is replaced
+    /// or stopped). Failures only log: history is nice to have.
+    fn log_play(&self) {
+        let Some(c) = &self.current else { return };
+        let frames = c.loaded.frames().max(1);
+        let play = stems_library::Play {
+            key: c.item.key.clone(),
+            at: c.started_at,
+            played_ms: frames_to_ms(c.pos.min(frames) as u64),
+            // the last few seconds are often a fade or silence
+            completed: c.pos as f64 >= frames as f64 * 0.95,
+            kind: match c.item.kind {
+                QueueKind::Sing => "sing".into(),
+                QueueKind::Play => "play".into(),
+            },
+            singer: c.item.singer.clone(),
+            background: c.intermission,
+        };
+        if play.played_ms < 5_000 {
+            return; // a skip straight past it
+        }
+        if let Err(e) = self.lib.append_play(&play) {
+            tracing::warn!("play history: {e:#}");
+        }
+    }
+
     fn stop(&mut self) {
         self.fade = None;
+        self.log_play();
         if self.current.take().is_some() {
             self.flush.request();
             self.playing = false;

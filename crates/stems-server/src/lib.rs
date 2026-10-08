@@ -153,6 +153,28 @@ pub trait LibraryApi: Send + Sync {
     fn import(&self, sources: Vec<String>) -> Result<(), String>;
     /// Import progress as JSON.
     fn import_status(&self) -> serde_json::Value;
+    /// A page of songs from the index: `q`, `sort`, `desc`, `limit`,
+    /// `offset`, `playable`, `playlist`, `genre`, `artist`, `year_from`,
+    /// `year_to`, `bpm_from`, `bpm_to`. Guests only see playable songs.
+    fn songs(
+        &self,
+        _params: &std::collections::HashMap<String, String>,
+        _guest: bool,
+    ) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    /// One song in detail: entry, lyrics, playlists it is in, plays.
+    fn song(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+        Err("not supported".into())
+    }
+    /// Playlists with song counts.
+    fn playlists(&self) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    /// Top genres with song counts.
+    fn genres(&self) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
 }
 
 /// Everything optional the router serves.
@@ -307,6 +329,10 @@ impl Server {
                 "/api/library/import",
                 get(get_import_status).post(post_import),
             )
+            .route("/api/library/songs", get(get_songs))
+            .route("/api/library/songs/{key}", get(get_song))
+            .route("/api/library/playlists", get(get_playlists))
+            .route("/api/library/genres", get(get_genres))
             .route("/api/info", {
                 let name = device_name.clone();
                 get(move |headers| async move { Json(info(&headers, &name)) })
@@ -493,6 +519,69 @@ async fn get_library(
             Json(serde_json::json!({"error": e})),
         )
     })
+}
+
+fn unavailable(e: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": e})),
+    )
+}
+
+async fn get_songs(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    let guest = access::role_of(&app.access, &headers, query.as_deref()) != Role::Host;
+    // the index is SQLite: keep it off the async workers
+    tokio::task::spawn_blocking(move || lib.songs(&params, guest))
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
+}
+
+async fn get_song(
+    State(app): State<App>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    match tokio::task::spawn_blocking(move || lib.song(&key))
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+    {
+        Ok(Some(v)) => Ok(Json(v)),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such song"})),
+        )),
+        Err(e) => Err(unavailable(e)),
+    }
+}
+
+async fn get_playlists(
+    State(app): State<App>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    tokio::task::spawn_blocking(move || lib.playlists())
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
+}
+
+async fn get_genres(
+    State(app): State<App>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    tokio::task::spawn_blocking(move || lib.genres())
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
 }
 
 #[derive(serde::Deserialize)]
