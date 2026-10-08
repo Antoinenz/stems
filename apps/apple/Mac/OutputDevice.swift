@@ -1,6 +1,5 @@
-// Previewing songs on the Mac's own speakers or headphones — never the
-// party output. Clips come from the server as WAV (mix, instrumental or
-// vocals) and play through AVAudioEngine pinned to a chosen output device.
+// The Mac's audio outputs, for previewing songs on its own speakers or
+// headphones — never the party output (see SongPreviewWindow).
 
 import AVFoundation
 import CoreAudio
@@ -72,93 +71,5 @@ struct OutputDevice: Hashable, Identifiable {
         var size = UInt32(MemoryLayout<UInt32>.size)
         AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value)
         return value
-    }
-}
-
-@MainActor
-@Observable
-final class PreviewPlayer {
-    static let shared = PreviewPlayer()
-
-    enum State: Equatable {
-        case idle
-        case loading(String)
-        case playing(String)
-        case failed(String)
-    }
-
-    private(set) var state: State = .idle
-    private(set) var stem: PreviewStem = .mix
-    private var engine: AVAudioEngine?
-    private var node: AVAudioPlayerNode?
-    private var generation = 0
-
-    var playingKey: String? {
-        switch state {
-        case .loading(let k), .playing(let k): k
-        default: nil
-        }
-    }
-
-    func toggle(_ key: String, stem: PreviewStem, client: StemsClient) {
-        if playingKey == key && self.stem == stem {
-            stop()
-        } else {
-            play(key, stem: stem, client: client)
-        }
-    }
-
-    func play(_ key: String, stem: PreviewStem, client: StemsClient) {
-        stop()
-        generation += 1
-        let mine = generation
-        self.stem = stem
-        state = .loading(key)
-        Task {
-            do {
-                let data = try await client.api.preview(key, stem: stem)
-                guard mine == generation else { return }
-                try start(data, key: key)
-            } catch {
-                if mine == generation { state = .failed(error.localizedDescription) }
-            }
-        }
-    }
-
-    func stop() {
-        generation += 1
-        node?.stop()
-        engine?.stop()
-        engine = nil
-        node = nil
-        state = .idle
-    }
-
-    private func start(_ wav: Data, key: String) throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "stems-preview.wav")
-        try wav.write(to: url)
-        let file = try AVAudioFile(forReading: url)
-        let engine = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
-        // pin the output to the preview device so it never reaches the party
-        if let device = OutputDevice.preferred(), let unit = engine.outputNode.audioUnit {
-            var id = device.id
-            AudioUnitSetProperty(
-                unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id,
-                UInt32(MemoryLayout<AudioDeviceID>.size))
-        }
-        try engine.start()
-        let mine = generation
-        node.scheduleFile(file, at: nil) { [weak self] in
-            Task { @MainActor in
-                if let self, self.generation == mine { self.stop() }
-            }
-        }
-        node.play()
-        self.engine = engine
-        self.node = node
-        state = .playing(key)
     }
 }

@@ -26,6 +26,7 @@ public struct SongRow: Codable, Hashable, Identifiable, Sendable {
     public var hasWords: Bool
     public var hasVideo: Bool
     public var popularity: Int?
+    public var explicit: Bool?
     public var addedAt: Int
     /// Place in the playlist being listed.
     public var position: Int?
@@ -35,7 +36,7 @@ public struct SongRow: Codable, Hashable, Identifiable, Sendable {
     public var styleName: String? { style.map { $0.components(separatedBy: " / ").last ?? $0 } }
 
     enum CodingKeys: String, CodingKey {
-        case key, title, artists, album, year, bpm, danceability, genre, style, plays, playable, popularity, position
+        case key, title, artists, album, year, bpm, danceability, genre, style, plays, playable, popularity, position, explicit
         case durationMs = "duration_ms"
         case musicalKey = "musical_key"
         case lastPlayed = "last_played"
@@ -64,6 +65,8 @@ public struct SongQuery: Hashable, Sendable {
     public var sort: SongSort = .default
     public var desc = false
     public var playable = false
+    /// Only songs not ready yet (host only).
+    public var unfinished = false
     public var playlist: String?
     public var genre: String?
     public var artist: String?
@@ -72,9 +75,11 @@ public struct SongQuery: Hashable, Sendable {
     public var bpmFrom: Double?
     public var bpmTo: Double?
 
-    public init(playlist: String? = nil, genre: String? = nil) {
+    public init(playlist: String? = nil, genre: String? = nil, artist: String? = nil, unfinished: Bool = false) {
         self.playlist = playlist
         self.genre = genre
+        self.artist = artist
+        self.unfinished = unfinished
     }
 
     func items(limit: Int, offset: Int) -> [URLQueryItem] {
@@ -87,6 +92,7 @@ public struct SongQuery: Hashable, Sendable {
         if sort != .default { add("sort", sort.rawValue) }
         if desc { add("desc", "1") }
         if playable { add("playable", "1") }
+        if unfinished { add("unfinished", "1") }
         add("playlist", playlist)
         add("genre", genre)
         add("artist", artist)
@@ -140,12 +146,17 @@ public struct SongDetail: Decodable, Hashable, Sendable {
     public var info: TrackInfo
     public var analysis: Analysis?
     public var lyricsText: String?
+    /// Timed lyrics, when there are any.
+    public var lyrics: Lyrics?
+    /// Where the music video sits against the audio.
+    public var videoOffsetMs: Int
     public var playlists: [PlaylistRow]
     public var plays: [Play]
 
     enum CodingKeys: String, CodingKey {
-        case info, analysis, playlists, plays
+        case info, analysis, playlists, plays, lyrics
         case lyricsText = "lyrics_text"
+        case videoOffsetMs = "video_offset_ms"
     }
 
     public init(from decoder: Decoder) throws {
@@ -154,6 +165,8 @@ public struct SongDetail: Decodable, Hashable, Sendable {
         info = try c.decodeIfPresent(TrackInfo.self, forKey: .info) ?? TrackInfo()
         analysis = try c.decodeIfPresent(Analysis.self, forKey: .analysis)
         lyricsText = try c.decodeIfPresent(String.self, forKey: .lyricsText)
+        lyrics = try? c.decodeIfPresent(Lyrics.self, forKey: .lyrics)
+        videoOffsetMs = (try? c.decodeIfPresent(Int.self, forKey: .videoOffsetMs)) ?? 0
         playlists = try c.decodeIfPresent([PlaylistRow].self, forKey: .playlists) ?? []
         plays = try c.decodeIfPresent([Play].self, forKey: .plays) ?? []
     }
@@ -221,6 +234,18 @@ extension API {
 
     public func playlists() async throws -> [PlaylistRow] { try await getJSON("/api/library/playlists") }
     public func genres() async throws -> [GenreCount] { try await getJSON("/api/library/genres") }
+    /// Artists with song counts (same shape as genres).
+    public func artists() async throws -> [GenreCount] { try await getJSON("/api/library/artists") }
+
+    /// Move a song to the library's trash folder (host only).
+    public func deleteSong(_ key: String) async throws {
+        _ = try await send(method: "DELETE", "/api/library/songs/\(key)", body: Optional<String>.none)
+    }
+
+    /// Re-read every track folder into the index (host only).
+    public func reindex() async throws {
+        _ = try await send(method: "POST", "/api/library/reindex", body: Optional<String>.none)
+    }
 }
 
 /// The host's playlist folders (`folders.json` in the library).
@@ -284,6 +309,10 @@ extension API {
 
     public func addToPlaylist(_ id: String, songs: [String]) async throws {
         _ = try await send(method: "PATCH", "/api/library/playlists/\(id)", body: ["add": songs])
+    }
+
+    public func removeFromPlaylist(_ id: String, songs: [String]) async throws {
+        _ = try await send(method: "PATCH", "/api/library/playlists/\(id)", body: ["remove": songs])
     }
 
     public func renamePlaylist(_ id: String, to name: String) async throws {

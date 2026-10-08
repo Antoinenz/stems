@@ -57,6 +57,9 @@ extension SongRow {
 
 struct SongsView: View {
     @Environment(StemsClient.self) private var client
+    @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
+    @State private var trashing: [SongRow] = []
     @State private var model: SongsModel
     @State private var selection = Set<String>()
     @State private var sortOrder: [KeyPathComparator<SongRow>]
@@ -86,46 +89,8 @@ struct SongsView: View {
 
     var body: some View {
         Table(model.rows, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("#", value: \.sPos) { s in
-                Text(s.position.map { String($0 + 1) } ?? "").foregroundStyle(.secondary).monospacedDigit()
-            }
-            .width(min: 24, ideal: 30, max: 44)
-            .defaultVisibility(model.query.playlist == nil ? .hidden : .visible)
-            TableColumn("Title", value: \.title) { s in
-                HStack(spacing: 6) {
-                    Text(s.title).lineLimit(1)
-                    if s.hasWords {
-                        Image(systemName: "text.bubble").foregroundStyle(.secondary).help("Word-timed lyrics")
-                    } else if s.hasLyrics {
-                        Image(systemName: "text.alignleft").foregroundStyle(.tertiary).help("Line-timed lyrics")
-                    }
-                    if s.hasVideo { Image(systemName: "film").foregroundStyle(.secondary).help("Music video") }
-                }
-                .opacity(s.playable ? 1 : 0.45)
-            }
-            .width(min: 140, ideal: 240)
-            TableColumn("Artist", value: \.artists) { s in Text(s.artists).lineLimit(1) }
-                .width(min: 100, ideal: 170)
-            TableColumn("Year", value: \.sYear) { s in Text(s.year.map(String.init) ?? "").monospacedDigit() }
-                .width(min: 36, ideal: 44, max: 60)
-            TableColumn("Time", value: \.durationMs) { s in Text(Fmt.time(ms: s.durationMs)).monospacedDigit() }
-                .width(min: 40, ideal: 48, max: 60)
-            TableColumn("BPM", value: \.sBpm) { s in Text(s.bpm.map { String(Int($0.rounded())) } ?? "").monospacedDigit() }
-                .width(min: 34, ideal: 42, max: 56)
-            TableColumn("Key", value: \.sKey) { s in Text(s.musicalKey ?? "").lineLimit(1) }
-                .width(min: 50, ideal: 70, max: 90)
-            TableColumn("Dance", value: \.sDance) { s in DanceBar(value: s.danceability) }
-                .width(min: 50, ideal: 70, max: 100)
-            TableColumn("Style", value: \.sStyle) { s in
-                Text(s.styleName ?? "").lineLimit(1).help(s.style ?? "")
-            }
-            .width(min: 80, ideal: 140)
-            TableColumn("Plays", value: \.plays) { s in
-                Text(s.plays > 0 ? String(s.plays) : "")
-                    .monospacedDigit()
-                    .help(s.lastPlayed.map { "Last played " + Fmt.ago(unix: $0) } ?? "Never played")
-            }
-            .width(min: 34, ideal: 42, max: 60)
+            nameColumns
+            detailColumns
         }
         .contextMenu(forSelectionType: String.self) { keys in
             menu(for: keys)
@@ -136,6 +101,20 @@ struct SongsView: View {
         .navigationTitle(title)
         .navigationSubtitle(subtitle)
         .sheet(item: $requesting) { RequestSheet(track: $0).frame(minWidth: 420, minHeight: 380) }
+        .confirmationDialog(
+            trashing.count == 1 ? "Move “\(trashing.first?.title ?? "")” to the library trash?" : "Move \(trashing.count) songs to the library trash?",
+            isPresented: Binding(get: { !trashing.isEmpty }, set: { if !$0 { trashing = [] } })
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                let rows = trashing
+                Task {
+                    for r in rows { try? await client.api.deleteSong(r.key) }
+                    await model.load(client)
+                }
+            }
+        } message: {
+            Text("They leave the library and its playlists. The files go to the library’s trash folder, so you can put them back.")
+        }
         .task(id: model.query) { await model.load(client) }
         .task(id: search) {
             try? await Task.sleep(for: .milliseconds(250))  // debounce typing
@@ -149,6 +128,77 @@ struct SongsView: View {
             model.query.sort = Self.sort(for: first.keyPath)
             model.query.desc = first.order == .reverse
         }
+    }
+
+    @TableColumnBuilder<SongRow, KeyPathComparator<SongRow>>
+    private var nameColumns: some TableColumnContent<SongRow, KeyPathComparator<SongRow>> {
+        TableColumn("#", value: \.sPos) { s in
+            Text(s.position.map { String($0 + 1) } ?? "").foregroundStyle(.secondary).monospacedDigit()
+        }
+        .width(min: 24, ideal: 30, max: 44)
+        .defaultVisibility(model.query.playlist == nil ? .hidden : .visible)
+        TableColumn("Title", value: \.title) { s in
+            Text(s.title).lineLimit(1).opacity(s.playable ? 1 : 0.45)
+        }
+        .width(min: 140, ideal: 240)
+        TableColumn("Karaoke") { s in
+            Image(systemName: s.playable ? "music.mic" : "hourglass")
+                .foregroundStyle(s.playable ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                .help(s.playable ? "Ready for karaoke" : "Not ready yet (still importing, or an import step failed)")
+                .frame(maxWidth: .infinity)
+        }
+        .width(min: 28, ideal: 52, max: 60)
+        TableColumn("Lyrics") { s in
+            Group {
+                if s.hasWords {
+                    Image(systemName: "text.bubble.fill").foregroundStyle(.secondary).help("Word-by-word timing")
+                } else if s.hasLyrics {
+                    Image(systemName: "text.alignleft").foregroundStyle(.secondary).help("Line timing")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .width(min: 28, ideal: 44, max: 56)
+        TableColumn("Video") { s in
+            Group {
+                if s.hasVideo { Image(systemName: "film").foregroundStyle(.secondary).help("Music video") }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .width(min: 28, ideal: 42, max: 56)
+        TableColumn("Explicit") { s in
+            Group {
+                if s.explicit == true { Image(systemName: "e.square.fill").foregroundStyle(.secondary).help("Explicit") }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .width(min: 28, ideal: 50, max: 60)
+    }
+
+    @TableColumnBuilder<SongRow, KeyPathComparator<SongRow>>
+    private var detailColumns: some TableColumnContent<SongRow, KeyPathComparator<SongRow>> {
+        TableColumn("Artist", value: \.artists) { s in Text(s.artists).lineLimit(1) }
+            .width(min: 100, ideal: 170)
+        TableColumn("Year", value: \.sYear) { s in Text(s.year.map(String.init) ?? "").monospacedDigit() }
+            .width(min: 36, ideal: 44, max: 60)
+        TableColumn("Time", value: \.durationMs) { s in Text(Fmt.time(ms: s.durationMs)).monospacedDigit() }
+            .width(min: 40, ideal: 48, max: 60)
+        TableColumn("BPM", value: \.sBpm) { s in Text(s.bpm.map { String(Int($0.rounded())) } ?? "").monospacedDigit() }
+            .width(min: 34, ideal: 42, max: 56)
+        TableColumn("Key", value: \.sKey) { s in Text(s.musicalKey ?? "").lineLimit(1) }
+            .width(min: 50, ideal: 70, max: 90)
+        TableColumn("Dance", value: \.sDance) { s in DanceBar(value: s.danceability) }
+            .width(min: 50, ideal: 70, max: 100)
+        TableColumn("Style", value: \.sStyle) { s in
+            Text(s.styleName ?? "").lineLimit(1).help(s.style ?? "")
+        }
+        .width(min: 80, ideal: 140)
+        TableColumn("Plays", value: \.plays) { s in
+            Text(s.plays > 0 ? String(s.plays) : "")
+                .monospacedDigit()
+                .help(s.lastPlayed.map { "Last played " + Fmt.ago(unix: $0) } ?? "Never played")
+        }
+        .width(min: 34, ideal: 42, max: 60)
     }
 
     private var subtitle: String {
@@ -194,8 +244,14 @@ struct SongsView: View {
             Divider()
             Button("Play Now") { client.send(.playTrack(key: r.key, singer: nil, kind: .play)) }
         }
+        let all = model.rows.filter { keys.contains($0.key) }
+        if all.count == 1, let r = all.first {
+            Divider()
+            Button("Preview…") { openWindow(id: "preview", value: r.key) }
+            Button("Show Info") { selected = r.key }
+        }
         if let actions = playlistActions {
-            let keys = model.rows.filter { keys.contains($0.key) }.map(\.key)
+            let keys = all.map(\.key)
             Divider()
             Menu("Add to Playlist") {
                 ForEach(actions.local) { p in
@@ -205,7 +261,42 @@ struct SongsView: View {
                 Button("New Playlist…") { actions.newPlaylist(keys) }
             }
             .disabled(keys.isEmpty)
+            if let remove = actions.removeFromCurrent {
+                Button(keys.count > 1 ? "Remove \(keys.count) Songs from Playlist" : "Remove from Playlist") {
+                    Task {
+                        await remove(keys)
+                        await model.load(client)
+                    }
+                }
+            }
         }
+        let spotify = all.compactMap(\.spotifyURL)
+        if !spotify.isEmpty {
+            Divider()
+            if all.count == 1, let url = spotify.first {
+                Button("Open in Spotify") { NSWorkspace.shared.open(url) }
+            }
+            Button(spotify.count > 1 ? "Copy Spotify Links" : "Copy Spotify Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(spotify.map(\.absoluteString).joined(separator: "\n"), forType: .string)
+            }
+            let unfinished = all.filter { !$0.playable || !$0.hasLyrics || !$0.hasVideo }.compactMap(\.spotifyURL)
+            Button("Retry Missing Parts") {
+                Task { try? await client.api.importSources(unfinished.map(\.absoluteString)) }
+            }
+            .disabled(unfinished.isEmpty)
+            .help("Import again: only the steps that are missing or failed are redone")
+        }
+        if let dir = app.supervisor.config?.libraryDir {
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    all.map { URL(fileURLWithPath: dir).appending(path: "tracks/\($0.key)") })
+            }
+            .disabled(all.isEmpty)
+        }
+        Divider()
+        Button(all.count > 1 ? "Move \(all.count) Songs to Trash…" : "Move to Trash…", role: .destructive) { trashing = all }
+            .disabled(all.isEmpty)
     }
 
     private static func sort(for keyPath: PartialKeyPath<SongRow>) -> SongSort {
@@ -223,6 +314,14 @@ struct SongsView: View {
         case \SongRow.sPos: .position
         default: .default
         }
+    }
+}
+
+extension SongRow {
+    /// The song on Spotify, for songs imported from there.
+    var spotifyURL: URL? {
+        guard key.hasPrefix("spotify_") else { return nil }
+        return URL(string: "https://open.spotify.com/track/\(key.dropFirst("spotify_".count))")
     }
 }
 

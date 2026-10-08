@@ -13,7 +13,7 @@ enum Destination: Hashable {
 
 /// What the library shows: everything, one playlist, or one genre.
 enum LibrarySelection: Hashable {
-    case all, playlist(String), genre(String)
+    case all, playlist(String), genre(String), artist(String), unfinished
 }
 
 struct MainWindow: View {
@@ -56,29 +56,27 @@ struct MainWindow: View {
             .stemsErrorToast()
         }
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    client.togglePlayPause()
-                } label: {
-                    Label(
-                        client.state.status == .playing ? "Pause" : "Play",
-                        systemImage: client.state.status == .playing ? "pause.fill" : "play.fill")
-                }
-                .help("Play or pause")
-                .disabled(!client.connection.isConnected)
-
-                Button("Next Song", systemImage: "forward.fill") { client.send(.next) }
-                    .help("Skip to the next request")
+            // playback controls only where the show is (no stray pauses
+            // while browsing or typing elsewhere)
+            if (model.destination ?? .show) == .show {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        client.togglePlayPause()
+                    } label: {
+                        Label(
+                            client.state.status == .playing ? "Pause" : "Play",
+                            systemImage: client.state.status == .playing ? "pause.fill" : "play.fill")
+                    }
+                    .help("Play or pause")
                     .disabled(!client.connection.isConnected)
+
+                    Button("Next Song", systemImage: "forward.fill") { client.send(.next) }
+                        .help("Skip to the next request")
+                        .disabled(!client.connection.isConnected)
+                }
             }
             ToolbarItem(placement: .primaryAction) {
-                Toggle(
-                    isOn: Binding(get: { client.state.karaoke.enabled }, set: { client.send(.setKaraoke($0)) })
-                ) {
-                    Label("Karaoke", systemImage: "music.mic")
-                }
-                .help("Vocal removal on or off")
-                .disabled(!client.connection.isConnected || client.state.karaoke.backend == nil)
+                DownloadsButton()
             }
         }
     }

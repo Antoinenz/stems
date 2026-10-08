@@ -77,6 +77,16 @@ struct StemsMacApp: App {
         .defaultSize(width: 1080, height: 720)
         .commands { StemsCommands(model: model) }
 
+        WindowGroup("Preview", id: "preview", for: String.self) { $key in
+            if let key {
+                SongPreviewWindow(key: key)
+                    .environment(model)
+                    .environment(model.client)
+                    .frame(minWidth: 640, minHeight: 420)
+            }
+        }
+        .defaultSize(width: 980, height: 620)
+
         Window("Server Log", id: "log") {
             LogWindow()
                 .environment(model)

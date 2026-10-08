@@ -11,6 +11,7 @@ import SwiftUI
 final class LibraryData {
     var playlists: [PlaylistRow] = []
     var genres: [GenreCount] = []
+    var artists: [GenreCount] = []
     var folders = PlaylistFolders()
     var error: String?
 
@@ -20,6 +21,7 @@ final class LibraryData {
     func load(_ client: StemsClient) async {
         if let p = try? await client.api.playlists() { playlists = p }
         if let g = try? await client.api.genres() { genres = g }
+        if let a = try? await client.api.artists() { artists = a }
         if let f = try? await client.api.folders() { folders = f }
     }
 
@@ -40,7 +42,8 @@ struct LibraryScreen: View {
     @Environment(StemsClient.self) private var client
     @State private var data = LibraryData()
     @AppStorage("libraryBrowse") private var browse = "playlists"
-    @AppStorage("showSongInspector") private var showInspector = true
+    @State private var showInspector = true
+    @State private var artistFilter = ""
     @AppStorage("spotifySearch") private var spotifySearch = true
     @State private var search = ""
     @State private var selectedSong: String?
@@ -83,12 +86,6 @@ struct LibraryScreen: View {
             SongInspector(key: selectedSong)
                 .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
         }
-        .toolbar {
-            ToolbarItem {
-                Button("Song Info", systemImage: "info.circle") { showInspector.toggle() }
-                    .help("Show or hide the song details")
-            }
-        }
         .task(id: client.connection.isConnected) {
             // new imports add playlists and genres
             while !Task.isCancelled {
@@ -112,6 +109,7 @@ struct LibraryScreen: View {
                 Picker("Browse", selection: $browse) {
                     Text("Playlists").tag("playlists")
                     Text("Genres").tag("genres")
+                    Text("Artists").tag("artists")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -126,9 +124,25 @@ struct LibraryScreen: View {
                 .help("New playlist or folder")
             }
             .padding(10)
+            if browse == "artists" {
+                TextField("Filter artists", text: $artistFilter)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
             List(selection: $model.librarySelection) {
                 Label("All Songs", systemImage: "music.note.list").tag(LibrarySelection.all)
-                if browse == "playlists" {
+                Label("Not Ready Yet", systemImage: "hourglass").tag(LibrarySelection.unfinished)
+                if browse == "artists" {
+                    Section("Artists") {
+                        ForEach(data.artists.filter { artistFilter.isEmpty || $0.name.localizedCaseInsensitiveContains(artistFilter) }) { a in
+                            Label(a.name, systemImage: "music.microphone")
+                                .lineLimit(1)
+                                .badge(a.songs)
+                                .tag(LibrarySelection.artist(a.name))
+                        }
+                    }
+                } else if browse == "playlists" {
                     ForEach(data.folders.folders) { folder in
                         Section {
                             ForEach(folder.playlists.compactMap { id in data.playlists.first { $0.id == id } }) { p in
@@ -213,7 +227,8 @@ struct LibraryScreen: View {
                     await data.load(client)
                 }
             },
-            newPlaylist: { keys in ask(.newPlaylist(songs: keys)) })
+            newPlaylist: { keys in ask(.newPlaylist(songs: keys)) },
+            removeFromCurrent: removeAction(sel))
         switch sel {
         case .all:
             SongsView(title: "Songs", query: SongQuery(), search: search, selected: $selectedSong, playlistActions: actions)
@@ -228,6 +243,23 @@ struct LibraryScreen: View {
         case .genre(let g):
             SongsView(title: g, query: SongQuery(genre: g), search: search, selected: $selectedSong, playlistActions: actions)
                 .id("genre-" + g)
+        case .artist(let a):
+            SongsView(title: a, query: SongQuery(artist: a), search: search, selected: $selectedSong, playlistActions: actions)
+                .id("artist-" + a)
+        case .unfinished:
+            SongsView(
+                title: "Not Ready Yet", query: SongQuery(unfinished: true), search: search,
+                emptyHint: "Every song is ready for karaoke.", selected: $selectedSong, playlistActions: actions)
+                .id("unfinished")
+        }
+    }
+
+    /// Taking songs out works for the host's own playlists only.
+    private func removeAction(_ sel: LibrarySelection) -> (([String]) async -> Void)? {
+        guard case .playlist(let id) = sel, data.local.contains(where: { $0.id == id }) else { return nil }
+        return { keys in
+            try? await client.api.removeFromPlaylist(id, songs: keys)
+            await data.load(client)
         }
     }
 
@@ -277,4 +309,6 @@ struct PlaylistActions {
     var local: [PlaylistRow]
     var add: (String, [String]) -> Void
     var newPlaylist: ([String]) -> Void
+    /// When showing one of the host's playlists: take songs out of it.
+    var removeFromCurrent: (([String]) async -> Void)?
 }

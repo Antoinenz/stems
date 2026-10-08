@@ -7,11 +7,10 @@ import SwiftUI
 
 struct SongInspector: View {
     @Environment(StemsClient.self) private var client
+    @Environment(\.openWindow) private var openWindow
     @State private var detail: SongDetail?
     @State private var error: String?
     @State private var requesting: RequestTarget?
-    @State private var stem: PreviewStem = .mix
-    private var preview: PreviewPlayer { PreviewPlayer.shared }
     let key: String?
 
     var body: some View {
@@ -64,10 +63,10 @@ struct SongInspector: View {
                         client.send(.enqueue(key: t.key, singer: nil, next: true, kind: .play))
                     }
                     .disabled(!t.playable)
+                    Button("Preview", systemImage: "headphones") { openWindow(id: "preview", value: t.key) }
+                        .help("Listen on this Mac with lyrics and video (never on the party speakers)")
                 }
                 .controlSize(.small)
-
-                previewBox(t)
 
                 if let a = d.analysis { analysis(a) }
 
@@ -119,42 +118,6 @@ struct SongInspector: View {
             }
             .padding(16)
         }
-    }
-
-    private func previewBox(_ t: LibraryTrack) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("Preview", selection: $stem) {
-                    Text("Mix").tag(PreviewStem.mix)
-                    Text("Instrumental").tag(PreviewStem.instrumental)
-                    Text("Vocals").tag(PreviewStem.vocals)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(!t.playable)
-                HStack {
-                    let mine = preview.playingKey == t.key
-                    Button {
-                        preview.toggle(t.key, stem: stem, client: client)
-                    } label: {
-                        Label(mine ? "Stop" : "Preview", systemImage: mine ? "stop.fill" : "headphones")
-                    }
-                    if case .loading(let k) = preview.state, k == t.key { ProgressView().controlSize(.small) }
-                    Spacer()
-                    Text("On this Mac: \(OutputDevice.preferred()?.name ?? "default output")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                if case .failed(let e) = preview.state {
-                    Text(e).font(.caption).foregroundStyle(.orange)
-                }
-            }
-        }
-        .onChange(of: stem) {
-            if preview.playingKey == t.key { preview.play(t.key, stem: stem, client: client) }
-        }
-        .onDisappear { preview.stop() }
     }
 
     private func analysis(_ a: Analysis) -> some View {
