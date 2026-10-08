@@ -102,7 +102,12 @@ impl VideoFetcher {
         // hold up a whole import run: give up and record the stage failed
         let output = tokio::time::timeout(DOWNLOAD_LIMIT, run)
             .await
-            .map_err(|_| anyhow!("yt-dlp took longer than {} minutes; gave up", DOWNLOAD_LIMIT.as_secs() / 60))?
+            .map_err(|_| {
+                anyhow!(
+                    "yt-dlp took longer than {} minutes; gave up",
+                    DOWNLOAD_LIMIT.as_secs() / 60
+                )
+            })?
             .with_context(|| format!("run `{}` (is yt-dlp installed?)", self.ytdlp))?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);

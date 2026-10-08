@@ -137,13 +137,15 @@ pub(crate) async fn open_decrypted(
     controller
         .fetch_next_and_wait(len as usize, 0)
         .map_err(|e| anyhow!("prefetch: {e}"))?;
-    let key = match session.audio_key().request(track_id, file_id).await {
-        Ok(k) => Some(k),
-        Err(e) => {
-            tracing::warn!("audio key unavailable, trying without decryption: {e}");
-            None
-        }
-    };
+    // Spotify's files are always encrypted: without the key all we'd have
+    // is noise that no decoder reads, so no key is an error (retried), not
+    // a reason to carry on.
+    let key = session
+        .audio_key()
+        .request(track_id, file_id)
+        .await
+        .map_err(|e| anyhow!("audio key: {e}"))?;
+    let key = Some(key);
     let offset = if AudioFiles::is_ogg_vorbis(format) {
         SPOTIFY_OGG_HEADER_END
     } else {

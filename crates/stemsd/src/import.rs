@@ -232,6 +232,10 @@ impl Importer {
     }
 
     async fn spotify(&mut self) -> Result<&ImportSession> {
+        if self.spotify.as_ref().is_some_and(|s| !s.is_alive()) {
+            tracing::warn!("the spotify connection dropped; reconnecting");
+            self.spotify = None;
+        }
         if self.spotify.is_none() {
             self.spotify = Some(ImportSession::connect(&self.spotify_dir, self.bitrate).await?);
         }

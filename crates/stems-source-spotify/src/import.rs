@@ -153,6 +153,12 @@ impl ImportSession {
         Ok(Self { session, bitrate })
     }
 
+    /// False once the connection to Spotify has dropped (a new session is
+    /// needed; requests on this one fail with "channel closed").
+    pub fn is_alive(&self) -> bool {
+        !self.session.is_invalid()
+    }
+
     /// Every track a link points at, in order, with the album or
     /// playlist it came from. Unavailable tracks in an album or playlist
     /// are logged and skipped.
