@@ -24,6 +24,7 @@ func decode<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
             "config_json", "import_status_busy", "import_status_idle", "info", "library_guest", "library_host",
             "me_guest", "me_host", "settings", "status", "status_spotify", "ws_clock", "ws_error", "ws_state",
             "ws_state_idle", "ws_state_intermission", "ws_status",
+            "library_songs", "library_playlists", "library_genres", "library_song",
         ]
         #expect(Set(names) == covered, "add a test for each new fixture")
     }
@@ -146,6 +147,34 @@ func decode<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
         let guest = try decode([LibraryTrack].self, "library_guest")
         #expect(guest.count == 2)
         #expect(guest.allSatisfy { $0.stages == nil && $0.complete == nil })
+    }
+
+    @Test func catalog() throws {
+        let page = try decode(SongPage.self, "library_songs")
+        #expect(page.total == 2)
+        let top = page.songs[0]
+        #expect(top.title == "Ni**as In Paris")
+        #expect(top.styleName == "Trap")
+        #expect(top.plays == 1)
+        #expect(top.lastPlayed != nil)
+        #expect(top.hasWords)
+        #expect(page.songs[1].plays == 0)
+        let lists = try decode([PlaylistRow].self, "library_playlists")
+        #expect(lists.first?.songs == 2)
+        #expect(lists.first?.playable == 1)
+        let genres = try decode([GenreCount].self, "library_genres")
+        #expect(genres.first?.name == "Hip Hop")
+        let detail = try decode(SongDetail.self, "library_song")
+        #expect(detail.track.key == top.key)
+        #expect(detail.info.label == "Roc-A-Fella")
+        #expect(detail.analysis?.moods["party"] != nil)
+        #expect(detail.playlists.map(\.name) == ["80s HITS"])
+        #expect(detail.plays.first?.singer == "Mia")
+        var q = SongQuery(playlist: "p")
+        q.sort = .lastPlayed
+        q.desc = true
+        let items = q.items(limit: 10, offset: 0).map { "\($0.name)=\($0.value ?? "")" }
+        #expect(items.contains("sort=last_played") && items.contains("playlist=p") && items.contains("desc=1"))
     }
 
     @Test func importStatus() throws {

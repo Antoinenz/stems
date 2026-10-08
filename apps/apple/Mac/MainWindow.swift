@@ -6,22 +6,64 @@ import StemsKit
 import StemsUI
 import SwiftUI
 
+/// Where the main window is.
+enum Destination: Hashable {
+    case show, songs, playlist(String), genre(String), machines, guests
+}
+
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(StemsClient.self) private var client
+    @State private var playlists: [PlaylistRow] = []
+    @State private var genres: [GenreCount] = []
 
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            List(Screen.allCases, selection: Binding($model.screen)) { screen in
-                Label(screen.title, systemImage: screen.symbol)
-                    .badge(badge(for: screen))
-                    .tag(screen)
+            List(selection: Binding($model.destination)) {
+                Section("Party") {
+                    Label("Now Playing", systemImage: "play.circle").tag(Destination.show)
+                        .badge(client.state.queue.count)
+                }
+                Section("Library") {
+                    Label("Songs", systemImage: "music.note.list").tag(Destination.songs)
+                }
+                if !playlists.isEmpty {
+                    Section("Playlists") {
+                        ForEach(playlists) { p in
+                            Label(p.displayName, systemImage: p.kind == "album" ? "square.stack" : "music.note.list")
+                                .lineLimit(1)
+                                .help("\(p.playable) of \(p.songs) songs ready")
+                                .tag(Destination.playlist(p.id))
+                        }
+                    }
+                }
+                if !genres.isEmpty {
+                    Section("Genres") {
+                        ForEach(genres) { g in
+                            Label(g.name, systemImage: "guitars").tag(Destination.genre(g.name))
+                                .badge(g.songs)
+                        }
+                    }
+                }
+                Section("System") {
+                    Label("Machines", systemImage: "server.rack").tag(Destination.machines)
+                        .badge(problems)
+                    Label("Guests", systemImage: "person.2").tag(Destination.guests)
+                }
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
+            .task(id: client.connection.isConnected) {
+                // new imports add playlists and genres
+                while !Task.isCancelled {
+                    if let p = try? await client.api.playlists() { playlists = p }
+                    if let g = try? await client.api.genres() { genres = g }
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
         } detail: {
             NavigationStack {
-                detail(model.screen)
+                detail(model.destination)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(spacing: 0) {
@@ -66,21 +108,16 @@ struct MainWindow: View {
     }
 
     @ViewBuilder
-    private func detail(_ screen: Screen) -> some View {
-        switch screen {
-        case .nowPlaying: NowPlayingView()
-        case .queue: QueueView()
-        case .library: LibraryView()
+    private func detail(_ d: Destination) -> some View {
+        switch d {
+        case .show: ShowView()
+        case .songs: SongsView(title: "Songs", query: SongQuery()).id("songs")
+        case .playlist(let id):
+            SongsView(title: playlists.first { $0.id == id }?.displayName ?? "Playlist", query: SongQuery(playlist: id))
+                .id(id)
+        case .genre(let g): SongsView(title: g, query: SongQuery(genre: g)).id("genre-" + g)
         case .machines: MachinesView { ThisMacSection() }
         case .guests: GuestsView()
-        }
-    }
-
-    private func badge(for screen: Screen) -> Int {
-        switch screen {
-        case .queue: client.state.queue.count
-        case .machines: problems
-        default: 0
         }
     }
 

@@ -184,16 +184,47 @@ struct Badge: View {
     }
 }
 
+/// What a request is for: enough of a song to show and queue it.
+public struct RequestTarget: Hashable, Identifiable, Sendable {
+    public var key: String
+    public var title: String
+    public var artistLine: String
+    public var art: String?
+    public var lyrics: Bool
+
+    public var id: String { key }
+
+    public init(_ t: LibraryTrack) {
+        key = t.key
+        title = t.title
+        artistLine = t.artistLine
+        art = t.art
+        lyrics = t.lyrics
+    }
+
+    public init(_ s: SongRow) {
+        key = s.key
+        title = s.title
+        artistLine = s.artists
+        art = "/media/library/\(s.key)/cover.jpg"
+        lyrics = s.hasLyrics
+    }
+}
+
 /// Request one song: sing (with a name) or just play it.
-struct RequestSheet: View {
+public struct RequestSheet: View {
     @Environment(StemsClient.self) private var client
     @Environment(\.dismiss) private var dismiss
     // starts empty: the host requests for a different person each time
     @State private var singer = ""
     @State private var kind: QueueKind = .sing
-    var track: LibraryTrack
+    var track: RequestTarget
 
-    var body: some View {
+    public init(track: RequestTarget) { self.track = track }
+
+    public init(track: LibraryTrack) { self.track = RequestTarget(track) }
+
+    public var body: some View {
         NavigationStack {
             Form {
                 Section {

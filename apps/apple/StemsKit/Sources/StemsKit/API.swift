@@ -58,6 +58,10 @@ public struct API: Sendable {
         return data
     }
 
+    func getJSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        try await get(path, query: query)
+    }
+
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], as: T.Type = T.self) async throws -> T {
         let data = try await send(request(path, query: query))
         return try Self.decoder().decode(T.self, from: data)

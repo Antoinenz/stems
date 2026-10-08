@@ -15,7 +15,7 @@ final class AppModel {
 
     let supervisor = ServerSupervisor()
     let client: StemsClient
-    var screen: Screen = .nowPlaying
+    var destination: Destination = .show
 
     private init() {
         let port = UserDefaults.standard.integer(forKey: "lastPort")

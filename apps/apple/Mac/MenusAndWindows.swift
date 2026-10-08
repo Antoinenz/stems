@@ -9,6 +9,9 @@ import SwiftUI
 
 struct StemsCommands: Commands {
     let model: AppModel
+    static let places: [(LocalizedStringKey, Destination)] = [
+        ("Now Playing", .show), ("Songs", .songs), ("Machines", .machines), ("Guests", .guests),
+    ]
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -38,12 +41,12 @@ struct StemsCommands: Commands {
         }
 
         CommandGroup(before: .sidebar) {
-            ForEach(Screen.allCases) { screen in
-                Button(screen.title) {
-                    model.screen = screen
+            ForEach(Array(Self.places.enumerated()), id: \.offset) { i, place in
+                Button(place.0) {
+                    model.destination = place.1
                     openWindow(id: "main")
                 }
-                .keyboardShortcut(screen.shortcut, modifiers: .command)
+                .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
             }
             Divider()
         }
