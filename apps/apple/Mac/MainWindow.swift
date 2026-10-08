@@ -88,7 +88,7 @@ struct MainWindow: View {
         switch d {
         case .show: ShowView()
         case .library: LibraryScreen()
-        case .machines: MachinesView { ThisMacSection() }
+        case .machines: MachinesScreen()
         case .guests: GuestsView()
         }
     }
