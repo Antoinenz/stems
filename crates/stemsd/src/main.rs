@@ -3,6 +3,7 @@
 //! Phase 1: a CLI that wires one source to one sink and logs transport
 //! events. The HTTP/WS server, separation and the stage come next.
 
+mod autodj;
 mod awake;
 mod config;
 mod engine;

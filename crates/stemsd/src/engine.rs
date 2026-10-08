@@ -147,6 +147,8 @@ pub struct Engine {
     /// Stop when the source reports `Ended` (file playback).
     exit_on_end: bool,
     tick_count: u64,
+    /// ntfy URL for phone notifications.
+    ntfy: Option<String>,
 }
 
 impl Engine {
@@ -219,6 +221,7 @@ impl Engine {
             auto_karaoke: true,
             exit_on_end,
             tick_count: 0,
+            ntfy: None,
         };
         (
             engine,
@@ -229,6 +232,42 @@ impl Engine {
                 commands: cmd_tx,
             },
         )
+    }
+
+    /// Push a notification to the host's phone through ntfy (when a topic
+    /// is configured). Fire and forget: a failure only logs.
+    fn notify(&self, title: String, message: String) {
+        let Some(url) = self.ntfy.clone() else {
+            return;
+        };
+        tracing::info!(title, message, "notifying");
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let r = client
+                .post(&url)
+                .header("Title", title)
+                .header("Tags", "microphone")
+                .body(message)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await;
+            if let Err(e) = r.and_then(|r| r.error_for_status()) {
+                tracing::warn!("notification: {e}");
+            }
+        });
+    }
+
+    /// Phone notifications via ntfy: a topic name (ntfy.sh) or a full URL.
+    pub fn with_notify(mut self, ntfy: &str) -> Self {
+        let t = ntfy.trim();
+        self.ntfy = (!t.is_empty()).then(|| {
+            if t.starts_with("http://") || t.starts_with("https://") {
+                t.to_string()
+            } else {
+                format!("https://ntfy.sh/{t}")
+            }
+        });
+        self
     }
 
     pub fn set_volume(&mut self, level: f32) {
@@ -516,6 +555,11 @@ impl Engine {
                 });
             }
             SourceEvent::Volume { level } => self.set_volume(level),
+            SourceEvent::Show(show) => self.state_tx.send_modify(|s| {
+                s.show = show;
+                s.revision += 1;
+            }),
+            SourceEvent::Notify { title, message } => self.notify(title, message),
             SourceEvent::NowPlaying { item, intermission } => {
                 let karaoke = item
                     .as_ref()
@@ -608,7 +652,14 @@ impl Engine {
             | Command::Enqueue { .. }
             | Command::Dequeue { .. }
             | Command::MoveInQueue { .. }
-            | Command::ClearQueue => {}
+            | Command::ClearQueue
+            | Command::SetMode { .. }
+            | Command::SetAfterSong { .. }
+            | Command::FadeOut { .. }
+            | Command::TalkOver { .. }
+            | Command::Resume
+            | Command::SetAutoDj { .. }
+            | Command::SetPool { .. } => {}
             Command::SetVideoOffset { offset_ms } => {
                 let track = self.state_tx.borrow().track.clone();
                 if let Some(t) = &track {

@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use stems_audio::ring::push_available;
 use stems_audio::{FlushSignal, Producer};
 use stems_core::{
-    CHANNELS, Command, QueueItem, QueueKind, Source, SourceEvent, frames_to_ms, ms_to_frames,
+    AfterSong, CHANNELS, Command, PartyMode, QueueItem, QueueKind, ShowState, Source, SourceEvent,
+    frames_to_ms, ms_to_frames,
 };
 use stems_library::{Entry, Library};
 use stems_sep::{StemBuffer, StemStore};
@@ -178,6 +179,13 @@ struct SavedQueue {
     current: Option<SavedItem>,
     #[serde(default)]
     queue: Vec<SavedItem>,
+    /// Mode, auto-DJ and its pool survive restarts.
+    #[serde(default)]
+    mode: PartyMode,
+    #[serde(default)]
+    auto_dj: Option<bool>,
+    #[serde(default)]
+    pool: Vec<String>,
 }
 
 impl SavedItem {
@@ -221,11 +229,24 @@ struct Current {
     started_at: u64,
 }
 
-/// Fading the current track out, then starting the next one.
+/// Fading the current track out, then starting the next one (or holding).
 struct Fade {
     left: usize,
     total: usize,
+    then: AfterFade,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFade {
+    Next,
+    Hold,
+}
+
+/// Talk-over level (−18 dB) and how fast the music ducks to it.
+const DUCK_LEVEL: f32 = 0.125;
+const DUCK_RAMP_MS: f32 = 250.0;
+/// "Fade out now" without a time given.
+const FADE_OUT_MS: u64 = 3000;
 
 struct Player {
     lib: Library,
@@ -254,6 +275,9 @@ struct Player {
     scratch: Vec<f32>,
     last_position_event: Instant,
     save_warned: bool,
+    show: ShowState,
+    /// Talk-over gain right now (ramps towards its target).
+    duck: f32,
 }
 
 impl Player {
@@ -286,6 +310,9 @@ impl Player {
                 .filter(|c| !c.intermission)
                 .map(|c| SavedItem::of(&c.item)),
             queue: self.queue.iter().map(SavedItem::of).collect(),
+            mode: self.show.mode,
+            auto_dj: Some(self.show.auto_dj),
+            pool: self.show.pool.clone(),
         };
         match self.lib.save_state(QUEUE_FILE, &saved) {
             Ok(()) => self.save_warned = false,
@@ -335,37 +362,43 @@ impl Player {
             .expect("spawn loader");
     }
 
-    /// A random playable song for background music: not played recently,
-    /// not queued, not playing now.
+    /// The auto-DJ's next song: from the pool (all of the library when
+    /// empty), like what's playing, not played recently, not queued.
     fn pick_intermission(&mut self) -> Option<QueueItem> {
-        use rand::seq::IndexedRandom;
         let entries = match self.lib.list() {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("background music: {e:#}");
+                tracing::warn!("auto-DJ: {e:#}");
                 return None;
             }
         };
-        let playable: Vec<&Entry> = entries.iter().filter(|e| e.is_playable()).collect();
-        let current = self.current.as_ref().map(|c| c.item.key.as_str());
-        let avoid = RECENT.min(playable.len() / 2);
-        let recent: Vec<&str> = self
+        let pool: Option<HashSet<String>> = if self.show.pool.is_empty() {
+            None
+        } else {
+            let keys: HashSet<String> = self
+                .show
+                .pool
+                .iter()
+                .filter_map(|id| self.lib.get_playlist(id).ok().flatten())
+                .flat_map(|p| p.tracks)
+                .collect();
+            (!keys.is_empty()).then_some(keys)
+        };
+        let playable = entries.iter().filter(|e| e.is_playable()).count();
+        let mut avoid: HashSet<&str> = self
             .recent
             .iter()
             .rev()
-            .take(avoid)
+            .take(RECENT.min(playable / 2))
             .map(String::as_str)
             .collect();
-        let fresh: Vec<&&Entry> = playable
-            .iter()
-            .filter(|e| Some(e.key.as_str()) != current)
-            .filter(|e| !recent.contains(&e.key.as_str()))
-            .filter(|e| !self.queue.iter().any(|q| q.key == e.key))
-            .collect();
-        let pick = fresh
-            .choose(&mut rand::rng())
-            .map(|e| (**e).clone())
-            .or_else(|| playable.choose(&mut rand::rng()).map(|e| (*e).clone()))?;
+        avoid.extend(self.queue.iter().map(|q| q.key.as_str()));
+        let seed = self
+            .current
+            .as_ref()
+            .and_then(|c| entries.iter().find(|e| e.key == c.item.key));
+        let pick =
+            crate::autodj::pick(&entries, seed, pool.as_ref(), &avoid, &mut rand::rng())?.clone();
         Some(QueueItem {
             id: self.new_id(),
             key: pick.key,
@@ -375,9 +408,68 @@ impl Player {
         })
     }
 
+    /// Music fills the gaps when nobody asked for anything.
+    fn auto_dj(&self) -> bool {
+        self.show.auto_dj
+    }
+
+    /// Auto-DJ songs play quieter except in party mode, and always while
+    /// holding for an announcement or a singer.
+    fn filler_is_quiet(&self) -> bool {
+        self.show.held || self.show.mode != PartyMode::Party
+    }
+
+    fn show_changed(&mut self) {
+        self.emit(SourceEvent::Show(self.show.clone()));
+        self.save();
+    }
+
+    fn notify(&self, title: impl Into<String>, message: impl Into<String>) {
+        self.emit(SourceEvent::Notify {
+            title: title.into(),
+            message: message.into(),
+        });
+    }
+
+    /// Karaoke: put the next sung request on stage, waiting for Resume.
+    fn stage_next_singer(&mut self) -> bool {
+        if self.show.mode != PartyMode::Karaoke || self.show.staged.is_some() {
+            return false;
+        }
+        if !self
+            .queue
+            .front()
+            .is_some_and(|f| f.kind == QueueKind::Sing)
+        {
+            return false;
+        }
+        let item = self.queue.pop_front().expect("front checked");
+        self.queue_changed();
+        let who = item.singer.clone().unwrap_or_else(|| "Someone".into());
+        tracing::info!(title = %item.track.title, singer = %who, "singer staged");
+        self.notify(
+            format!("{who} is up"),
+            format!(
+                "{} by {} is ready: press Start when they are.",
+                item.track.title,
+                item.track.artists_joined()
+            ),
+        );
+        self.show.staged = Some(item);
+        self.show.held = true;
+        self.show_changed();
+        true
+    }
+
     /// What plays after the current track: the queue's front, else (when
     /// enabled) a background song, picked once and kept.
     fn upcoming(&mut self) -> Option<QueueItem> {
+        if let Some(st) = &self.show.staged {
+            return Some(st.clone());
+        }
+        if self.show.held && !self.auto_dj() {
+            return None;
+        }
         if let Some(f) = self.queue.front() {
             return Some(f.clone());
         }
@@ -474,13 +566,18 @@ impl Player {
     /// (when enabled), else stop. `cut` drops what is still buffered of
     /// the current track (a skip, not a natural end).
     fn start_next(&mut self, cut: bool) {
-        let (item, intermission) = match self.queue.pop_front() {
+        let from_queue = if self.show.held {
+            None
+        } else {
+            self.queue.pop_front()
+        };
+        let (item, intermission) = match from_queue {
             Some(i) => {
                 self.queue_changed();
                 (i, false)
             }
             None => match self.take_intermission() {
-                Some(i) => (i, true),
+                Some(i) => (i, self.filler_is_quiet()),
                 None => {
                     self.stop();
                     return;
@@ -490,8 +587,31 @@ impl Player {
         self.start_item(item, intermission, cut);
     }
 
+    /// A song ended naturally (or was skipped): honour the host's
+    /// end-of-song choice and karaoke staging, then play what's next.
+    fn advance(&mut self, cut: bool) {
+        match std::mem::take(&mut self.show.after_song) {
+            AfterSong::Hold => {
+                self.show.held = true;
+                self.show_changed();
+                self.stop();
+                return;
+            }
+            AfterSong::Background => {
+                self.show.held = true;
+                self.show_changed();
+            }
+            AfterSong::Continue => {}
+        }
+        if !self.show.held && self.stage_next_singer() && !self.auto_dj() {
+            self.stop();
+            return;
+        }
+        self.start_next(cut);
+    }
+
     fn take_intermission(&mut self) -> Option<QueueItem> {
-        if !self.knobs.intermission() {
+        if !self.auto_dj() {
             return None;
         }
         match self.intermission_next.take() {
@@ -606,7 +726,11 @@ impl Player {
             let total = ms_to_frames(INTERMISSION_FADE_MS) as usize;
             tracing::info!("request queued: fading out the background music");
             if self.playing {
-                self.fade = Some(Fade { left: total, total });
+                self.fade = Some(Fade {
+                    left: total,
+                    total,
+                    then: AfterFade::Next,
+                });
             } else {
                 // paused: nothing to fade
                 self.start_next(true);
@@ -643,7 +767,7 @@ impl Player {
                     });
                 }
             }
-            Command::Next => self.start_next(true),
+            Command::Next => self.advance(true),
             Command::Seek { position_ms } => {
                 let playing = self.playing;
                 let pushed = self.pushed();
@@ -680,6 +804,13 @@ impl Player {
             } => match self.new_item(&key, singer, kind) {
                 Ok(item) => {
                     tracing::info!(title = %item.track.title, next, kind = ?item.kind, "queued");
+                    if item.kind == QueueKind::Sing {
+                        let who = item.singer.clone().unwrap_or_else(|| "Someone".into());
+                        self.notify(
+                            format!("{who} wants to sing"),
+                            format!("{} by {}", item.track.title, item.track.artists_joined()),
+                        );
+                    }
                     if next {
                         self.queue.push_front(item);
                     } else {
@@ -687,11 +818,26 @@ impl Player {
                     }
                     self.queue_changed();
                     self.maybe_preload();
-                    if self.in_intermission() {
-                        self.end_intermission();
+                    if self.show.held {
+                        // holding: nothing starts until Resume (a singer may
+                        // be staged right away, the filler keeps going)
+                        if self.show.mode == PartyMode::Karaoke && self.show.staged.is_none() {
+                            self.stage_next_singer();
+                        }
+                    } else if self.in_intermission() {
+                        if !self.stage_next_singer() {
+                            self.end_intermission();
+                        }
                     } else if self.current.is_none() && !self.loads_play_now() {
-                        // nothing playing: an idle player starts on the first song
-                        self.start_next(false);
+                        // nothing playing: an idle player starts on the first
+                        // song (or stages it, in karaoke)
+                        if self.stage_next_singer() {
+                            if self.auto_dj() {
+                                self.start_next(false);
+                            }
+                        } else {
+                            self.start_next(false);
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("enqueue: {e}"),
@@ -713,6 +859,71 @@ impl Player {
             Command::ClearQueue => {
                 self.queue.clear();
                 self.queue_changed();
+                self.maybe_preload();
+            }
+            Command::SetMode { mode } => {
+                tracing::info!(?mode, "mode");
+                self.show.mode = mode;
+                // background and party never stop; karaoke keeps its setting
+                if mode != PartyMode::Karaoke {
+                    self.show.auto_dj = true;
+                }
+                if mode != PartyMode::Karaoke {
+                    // nobody is on stage outside karaoke: back in the queue
+                    if let Some(st) = self.show.staged.take() {
+                        self.queue.push_front(st);
+                        self.queue_changed();
+                    }
+                }
+                self.show_changed();
+            }
+            Command::SetAfterSong { action } => {
+                self.show.after_song = action;
+                self.show_changed();
+            }
+            Command::FadeOut { ms } => {
+                if self.playing && self.current.is_some() {
+                    let total = ms_to_frames(ms.unwrap_or(FADE_OUT_MS)) as usize;
+                    self.fade = Some(Fade {
+                        left: total.max(1),
+                        total: total.max(1),
+                        then: AfterFade::Hold,
+                    });
+                } else {
+                    self.show.held = true;
+                    self.show_changed();
+                }
+            }
+            Command::TalkOver { on } => {
+                self.show.talk_over = on;
+                self.show_changed();
+            }
+            Command::Resume => {
+                self.show.held = false;
+                self.show.after_song = AfterSong::Continue;
+                if let Some(st) = self.show.staged.take() {
+                    // the singer goes first; quiet music fades out for them
+                    self.queue.push_front(st);
+                    self.queue_changed();
+                }
+                self.show_changed();
+                if self.in_intermission() {
+                    // quiet music fades out, then the next song (the singer)
+                    self.end_intermission();
+                } else if self.current.is_none() || !self.playing {
+                    self.start_next(true);
+                }
+                self.maybe_preload();
+            }
+            Command::SetAutoDj { on } => {
+                self.show.auto_dj = on;
+                self.show_changed();
+                self.maybe_preload();
+            }
+            Command::SetPool { playlists } => {
+                self.show.pool = playlists;
+                self.intermission_next = None;
+                self.show_changed();
                 self.maybe_preload();
             }
             _ => {}
@@ -786,30 +997,52 @@ impl Player {
         } else {
             1.0
         };
-        let written = if level == 1.0 && self.fade.is_none() {
+        // talk-over: ramp the duck gain towards its target across the chunk
+        let target = if self.show.talk_over { DUCK_LEVEL } else { 1.0 };
+        let step = n as f32 / (DUCK_RAMP_MS / 1000.0 * stems_core::SAMPLE_RATE as f32);
+        let duck_from = self.duck;
+        let duck_to = if target < duck_from {
+            (duck_from - step).max(target)
+        } else {
+            (duck_from + step).min(target)
+        };
+        let ducking = duck_from != 1.0 || duck_to != 1.0;
+        let written = if level == 1.0 && self.fade.is_none() && !ducking {
             push_available(&mut self.producer, src)
         } else {
             self.scratch.clear();
             self.scratch.extend_from_slice(src);
-            match &self.fade {
-                Some(f) => {
-                    for (k, frame) in self.scratch.chunks_exact_mut(ch).enumerate() {
-                        let g = level * (f.left - k) as f32 / f.total as f32;
-                        frame.iter_mut().for_each(|s| *s *= g);
-                    }
-                }
-                None => self.scratch.iter_mut().for_each(|s| *s *= level),
+            let frames = self.scratch.len() / ch;
+            for (k, frame) in self.scratch.chunks_exact_mut(ch).enumerate() {
+                let fade = match &self.fade {
+                    Some(f) => (f.left - k) as f32 / f.total as f32,
+                    None => 1.0,
+                };
+                let duck = duck_from + (duck_to - duck_from) * k as f32 / frames.max(1) as f32;
+                let g = level * fade * duck;
+                frame.iter_mut().for_each(|s| *s *= g);
             }
             push_available(&mut self.producer, &self.scratch)
         } / ch;
+        if written > 0 {
+            self.duck = duck_to;
+        }
         c.pos += written;
         self.frames_pushed
             .fetch_add(written as u64, Ordering::Relaxed);
         if let Some(f) = self.fade.as_mut() {
             f.left -= written.min(f.left);
             if f.left == 0 {
+                let then = f.then;
                 self.fade = None;
-                self.start_next(true);
+                match then {
+                    AfterFade::Next => self.start_next(true),
+                    AfterFade::Hold => {
+                        self.show.held = true;
+                        self.show_changed();
+                        self.stop();
+                    }
+                }
             }
         }
         written
@@ -817,15 +1050,26 @@ impl Player {
 
     /// The current track has been pushed to its end.
     fn on_track_end(&mut self) {
-        let more = !self.queue.is_empty()
-            || (self.knobs.intermission() && {
+        let pending_action = self.show.after_song != AfterSong::Continue
+            || (self.show.mode == PartyMode::Karaoke
+                && !self.show.held
+                && self
+                    .queue
+                    .front()
+                    .is_some_and(|f| f.kind == QueueKind::Sing));
+        if pending_action {
+            self.advance(false);
+            return;
+        }
+        let more = (!self.queue.is_empty() && !self.show.held)
+            || (self.auto_dj() && {
                 if self.intermission_next.is_none() {
                     self.intermission_next = self.pick_intermission();
                 }
                 self.intermission_next.is_some()
             });
         if more {
-            self.start_next(false);
+            self.advance(false);
         } else if !self.draining {
             self.draining = true;
         } else if self.buffered() == 0 {
@@ -953,6 +1197,17 @@ impl LibraryPlayer {
         let stop = Arc::new(AtomicBool::new(false));
         let mut next_id = 0;
         let queue = restore_queue(&lib, &mut next_id);
+        let saved: SavedQueue = lib
+            .load_state(QUEUE_FILE)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let show = ShowState {
+            mode: saved.mode,
+            auto_dj: saved.auto_dj.unwrap_or_else(|| knobs.intermission()),
+            pool: saved.pool,
+            ..Default::default()
+        };
         let player = Player {
             lib: lib.clone(),
             knobs,
@@ -976,6 +1231,8 @@ impl LibraryPlayer {
             scratch: Vec::with_capacity(CHUNK_FRAMES * CHANNELS as usize),
             last_position_event: Instant::now(),
             save_warned: false,
+            show,
+            duck: 1.0,
         };
         let s = stop.clone();
         let thread = thread::Builder::new()
@@ -1326,6 +1583,12 @@ mod tests {
         let (p, mut c) = AudioRing::with_frames(4096);
         let mut player = LibraryPlayer::new(lib, knobs(true), p, FlushSignal::new(), store);
         let mut rx = player.events();
+        // background mode: the auto-DJ plays quieter between requests
+        player
+            .command(&Command::SetMode {
+                mode: PartyMode::Background,
+            })
+            .unwrap();
         player.command(&enqueue("spotify_a", None, false)).unwrap();
         // the request ends and background music starts by itself
         let is_background = |e: &SourceEvent| {
@@ -1404,6 +1667,11 @@ mod tests {
             Arc::new(StemStore::default()),
         );
         let mut rx = player.events();
+        player
+            .command(&Command::SetMode {
+                mode: PartyMode::Background,
+            })
+            .unwrap();
         // start background music directly: Play with an empty queue
         player.command(&Command::Play).unwrap();
         drain_until(&mut c, &mut rx, |e| {
@@ -1439,6 +1707,192 @@ mod tests {
             "the fade is not a steady ramp down"
         );
         assert!(ramp[0].abs() > ramp[ramp.len() - 1].abs() + 0.005);
+        player.shutdown();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn show_event(e: &SourceEvent) -> Option<&ShowState> {
+        match e {
+            SourceEvent::Show(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn hold_after_song_waits_for_resume() {
+        let (lib, dir) = library_of("hold", 22_050);
+        let (p, mut c) = AudioRing::with_frames(4096);
+        let mut player = LibraryPlayer::new(
+            lib,
+            knobs(false),
+            p,
+            FlushSignal::new(),
+            Arc::new(StemStore::default()),
+        );
+        let mut rx = player.events();
+        player.command(&enqueue("spotify_a", None, false)).unwrap();
+        player.command(&enqueue("spotify_b", None, false)).unwrap();
+        player
+            .command(&Command::SetAfterSong {
+                action: AfterSong::Hold,
+            })
+            .unwrap();
+        // a ends, then the player holds instead of starting b
+        let (events, _) = drain_until(&mut c, &mut rx, |e| show_event(e).is_some_and(|s| s.held));
+        assert_eq!(started(&events), ["Song a"]);
+        let (events, _) = drain_until(&mut c, &mut rx, |e| matches!(e, SourceEvent::Ended));
+        assert!(started(&events).is_empty(), "nothing starts while holding");
+        player.command(&Command::Resume).unwrap();
+        let (events, _) = drain_until(&mut c, &mut rx, |e| {
+            matches!(e, SourceEvent::TrackStarted { .. })
+        });
+        assert_eq!(started(&events), ["Song b"]);
+        assert!(
+            events
+                .iter()
+                .rev()
+                .find_map(show_event)
+                .is_some_and(|s| !s.held && s.after_song == AfterSong::Continue)
+        );
+        player.shutdown();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn karaoke_stages_singers_and_starts_them_on_resume() {
+        let (lib, dir) = library_of("stage", 22_050);
+        let (p, mut c) = AudioRing::with_frames(4096);
+        let mut player = LibraryPlayer::new(
+            lib,
+            knobs(false),
+            p,
+            FlushSignal::new(),
+            Arc::new(StemStore::default()),
+        );
+        let mut rx = player.events();
+        player
+            .command(&Command::SetMode {
+                mode: PartyMode::Karaoke,
+            })
+            .unwrap();
+        player.command(&Command::SetAutoDj { on: false }).unwrap();
+        player
+            .command(&Command::Enqueue {
+                key: "spotify_a".into(),
+                singer: Some("Mia".into()),
+                next: false,
+                kind: QueueKind::Sing,
+            })
+            .unwrap();
+        // the host hears about it, and Mia is staged rather than started
+        let (events, _) = drain_until(&mut c, &mut rx, |e| {
+            show_event(e).is_some_and(|s| s.staged.is_some())
+        });
+        assert!(events.iter().any(
+            |e| matches!(e, SourceEvent::Notify { title, .. } if title == "Mia wants to sing")
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SourceEvent::Notify { title, .. } if title == "Mia is up"))
+        );
+        assert!(started(&events).is_empty(), "staged, not started");
+        player.command(&Command::Resume).unwrap();
+        let (events, _) = drain_until(&mut c, &mut rx, |e| {
+            matches!(e, SourceEvent::NowPlaying { .. })
+        });
+        let now = events.iter().find_map(|e| match e {
+            SourceEvent::NowPlaying { item: Some(i), .. } => Some(i.clone()),
+            _ => None,
+        });
+        assert_eq!(now.and_then(|i| i.singer).as_deref(), Some("Mia"));
+        player.shutdown();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fade_out_now_goes_quiet_and_holds() {
+        let (lib, dir) = library_of("fadeout", 3 * 44_100);
+        let (p, mut c) = AudioRing::with_frames(4096);
+        let mut player = LibraryPlayer::new(
+            lib,
+            knobs(false),
+            p,
+            FlushSignal::new(),
+            Arc::new(StemStore::default()),
+        );
+        let mut rx = player.events();
+        player.command(&enqueue("spotify_c", None, false)).unwrap();
+        player.command(&enqueue("spotify_b", None, false)).unwrap();
+        drain_until(&mut c, &mut rx, |e| {
+            matches!(e, SourceEvent::TrackStarted { .. })
+        });
+        player.command(&Command::FadeOut { ms: Some(300) }).unwrap();
+        let (events, audio) =
+            drain_until(&mut c, &mut rx, |e| show_event(e).is_some_and(|s| s.held));
+        assert!(started(&events).is_empty(), "b waits");
+        let tail: Vec<f32> = audio.iter().rev().take(2000).copied().collect();
+        assert!(tail.iter().all(|s| s.abs() < 0.05), "faded out");
+        player.shutdown();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn talk_over_ducks_and_comes_back() {
+        let (lib, dir) = library_of("duck", 12 * 44_100);
+        let (p, mut c) = AudioRing::with_frames(2048);
+        let mut player = LibraryPlayer::new(
+            lib,
+            knobs(false),
+            p,
+            FlushSignal::new(),
+            Arc::new(StemStore::default()),
+        );
+        let mut rx = player.events();
+        player.command(&enqueue("spotify_c", None, false)).unwrap();
+        drain_until(&mut c, &mut rx, |e| {
+            matches!(e, SourceEvent::TrackStarted { .. })
+        });
+        // take `n` samples of audio as it comes
+        let mut take = |n: usize| {
+            let mut out = Vec::with_capacity(n);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while out.len() < n && Instant::now() < deadline {
+                let k = c.slots().min(n - out.len());
+                if k > 0 {
+                    let mut buf = vec![0.0; k];
+                    pop_or_silence(&mut c, &mut buf);
+                    out.extend(buf);
+                } else {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            out
+        };
+        let level = |a: &[f32]| {
+            let mut v: Vec<f32> = a.iter().map(|s| s.abs()).collect();
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        let before = take(20_000);
+        player.command(&Command::TalkOver { on: true }).unwrap();
+        take(60_000); // ring + ramp
+        let ducked = take(20_000);
+        player.command(&Command::TalkOver { on: false }).unwrap();
+        take(60_000);
+        let after = take(20_000);
+        assert!(
+            level(&ducked) < level(&before) * 0.2,
+            "{} vs {}",
+            level(&ducked),
+            level(&before)
+        );
+        assert!(
+            level(&after) > level(&before) * 0.9,
+            "{} vs {}",
+            level(&after),
+            level(&before)
+        );
         player.shutdown();
         std::fs::remove_dir_all(&dir).unwrap();
     }

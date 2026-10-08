@@ -147,6 +147,51 @@ pub struct QueueItem {
     pub kind: QueueKind,
 }
 
+/// How the night is running (library playback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartyMode {
+    /// Chill music from chosen playlists, quieter; requests off.
+    Background,
+    /// A playlist, guests can request songs to play; never stops.
+    #[default]
+    Party,
+    /// Requests to sing; each singer is staged and started by the host.
+    Karaoke,
+}
+
+/// What happens when the current song ends (applies once).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterSong {
+    /// The next song, as usual.
+    #[default]
+    Continue,
+    /// Silence, waiting for Resume (an announcement).
+    Hold,
+    /// Quiet background music, waiting for Resume.
+    Background,
+}
+
+/// The host's controls for running the night.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShowState {
+    pub mode: PartyMode,
+    pub after_song: AfterSong,
+    /// Waiting for the host to press Resume (after a hold, a fade, or with
+    /// a singer staged).
+    pub held: bool,
+    /// Karaoke: the singer whose song starts on Resume.
+    pub staged: Option<QueueItem>,
+    /// Music ducked so the host can talk over it.
+    pub talk_over: bool,
+    /// Keep music going from the pool when the queue is empty.
+    pub auto_dj: bool,
+    /// Playlist ids the auto-DJ picks from (empty: the whole library).
+    pub pool: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackState {
@@ -170,6 +215,8 @@ pub struct PlaybackState {
     pub media: Media,
     /// Output volume 0.0..=1.0.
     pub volume: f32,
+    /// Mode, end-of-song action, staged singer… (library playback).
+    pub show: ShowState,
     /// Monotonic revision, bumped on every change.
     pub revision: u64,
 }
@@ -246,6 +293,31 @@ pub enum Command {
         to: usize,
     },
     ClearQueue,
+    SetMode {
+        mode: PartyMode,
+    },
+    /// What happens when the current song ends (once).
+    SetAfterSong {
+        action: AfterSong,
+    },
+    /// Fade to silence now and hold.
+    FadeOut {
+        #[serde(default)]
+        ms: Option<u64>,
+    },
+    /// Duck the music to talk over it (on while held down).
+    TalkOver {
+        on: bool,
+    },
+    /// Leave a hold: start the staged singer or the next song.
+    Resume,
+    SetAutoDj {
+        on: bool,
+    },
+    /// Playlists the auto-DJ picks from (empty: the whole library).
+    SetPool {
+        playlists: Vec<String>,
+    },
 }
 
 impl Command {
@@ -262,6 +334,13 @@ impl Command {
                 | Command::Dequeue { .. }
                 | Command::MoveInQueue { .. }
                 | Command::ClearQueue
+                | Command::SetMode { .. }
+                | Command::SetAfterSong { .. }
+                | Command::FadeOut { .. }
+                | Command::TalkOver { .. }
+                | Command::Resume
+                | Command::SetAutoDj { .. }
+                | Command::SetPool { .. }
         )
     }
 }

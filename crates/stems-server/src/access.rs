@@ -37,6 +37,15 @@ pub fn permission(cmd: &Command) -> &'static str {
         | Command::Dequeue { .. }
         | Command::MoveInQueue { .. }
         | Command::ClearQueue => "queue",
+        // running the show is the host's alone: not in PERMISSIONS, so
+        // guests can never be granted it
+        Command::SetMode { .. }
+        | Command::SetAfterSong { .. }
+        | Command::FadeOut { .. }
+        | Command::TalkOver { .. }
+        | Command::Resume
+        | Command::SetAutoDj { .. }
+        | Command::SetPool { .. } => "show",
     }
 }
 

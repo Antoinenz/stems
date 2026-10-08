@@ -35,6 +35,36 @@
   },
   "queue": [],
   "revision": 42,
+  "show": {
+    "after_song": "background",
+    "auto_dj": true,
+    "held": true,
+    "mode": "karaoke",
+    "pool": [
+      "spotify_playlist_19PgP2QSGPcm6Ve8VhbtpG"
+    ],
+    "staged": {
+      "id": 4,
+      "key": "spotify_4uLU6hMCjMI75M1A2tKUQC",
+      "kind": "sing",
+      "singer": "Sam & Alex",
+      "track": {
+        "album": "Album",
+        "art": "/media/library/spotify_4uLU6hMCjMI75M1A2tKUQC/cover.jpg",
+        "artists": [
+          "Rick Astley"
+        ],
+        "duration_ms": 213573,
+        "id": {
+          "id": "4uLU6hMCjMI75M1A2tKUQC",
+          "kind": "spotify"
+        },
+        "isrc": "USUM71111621",
+        "title": "Never Gonna Give You Up"
+      }
+    },
+    "talk_over": false
+  },
   "source": "library",
   "status": "playing",
   "track": {

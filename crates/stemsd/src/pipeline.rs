@@ -416,7 +416,9 @@ pub async fn run_spotify(
     if let Some(h) = sep.gpu_limit {
         settings.attach_gpu_limit(h);
     }
-    let engine = engine.with_live(settings.live());
+    let engine = engine
+        .with_live(settings.live())
+        .with_notify(&cfg.notify.ntfy);
     spawn_server(cfg, web_dir, &ch, settings, "spotify", None);
     engine.run().await
 }

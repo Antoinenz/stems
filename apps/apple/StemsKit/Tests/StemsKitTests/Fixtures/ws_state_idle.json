@@ -17,6 +17,15 @@
   "next_track": null,
   "queue": [],
   "revision": 0,
+  "show": {
+    "after_song": "continue",
+    "auto_dj": false,
+    "held": false,
+    "mode": "party",
+    "pool": [],
+    "staged": null,
+    "talk_over": false
+  },
   "source": null,
   "status": "idle",
   "track": null,

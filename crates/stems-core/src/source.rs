@@ -59,6 +59,14 @@ pub enum SourceEvent {
         item: Option<QueueItem>,
         intermission: bool,
     },
+    /// The host's show controls changed (mode, hold, staged singer…).
+    Show(crate::ShowState),
+    /// Something the host should hear about on their phone (a request to
+    /// sing, a singer's turn).
+    Notify {
+        title: String,
+        message: String,
+    },
     /// Source-provided media for a track (e.g. Spotify Canvas), resolved
     /// asynchronously after `TrackStarted`.
     Media {

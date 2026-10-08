@@ -30,6 +30,7 @@ pub struct Config {
     pub lyrics: LyricsConfig,
     pub guests: GuestsConfig,
     pub library: LibraryConfig,
+    pub notify: NotifyConfig,
     /// Where this config was read from (not part of the file).
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -79,6 +80,15 @@ impl GuestsConfig {
             _ => false,
         }
     }
+}
+
+/// Phone notifications for the host (requests to sing, a singer's turn).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// An ntfy topic (on ntfy.sh) or a full ntfy URL. Install the ntfy app
+    /// and subscribe to the same topic; pick something hard to guess.
+    pub ntfy: String,
 }
 
 /// The offline track library (`stemsd import`, `stemsd library`).
@@ -260,6 +270,7 @@ impl Default for Config {
             lyrics: LyricsConfig::default(),
             guests: GuestsConfig::default(),
             library: LibraryConfig::default(),
+            notify: NotifyConfig::default(),
             source_path: None,
         }
     }

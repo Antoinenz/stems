@@ -39,6 +39,9 @@
       "align": true
     },
     "lyrics_offset_ms": 0,
+    "notify": {
+      "ntfy": ""
+    },
     "port": 7373,
     "sink": "cpal",
     "spotify": {
