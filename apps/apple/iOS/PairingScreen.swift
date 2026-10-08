@@ -3,6 +3,7 @@
 
 import StemsKit
 import StemsUI
+import AVFoundation
 import SwiftUI
 import VisionKit
 
@@ -90,25 +91,45 @@ struct PairingScreen: View {
 /// Full-screen camera that closes as soon as it sees a stems pairing code.
 struct ScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     var found: (ServerEndpoint) -> Void
     @State private var hint = "Point the camera at the code on the Mac."
+    @State private var access = AVCaptureDevice.authorizationStatus(for: .video)
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            QRScanner { text in
-                if let url = URL(string: text), let e = ServerEndpoint(pairingURL: url) {
-                    found(e)
-                    return true
+            switch access {
+            case .authorized:
+                QRScanner { text in
+                    if let url = URL(string: text), let e = ServerEndpoint(pairingURL: url) {
+                        found(e)
+                        return true
+                    }
+                    hint = "That’s not a Stems pairing code."
+                    return false
+                } failed: { problem in
+                    hint = problem
                 }
-                hint = "That’s not a Stems pairing code."
-                return false
+                .ignoresSafeArea()
+                Text(hint)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: .capsule)
+                    .padding(.bottom, 40)
+            case .notDetermined:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            default:
+                ContentUnavailableView {
+                    Label("Camera Off for Stems", systemImage: "camera.badge.ellipsis")
+                } description: {
+                    Text("Allow camera access in Settings to scan the pairing code, or close this and type the Mac’s address.")
+                } actions: {
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
-            .ignoresSafeArea()
-            Text(hint)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.regularMaterial, in: .capsule)
-                .padding(.bottom, 40)
         }
         .overlay(alignment: .topTrailing) {
             Button("Close", systemImage: "xmark") { dismiss() }
@@ -117,6 +138,12 @@ struct ScannerSheet: View {
                 .buttonStyle(.glass)
                 .padding()
         }
+        .task {
+            if access == .notDetermined {
+                _ = await AVCaptureDevice.requestAccess(for: .video)
+                access = AVCaptureDevice.authorizationStatus(for: .video)
+            }
+        }
     }
 }
 
@@ -124,26 +151,64 @@ struct ScannerSheet: View {
 struct QRScanner: UIViewControllerRepresentable {
     /// Return true to stop scanning.
     var onCode: @MainActor (String) -> Bool
+    /// The camera couldn't start (shown to the user).
+    var failed: @MainActor (String) -> Void = { _ in }
 
-    func makeUIViewController(context: Context) -> DataScannerViewController {
-        let vc = DataScannerViewController(
+    func makeUIViewController(context: Context) -> ScannerHost {
+        let host = ScannerHost()
+        host.scanner.delegate = context.coordinator
+        host.failed = failed
+        return host
+    }
+
+    func updateUIViewController(_ host: ScannerHost, context: Context) {}
+
+    static func dismantleUIViewController(_ host: ScannerHost, coordinator: Coordinator) {
+        host.scanner.stopScanning()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCode: onCode) }
+
+    /// Holds the scanner and starts it once it is on screen (starting
+    /// earlier fails silently and leaves the view black).
+    final class ScannerHost: UIViewController {
+        let scanner = DataScannerViewController(
             recognizedDataTypes: [.barcode(symbologies: [.qr])],
             qualityLevel: .fast,
             recognizesMultipleItems: false,
             isHighFrameRateTrackingEnabled: false,
             isHighlightingEnabled: true)
-        vc.delegate = context.coordinator
-        try? vc.startScanning()
-        return vc
+        var failed: @MainActor (String) -> Void = { _ in }
+
+        override func viewDidLoad() {
+            super.viewDidLoad()
+            view.backgroundColor = .black
+            addChild(scanner)
+            scanner.view.frame = view.bounds
+            scanner.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(scanner.view)
+            scanner.didMove(toParent: self)
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard !scanner.isScanning else { return }
+            guard DataScannerViewController.isAvailable else {
+                failed("The camera isn’t available right now.")
+                return
+            }
+            do {
+                try scanner.startScanning()
+            } catch {
+                failed("The camera didn’t start: \(error.localizedDescription)")
+            }
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            scanner.stopScanning()
+        }
     }
-
-    func updateUIViewController(_ vc: DataScannerViewController, context: Context) {}
-
-    static func dismantleUIViewController(_ vc: DataScannerViewController, coordinator: Coordinator) {
-        vc.stopScanning()
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(onCode: onCode) }
 
     final class Coordinator: NSObject, DataScannerViewControllerDelegate {
         let onCode: @MainActor (String) -> Bool
