@@ -182,7 +182,25 @@ pub fn open(lib: &Library) -> Result<Connection> {
     let p = path(lib);
     let conn = Connection::open(&p).with_context(|| format!("open {}", p.display()))?;
     conn.busy_timeout(Duration::from_secs(30))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // WAL sticks once set. Switching needs an exclusive lock that SQLite
+    // won't wait for (the busy timeout doesn't apply), so a fresh index
+    // opened by two threads at once can fail here: only switch when
+    // needed, and retry briefly.
+    let mut tries = 0;
+    loop {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") {
+            break;
+        }
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => break,
+            Err(_) if tries < 100 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e).context("switch the index to WAL"),
+        }
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(conn)
