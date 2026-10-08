@@ -43,6 +43,10 @@ struct LibraryScreen: View {
     @State private var data = LibraryData()
     @AppStorage("libraryBrowse") private var browse = "playlists"
     @State private var artistFilter = ""
+    @AppStorage("libraryBrowserWidth") private var browserWidth = 250.0
+    @AppStorage("songPanelWidth") private var panelWidth = 320.0
+    /// Sidebar sections the host folded away, by name.
+    @AppStorage("collapsedLibrarySections") private var collapsedRaw = ""
     @AppStorage("spotifySearch") private var spotifySearch = true
     @State private var search = ""
     @State private var selectedSong: String?
@@ -68,8 +72,8 @@ struct LibraryScreen: View {
         @Bindable var model = model
         HStack(spacing: 0) {
             browser
-                .frame(width: 230)
-            Divider()
+                .frame(width: browserWidth)
+            ResizeHandle(width: $browserWidth, range: 200...420, grows: .trailing)
             VStack(spacing: 0) {
                 songs(model.librarySelection ?? .all)
                 if spotifySearch && search.trimmingCharacters(in: .whitespaces).count >= 2 {
@@ -81,9 +85,9 @@ struct LibraryScreen: View {
             .frame(maxWidth: .infinity)
             // a plain side panel: the glass inspector let the table run
             // underneath it, ghosting rows and hiding the last columns
-            Divider()
+            ResizeHandle(width: $panelWidth, range: 260...560, grows: .leading)
             SongInspector(key: selectedSong)
-                .frame(width: 320)
+                .frame(width: panelWidth)
                 .background(.background)
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
@@ -106,25 +110,16 @@ struct LibraryScreen: View {
     private var browser: some View {
         @Bindable var model = model
         return VStack(spacing: 0) {
-            HStack {
-                Picker("Browse", selection: $browse) {
-                    Text("Playlists").tag("playlists")
-                    Text("Genres").tag("genres")
-                    Text("Artists").tag("artists")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Menu {
-                    Button("New Playlist…") { ask(.newPlaylist(songs: [])) }
-                    Button("New Folder…") { ask(.newFolder(playlist: nil)) }
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("New playlist or folder")
+            Picker("Browse", selection: $browse) {
+                Text("Playlists").tag("playlists")
+                Text("Genres").tag("genres")
+                Text("Artists").tag("artists")
             }
-            .padding(10)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             if browse == "artists" {
                 TextField("Filter artists", text: $artistFilter)
                     .textFieldStyle(.roundedBorder)
@@ -135,7 +130,7 @@ struct LibraryScreen: View {
                 Label("All Songs", systemImage: "music.note.list").tag(LibrarySelection.all)
                 Label("Not Ready Yet", systemImage: "hourglass").tag(LibrarySelection.unfinished)
                 if browse == "artists" {
-                    Section("Artists") {
+                    Section("Artists", isExpanded: expanded("artists:")) {
                         ForEach(data.artists.filter { artistFilter.isEmpty || $0.name.localizedCaseInsensitiveContains(artistFilter) }) { a in
                             Label(a.name, systemImage: "music.microphone")
                                 .lineLimit(1)
@@ -145,7 +140,7 @@ struct LibraryScreen: View {
                     }
                 } else if browse == "playlists" {
                     ForEach(data.folders.folders) { folder in
-                        Section {
+                        Section(isExpanded: expanded("folder:" + folder.name)) {
                             ForEach(folder.playlists.compactMap { id in data.playlists.first { $0.id == id } }) { p in
                                 playlistRow(p)
                             }
@@ -161,12 +156,12 @@ struct LibraryScreen: View {
                     }
                     let unfiled = data.playlists.filter { data.folders.folder(of: $0.id) == nil }
                     if !unfiled.isEmpty {
-                        Section(data.folders.folders.isEmpty ? "Playlists" : "Other Playlists") {
+                        Section(data.folders.folders.isEmpty ? "Playlists" : "Other Playlists", isExpanded: expanded("unfiled:")) {
                             ForEach(unfiled) { p in playlistRow(p) }
                         }
                     }
                 } else {
-                    Section("Genres") {
+                    Section("Genres", isExpanded: expanded("genres:")) {
                         ForEach(data.genres) { g in
                             Label(g.name, systemImage: "guitars")
                                 .badge(g.songs)
@@ -176,7 +171,37 @@ struct LibraryScreen: View {
                 }
             }
             .listStyle(.sidebar)
+            Divider()
+            HStack {
+                Menu {
+                    Button("New Playlist…") { ask(.newPlaylist(songs: [])) }
+                    Button("New Folder…") { ask(.newFolder(playlist: nil)) }
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("New playlist or folder")
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
         }
+    }
+
+    /// Fold state for a sidebar section, remembered between launches.
+    private func expanded(_ name: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsed.contains(name) },
+            set: { open in
+                var c = collapsed
+                if open { c.remove(name) } else { c.insert(name) }
+                collapsedRaw = c.sorted().joined(separator: "\n")
+            })
+    }
+
+    private var collapsed: Set<String> {
+        Set(collapsedRaw.split(separator: "\n").map(String.init))
     }
 
     private func playlistRow(_ p: PlaylistRow) -> some View {
@@ -302,6 +327,40 @@ struct LibraryScreen: View {
                 await data.load(client)
             }
         }
+    }
+}
+
+/// A draggable divider that resizes the panel beside it.
+struct ResizeHandle: View {
+    enum Side { case leading, trailing }
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    /// Which way dragging makes the panel bigger: `.trailing` for a panel
+    /// on the left of the handle, `.leading` for one on its right.
+    let grows: Side
+    @State private var start: Double?
+
+    var body: some View {
+        Divider()
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(.rect)
+                    .onHover { inside in
+                        if inside { NSCursor.columnResize.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { g in
+                                let from = start ?? width
+                                start = from
+                                let delta = grows == .trailing ? g.translation.width : -g.translation.width
+                                width = min(max(from + delta, range.lowerBound), range.upperBound)
+                            }
+                            .onEnded { _ in start = nil }
+                    )
+            }
+            .accessibilityHidden(true)
     }
 }
 

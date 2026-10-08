@@ -147,44 +147,11 @@ struct SongsView: View {
         TableColumn("Title", value: \.title) { s in
             Text(s.title).lineLimit(1).opacity(s.playable ? 1 : 0.45)
         }
-        .width(min: 140, ideal: 210)
+        .width(min: 120, ideal: 190)
         .customizationID("title")
-        TableColumn(Text(Image(systemName: "music.mic")).accessibilityLabel("Karaoke")) { s in
-            Image(systemName: s.playable ? "music.mic" : "hourglass")
-                .foregroundStyle(s.playable ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-                .help(s.playable ? "Ready for karaoke" : "Not ready yet (still importing, or an import step failed)")
-                .frame(maxWidth: .infinity)
-        }
-        .width(min: 24, ideal: 28, max: 40)
-        .customizationID("karaoke")
-        TableColumn(Text(Image(systemName: "text.bubble")).accessibilityLabel("Lyrics")) { s in
-            Group {
-                if s.hasWords {
-                    Image(systemName: "text.bubble.fill").foregroundStyle(.secondary).help("Word-by-word timing")
-                } else if s.hasLyrics {
-                    Image(systemName: "text.alignleft").foregroundStyle(.secondary).help("Line timing")
-                }
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .width(min: 24, ideal: 28, max: 40)
-        .customizationID("lyrics")
-        TableColumn(Text(Image(systemName: "film")).accessibilityLabel("Video")) { s in
-            Group {
-                if s.hasVideo { Image(systemName: "film").foregroundStyle(.secondary).help("Music video") }
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .width(min: 24, ideal: 28, max: 40)
-        .customizationID("video")
-        TableColumn(Text(Image(systemName: "e.square")).accessibilityLabel("Explicit")) { s in
-            Group {
-                if s.explicit == true { Image(systemName: "e.square.fill").foregroundStyle(.secondary).help("Explicit") }
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .width(min: 24, ideal: 28, max: 40)
-        .customizationID("explicit")
+        TableColumn("Has") { s in SongBadges(song: s) }
+            .width(min: 70, ideal: 76, max: 100)
+            .customizationID("badges")
     }
 
     @TableColumnBuilder<SongRow, KeyPathComparator<SongRow>>
@@ -211,7 +178,7 @@ struct SongsView: View {
         TableColumn("Style", value: \.sStyle) { s in
             Text(s.styleName ?? "").lineLimit(1).help(s.style ?? "")
         }
-        .width(min: 80, ideal: 120)
+        .width(min: 70, ideal: 100)
         .customizationID("style")
         TableColumn("Plays", value: \.plays) { s in
             Text(s.plays > 0 ? String(s.plays) : "")
@@ -350,6 +317,45 @@ extension SongRow {
     var spotifyURL: URL? {
         guard key.hasPrefix("spotify_") else { return nil }
         return URL(string: "https://open.spotify.com/track/\(key.dropFirst("spotify_".count))")
+    }
+}
+
+/// What a song comes with, in fixed slots so the icons line up down the
+/// table: ready for karaoke, lyrics (word or line timing), music video,
+/// explicit.
+struct SongBadges: View {
+    let song: SongRow
+
+    var body: some View {
+        HStack(spacing: 6) {
+            slot(
+                song.playable ? "music.mic" : "hourglass", tint: song.playable ? .accentColor : .secondary,
+                help: song.playable ? "Ready for karaoke" : "Not ready yet (still importing, or a step failed)")
+            slot(
+                song.hasWords ? "text.bubble.fill" : song.hasLyrics ? "text.alignleft" : nil, tint: .secondary,
+                help: song.hasWords ? "Lyrics with word-by-word timing" : "Lyrics with line timing")
+            slot(song.hasVideo ? "film" : nil, tint: .secondary, help: "Music video")
+            slot(song.explicit == true ? "e.square.fill" : nil, tint: .secondary, help: "Explicit")
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+    }
+
+    @ViewBuilder
+    private func slot(_ symbol: String?, tint: Color, help: String) -> some View {
+        if let symbol {
+            Image(systemName: symbol).foregroundStyle(tint).frame(width: 15).help(help)
+        } else {
+            Color.clear.frame(width: 15, height: 1)
+        }
+    }
+
+    private var label: String {
+        var parts = [song.playable ? "Ready for karaoke" : "Not ready"]
+        if song.hasWords { parts.append("word-timed lyrics") } else if song.hasLyrics { parts.append("lyrics") }
+        if song.hasVideo { parts.append("music video") }
+        if song.explicit == true { parts.append("explicit") }
+        return parts.joined(separator: ", ")
     }
 }
 
