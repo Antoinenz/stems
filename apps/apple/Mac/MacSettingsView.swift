@@ -29,6 +29,7 @@ struct GeneralSettings: View {
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
     @AppStorage("stemsdPath") private var stemsdPath = ""
     @AppStorage("stemsdConfig") private var configPath = ""
+    @AppStorage("previewDeviceUID") private var previewDevice = ""
 
     var body: some View {
         Form {
@@ -39,6 +40,14 @@ struct GeneralSettings: View {
                 .onChange(of: mode) { model.supervisor.restart() }
             } footer: {
                 Text("Changing this restarts the server. Library plays imported songs and works without internet.")
+            }
+            Section {
+                Picker("Preview Songs On", selection: $previewDevice) {
+                    Text("Built-in Output").tag("")
+                    ForEach(OutputDevice.all()) { d in Text(d.name).tag(d.uid) }
+                }
+            } footer: {
+                Text("Song previews play here, never on the party speakers. Choose headphones to listen without anyone hearing.")
             }
             Section {
                 Toggle("Show in Menu Bar", isOn: $showMenuBarExtra)

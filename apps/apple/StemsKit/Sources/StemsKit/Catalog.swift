@@ -222,3 +222,75 @@ extension API {
     public func playlists() async throws -> [PlaylistRow] { try await getJSON("/api/library/playlists") }
     public func genres() async throws -> [GenreCount] { try await getJSON("/api/library/genres") }
 }
+
+/// The host's playlist folders (`folders.json` in the library).
+public struct PlaylistFolders: Codable, Hashable, Sendable {
+    public struct Folder: Codable, Hashable, Identifiable, Sendable {
+        public var name: String
+        public var playlists: [String]
+        public var id: String { name }
+
+        public init(name: String, playlists: [String] = []) {
+            self.name = name
+            self.playlists = playlists
+        }
+    }
+
+    public var folders: [Folder]
+
+    public init(folders: [Folder] = []) { self.folders = folders }
+
+    /// The folder a playlist is filed in, if any.
+    public func folder(of playlist: String) -> String? {
+        folders.first { $0.playlists.contains(playlist) }?.name
+    }
+
+    /// File `playlist` into `folder` (or take it out with nil).
+    public mutating func move(_ playlist: String, to folder: String?) {
+        for i in folders.indices { folders[i].playlists.removeAll { $0 == playlist } }
+        if let folder {
+            if let i = folders.firstIndex(where: { $0.name == folder }) {
+                folders[i].playlists.append(playlist)
+            } else {
+                folders.append(Folder(name: folder, playlists: [playlist]))
+            }
+        }
+    }
+}
+
+public enum PreviewStem: String, CaseIterable, Identifiable, Sendable {
+    case mix, instrumental, vocals
+    public var id: String { rawValue }
+}
+
+extension API {
+    /// A WAV clip for previewing (30 s from a third of the way in).
+    public func preview(_ key: String, stem: PreviewStem, startMs: Int? = nil, secs: Int = 30) async throws -> Data {
+        var q = [URLQueryItem(name: "stem", value: stem.rawValue), URLQueryItem(name: "secs", value: String(secs))]
+        if let startMs { q.append(URLQueryItem(name: "start_ms", value: String(startMs))) }
+        return try await raw("/api/library/songs/\(key)/preview", query: q)
+    }
+
+    public func folders() async throws -> PlaylistFolders { try await getJSON("/api/library/folders") }
+
+    public func setFolders(_ f: PlaylistFolders) async throws {
+        _ = try await send(method: "PUT", "/api/library/folders", body: f)
+    }
+
+    @discardableResult
+    public func createPlaylist(name: String, songs: [String] = []) async throws -> JSONValue {
+        try JSONDecoder().decode(JSONValue.self, from: try await send(method: "POST", "/api/library/playlists", body: ["name": JSONValue.string(name), "tracks": .array(songs.map(JSONValue.string))]))
+    }
+
+    public func addToPlaylist(_ id: String, songs: [String]) async throws {
+        _ = try await send(method: "PATCH", "/api/library/playlists/\(id)", body: ["add": songs])
+    }
+
+    public func renamePlaylist(_ id: String, to name: String) async throws {
+        _ = try await send(method: "PATCH", "/api/library/playlists/\(id)", body: ["name": name])
+    }
+
+    public func deletePlaylist(_ id: String) async throws {
+        _ = try await send(method: "DELETE", "/api/library/playlists/\(id)", body: Optional<String>.none)
+    }
+}

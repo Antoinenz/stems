@@ -67,11 +67,19 @@ struct SongsView: View {
     let search: String
     /// Shown when the list is empty without a search.
     let emptyHint: String?
+    /// The song the inspector shows.
+    @Binding var selected: String?
+    let playlistActions: PlaylistActions?
 
-    init(title: String, query: SongQuery, search: String = "", emptyHint: String? = nil) {
+    init(
+        title: String, query: SongQuery, search: String = "", emptyHint: String? = nil,
+        selected: Binding<String?> = .constant(nil), playlistActions: PlaylistActions? = nil
+    ) {
         self.title = title
         self.search = search
         self.emptyHint = emptyHint
+        _selected = selected
+        self.playlistActions = playlistActions
         _model = State(initialValue: SongsModel(query: query))
         _sortOrder = State(initialValue: query.playlist != nil ? [KeyPathComparator(\SongRow.sPos)] : [KeyPathComparator(\SongRow.artists)])
     }
@@ -133,6 +141,9 @@ struct SongsView: View {
             try? await Task.sleep(for: .milliseconds(250))  // debounce typing
             model.query.q = search
         }
+        .onChange(of: selection) { _, sel in
+            if let first = sel.first { selected = first }
+        }
         .onChange(of: sortOrder) { _, order in
             guard let first = order.first else { return }
             model.query.sort = Self.sort(for: first.keyPath)
@@ -182,6 +193,18 @@ struct SongsView: View {
         if rows.count == 1, let r = rows.first {
             Divider()
             Button("Play Now") { client.send(.playTrack(key: r.key, singer: nil, kind: .play)) }
+        }
+        if let actions = playlistActions {
+            let keys = model.rows.filter { keys.contains($0.key) }.map(\.key)
+            Divider()
+            Menu("Add to Playlist") {
+                ForEach(actions.local) { p in
+                    Button(p.displayName) { actions.add(p.id, keys) }
+                }
+                if !actions.local.isEmpty { Divider() }
+                Button("New Playlist…") { actions.newPlaylist(keys) }
+            }
+            .disabled(keys.isEmpty)
         }
     }
 

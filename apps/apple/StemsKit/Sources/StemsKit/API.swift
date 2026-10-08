@@ -58,6 +58,17 @@ public struct API: Sendable {
         return data
     }
 
+    /// Raw bytes of a GET (audio clips).
+    func raw(_ path: String, query: [URLQueryItem] = []) async throws -> Data {
+        try await send(request(path, query: query))
+    }
+
+    /// A request with a JSON body (or none); returns the response body.
+    func send<B: Encodable>(method: String, _ path: String, body: B?) async throws -> Data {
+        let data = try body.map { try JSONEncoder().encode($0) }
+        return try await send(request(path, method: method, body: data))
+    }
+
     func getJSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         try await get(path, query: query)
     }
