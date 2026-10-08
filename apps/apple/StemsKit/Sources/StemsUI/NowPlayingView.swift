@@ -39,10 +39,14 @@ public struct NowPlayingView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 22) {
+            StageBanner()
             TrackHeader()
             ProgressSection()
             TransportButtons(size: .large)
                 .frame(maxWidth: .infinity)
+            if client.state.isLibrary || client.state.source == nil {
+                ShowControls()
+            }
             KaraokeSection()
             VolumeSection()
             LyricPreview()

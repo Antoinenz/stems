@@ -266,6 +266,70 @@ public struct QueueItem: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+public enum PartyMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case background, party, karaoke
+
+    public var id: String { rawValue }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PartyMode(rawValue: raw) ?? .party
+    }
+}
+
+public enum AfterSong: String, Codable, CaseIterable, Identifiable, Sendable {
+    case `continue`, hold, background
+
+    public var id: String { rawValue }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = AfterSong(rawValue: raw) ?? .continue
+    }
+}
+
+/// The host's controls for running the night.
+public struct ShowState: Codable, Hashable, Sendable {
+    public var mode: PartyMode
+    /// What happens when the current song ends (once).
+    public var afterSong: AfterSong
+    /// Waiting for Resume.
+    public var held: Bool
+    /// Karaoke: the singer whose song starts on Resume.
+    public var staged: QueueItem?
+    public var talkOver: Bool
+    public var autoDj: Bool
+    /// Playlist ids the auto-DJ picks from (empty: whole library).
+    public var pool: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case mode, held, staged, pool
+        case afterSong = "after_song"
+        case talkOver = "talk_over"
+        case autoDj = "auto_dj"
+    }
+
+    public init() {
+        mode = .party
+        afterSong = .continue
+        held = false
+        talkOver = false
+        autoDj = true
+        pool = []
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(PartyMode.self, forKey: .mode) ?? .party
+        afterSong = try c.decodeIfPresent(AfterSong.self, forKey: .afterSong) ?? .continue
+        held = try c.decodeIfPresent(Bool.self, forKey: .held) ?? false
+        staged = try c.decodeIfPresent(QueueItem.self, forKey: .staged)
+        talkOver = try c.decodeIfPresent(Bool.self, forKey: .talkOver) ?? false
+        autoDj = try c.decodeIfPresent(Bool.self, forKey: .autoDj) ?? true
+        pool = try c.decodeIfPresent([String].self, forKey: .pool) ?? []
+    }
+}
+
 public struct PlaybackState: Codable, Hashable, Sendable {
     /// Active source (`library`, `spotify`, `file`), if any.
     public var source: String?
@@ -285,10 +349,11 @@ public struct PlaybackState: Codable, Hashable, Sendable {
     public var media: Media
     /// Output volume 0…1.
     public var volume: Double
+    public var show: ShowState
     public var revision: Int
 
     enum CodingKeys: String, CodingKey {
-        case source, status, track, queue, current, intermission, lyrics, karaoke, media, volume, revision
+        case source, status, track, queue, current, intermission, lyrics, karaoke, media, volume, revision, show
         case nextTrack = "next_track"
         case libraryKey = "library_key"
         case viewMode = "view_mode"
@@ -304,6 +369,7 @@ public struct PlaybackState: Codable, Hashable, Sendable {
         viewMode = .lyrics
         media = Media()
         volume = 1
+        show = ShowState()
         revision = 0
     }
 
@@ -322,6 +388,7 @@ public struct PlaybackState: Codable, Hashable, Sendable {
         viewMode = try c.decodeIfPresent(ViewMode.self, forKey: .viewMode) ?? .lyrics
         media = try c.decodeIfPresent(Media.self, forKey: .media) ?? Media()
         volume = try c.decodeIfPresent(Double.self, forKey: .volume) ?? 1
+        show = try c.decodeIfPresent(ShowState.self, forKey: .show) ?? ShowState()
         revision = try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0
     }
 
@@ -368,6 +435,13 @@ public enum Command: Encodable, Hashable, Sendable {
     case dequeue(id: Int)
     case moveInQueue(id: Int, to: Int)
     case clearQueue
+    case setMode(PartyMode)
+    case setAfterSong(AfterSong)
+    case fadeOut(ms: Int?)
+    case talkOver(Bool)
+    case resume
+    case setAutoDj(Bool)
+    case setPool([String])
 
     private struct Key: CodingKey {
         var stringValue: String
@@ -424,6 +498,25 @@ public enum Command: Encodable, Hashable, Sendable {
             try c.encode(id, forKey: Key("id"))
             try c.encode(to, forKey: Key("to"))
         case .clearQueue: try cmd("clear_queue")
+        case .setMode(let m):
+            try cmd("set_mode")
+            try c.encode(m, forKey: Key("mode"))
+        case .setAfterSong(let a):
+            try cmd("set_after_song")
+            try c.encode(a, forKey: Key("action"))
+        case .fadeOut(let ms):
+            try cmd("fade_out")
+            try c.encodeIfPresent(ms, forKey: Key("ms"))
+        case .talkOver(let on):
+            try cmd("talk_over")
+            try c.encode(on, forKey: Key("on"))
+        case .resume: try cmd("resume")
+        case .setAutoDj(let on):
+            try cmd("set_auto_dj")
+            try c.encode(on, forKey: Key("on"))
+        case .setPool(let ids):
+            try cmd("set_pool")
+            try c.encode(ids, forKey: Key("playlists"))
         }
     }
 }

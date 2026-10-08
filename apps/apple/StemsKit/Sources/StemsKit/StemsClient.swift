@@ -254,6 +254,11 @@ public final class StemsClient {
         case .setViewMode(let m): state.viewMode = m
         case .dequeue(let id): state.queue.removeAll { $0.id == id }
         case .clearQueue: state.queue.removeAll()
+        case .setMode(let m): state.show.mode = m
+        case .setAfterSong(let a): state.show.afterSong = a
+        case .talkOver(let on): state.show.talkOver = on
+        case .setAutoDj(let on): state.show.autoDj = on
+        case .setPool(let ids): state.show.pool = ids
         case .moveInQueue(let id, let to):
             if let from = state.queue.firstIndex(where: { $0.id == id }) {
                 let item = state.queue.remove(at: from)

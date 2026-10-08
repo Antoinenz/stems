@@ -53,6 +53,11 @@ func decode<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
         #expect(s.viewMode == .video)
         #expect(s.media.videoOffsetMs == 350)
         #expect(s.revision == 42)
+        #expect(s.show.mode == .karaoke)
+        #expect(s.show.afterSong == .background)
+        #expect(s.show.held)
+        #expect(s.show.staged?.singer == "Sam & Alex")
+        #expect(s.show.pool.count == 1)
         #expect(s.nextTrack?.durationMs == 196_652)
     }
 

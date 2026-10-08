@@ -90,6 +90,12 @@ import Testing
                 "cmd": .string("play_track"), "key": .string("k"), "singer": .string("Mia"), "kind": .string("sing"),
             ])
         #expect(try json(.moveInQueue(id: 4, to: 0)) == ["cmd": .string("move_in_queue"), "id": .number(4), "to": .number(0)])
+        #expect(try json(.setMode(.karaoke)) == ["cmd": .string("set_mode"), "mode": .string("karaoke")])
+        #expect(try json(.setAfterSong(.hold)) == ["cmd": .string("set_after_song"), "action": .string("hold")])
+        #expect(try json(.fadeOut(ms: nil)) == ["cmd": .string("fade_out")])
+        #expect(try json(.talkOver(true)) == ["cmd": .string("talk_over"), "on": .bool(true)])
+        #expect(try json(.resume) == ["cmd": .string("resume")])
+        #expect(try json(.setPool(["p"])) == ["cmd": .string("set_pool"), "playlists": .array([.string("p")])])
     }
 
     @Test func settingsPatchShape() {
