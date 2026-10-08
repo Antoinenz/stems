@@ -46,6 +46,10 @@ pub struct LibraryService {
     status: Arc<Mutex<ImportStatus>>,
     /// Library counts and disk space, refreshed at most every 10 s.
     summary: Mutex<Option<(std::time::Instant, Value)>>,
+    /// Spotify search, when Spotify is enabled.
+    search: Option<crate::spotify_search::SpotifySearch>,
+    /// Spotify links asked for since start, to mark search results queued.
+    requested: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Free and total bytes of the disk holding `path` (the mount point that
@@ -74,6 +78,15 @@ impl LibraryService {
             tx,
             status,
             summary: Mutex::new(None),
+            search: cfg
+                .spotify
+                .enabled
+                .then(crate::spotify_search::SpotifySearch::new)
+                .and_then(|r| {
+                    r.inspect_err(|e| tracing::warn!("spotify search unavailable: {e:#}"))
+                        .ok()
+                }),
+            requested: Mutex::default(),
         })
     }
 
@@ -199,6 +212,16 @@ impl LibraryApi for LibraryService {
         }
         // reject typos now rather than in the background
         parse_sources(&sources).map_err(|e| format!("{e:#}"))?;
+        {
+            let mut r = self.requested.lock().expect("requested");
+            for s in &sources {
+                if let Some(stems_source_spotify::import::Link::Track(id)) =
+                    stems_source_spotify::import::Link::parse(s)
+                {
+                    r.insert(id);
+                }
+            }
+        }
         self.tx
             .send(sources)
             .map_err(|_| "the import worker has stopped".to_string())
@@ -336,6 +359,37 @@ impl LibraryApi for LibraryService {
         }
         self.lib.save_playlist(&p).map_err(|e| format!("{e:#}"))?;
         Ok(json!(p))
+    }
+
+    fn spotify_search(&self, query: &str, limit: usize) -> Result<Value, String> {
+        let search = self
+            .search
+            .as_ref()
+            .ok_or("Spotify is turned off in the settings")?;
+        if query.is_empty() {
+            return Ok(json!([]));
+        }
+        let hits = tokio::runtime::Handle::current()
+            .block_on(search.search(query, limit))
+            .map_err(|e| format!("{e:#}"))?;
+        let requested = self.requested.lock().expect("requested").clone();
+        Ok(Value::Array(
+            hits.into_iter()
+                .map(|h| {
+                    let key = format!("spotify_{}", h.id);
+                    let status = match self.lib.get(&key).ok().flatten() {
+                        Some(e) if e.is_playable() => "ready",
+                        _ if requested.contains(&h.id) => "queued",
+                        Some(_) => "incomplete",
+                        None => "new",
+                    };
+                    let mut v = json!(h);
+                    v["key"] = json!(key);
+                    v["status"] = json!(status);
+                    v
+                })
+                .collect(),
+        ))
     }
 
     fn delete_playlist(&self, id: &str) -> Result<(), String> {

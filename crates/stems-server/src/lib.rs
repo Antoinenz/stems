@@ -215,6 +215,13 @@ pub trait LibraryApi: Send + Sync {
     fn delete_playlist(&self, _id: &str) -> Result<(), String> {
         Err("not supported".into())
     }
+    /// Search Spotify for tracks to download: `[{id, url, title, artists,
+    /// album, duration_ms, art, year, key, status}]` where `status` is
+    /// `ready`, `queued`, `incomplete` or `new`. Blocks; call off the
+    /// async workers.
+    fn spotify_search(&self, _query: &str, _limit: usize) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
 }
 
 /// Everything optional the router serves.
@@ -382,6 +389,7 @@ impl Server {
             .route("/api/library/folders", get(get_folders).put(put_folders))
             .route("/api/library/songs/{key}/preview", get(get_preview))
             .route("/api/library/genres", get(get_genres))
+            .route("/api/library/spotify", get(get_spotify_search))
             .route("/api/info", {
                 let name = device_name.clone();
                 get(move |headers| async move { Json(info(&headers, &name)) })
@@ -664,6 +672,28 @@ async fn get_preview(
         .map_err(|e| unavailable(e.to_string()))?
         .map_err(unavailable)?;
     Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav))
+}
+
+#[derive(serde::Deserialize)]
+struct SpotifySearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+async fn get_spotify_search(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Query(q): axum::extract::Query<SpotifySearchQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    let limit = q.limit.unwrap_or(20);
+    tokio::task::spawn_blocking(move || lib.spotify_search(q.q.trim(), limit))
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
 }
 
 async fn get_folders(

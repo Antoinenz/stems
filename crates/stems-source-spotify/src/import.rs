@@ -159,6 +159,48 @@ impl ImportSession {
         !self.session.is_invalid()
     }
 
+    /// Tracks matching a search, best first, with their details. Uses
+    /// the same search the Spotify apps use (the Web API refuses this
+    /// client), then the metadata lookups imports use.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ResolvedTrack>> {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|w| {
+                w.bytes()
+                    .map(|b| match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                            (b as char).to_string()
+                        }
+                        _ => format!("%{b:02X}"),
+                    })
+                    .collect::<String>()
+            })
+            .collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ctx = self
+            .session
+            .spclient()
+            .get_context(&format!("spotify:search:{}", words.join("+")))
+            .await
+            .map_err(|e| anyhow!("spotify search: {e}"))?;
+        let uris: Vec<SpotifyUri> = ctx
+            .pages
+            .iter()
+            .flat_map(|p| p.tracks.iter())
+            .filter_map(|t| t.uri.as_deref())
+            .filter(|u| u.starts_with("spotify:track:"))
+            .filter_map(|u| SpotifyUri::from_uri(u).ok())
+            .take(limit)
+            .collect();
+        let found = futures::future::join_all(uris.iter().map(|u| self.track_ref(u))).await;
+        Ok(found
+            .into_iter()
+            .filter_map(|r| r.inspect_err(|e| tracing::debug!("search hit: {e:#}")).ok())
+            .collect())
+    }
+
     /// Every track a link points at, in order, with the album or
     /// playlist it came from. Unavailable tracks in an album or playlist
     /// are logged and skipped.

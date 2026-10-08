@@ -16,6 +16,7 @@ mod player;
 mod separator;
 mod settings;
 mod spool;
+mod spotify_search;
 mod status;
 mod web;
 
