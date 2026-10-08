@@ -987,6 +987,8 @@ pub struct SongQuery {
     pub offset: usize,
     /// Only songs karaoke works for (audio + instrumental).
     pub playable: bool,
+    /// Only songs that are not ready yet (an import stopped part way).
+    pub unfinished: bool,
     /// Songs of one playlist (in its order with `sort=position`).
     pub playlist: Option<String>,
     /// Top genre's parent, e.g. `Rock`.
@@ -1018,6 +1020,7 @@ pub struct SongRow {
     pub has_lyrics: bool,
     pub has_words: bool,
     pub has_video: bool,
+    pub explicit: Option<bool>,
     pub popularity: Option<i64>,
     pub added_at: i64,
     /// Place in the playlist, when listing one.
@@ -1058,6 +1061,9 @@ pub fn songs(conn: &Connection, q: &SongQuery) -> Result<SongPage> {
     }
     if q.playable {
         wh.push("t.playable".into());
+    }
+    if q.unfinished {
+        wh.push("NOT t.playable".into());
     }
     if let Some(gn) = &q.genre {
         let p = arg(gn.clone().into());
@@ -1122,7 +1128,7 @@ pub fn songs(conn: &Connection, q: &SongQuery) -> Result<SongPage> {
     let sql = format!(
         "SELECT t.key, t.title, t.artist_line, t.album, t.year, t.duration_ms, t.bpm, t.musical_key,
                 t.danceability, t.main_genre, g.name, coalesce(st.plays, 0), st.last_played, t.playable,
-                t.has_lyrics, t.has_words, t.has_video, t.popularity, t.added_at, {position}
+                t.has_lyrics, t.has_words, t.has_video, t.popularity, t.added_at, {position}, t.explicit
          {from} {where_sql} ORDER BY {order} LIMIT {limit} OFFSET {}",
         q.offset
     );
@@ -1150,6 +1156,7 @@ pub fn songs(conn: &Connection, q: &SongQuery) -> Result<SongPage> {
                 popularity: r.get(17)?,
                 added_at: r.get(18)?,
                 position: r.get(19)?,
+                explicit: r.get(20)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1216,6 +1223,18 @@ pub fn playlists(conn: &Connection) -> Result<Vec<PlaylistRow>> {
 pub fn genre_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
     let mut q = conn.prepare(
         "SELECT parent, count(*) n FROM genres WHERE rank = 0 GROUP BY parent ORDER BY n DESC",
+    )?;
+    let rows = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Every artist with how many songs they are on, most songs first.
+pub fn artist_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut q = conn.prepare(
+        "SELECT ar.name, count(*) n FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id
+         GROUP BY ar.id ORDER BY n DESC, ar.name COLLATE NOCASE",
     )?;
     let rows = q
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?

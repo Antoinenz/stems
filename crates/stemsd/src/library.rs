@@ -248,7 +248,9 @@ impl LibraryApi for LibraryService {
         };
         let mut v = summary(&self.lib, &e, true);
         v["info"] = json!(e.info);
-        v["lyrics_text"] = json!(self.lib.load_lyrics(&e).ok().flatten().map(|l| {
+        let lyrics = self.lib.load_lyrics(&e).ok().flatten();
+        v["lyrics"] = json!(lyrics);
+        v["lyrics_text"] = json!(lyrics.map(|l| {
             if l.lines.is_empty() {
                 l.plain.unwrap_or_default()
             } else {
@@ -337,6 +339,7 @@ impl LibraryApi for LibraryService {
         name: Option<String>,
         tracks: Option<Vec<String>>,
         add: Vec<String>,
+        remove: Vec<String>,
     ) -> Result<Value, String> {
         let mut p = self
             .lib
@@ -357,6 +360,7 @@ impl LibraryApi for LibraryService {
                 p.tracks.push(k);
             }
         }
+        p.tracks.retain(|k| !remove.contains(k));
         self.lib.save_playlist(&p).map_err(|e| format!("{e:#}"))?;
         Ok(json!(p))
     }
@@ -402,6 +406,52 @@ impl LibraryApi for LibraryService {
             return Err("imported playlists can't be deleted here".into());
         }
         self.lib.delete_playlist(id).map_err(|e| format!("{e:#}"))
+    }
+
+    fn artists(&self) -> Result<Value, String> {
+        let conn = index::open(&self.lib).map_err(|e| format!("{e:#}"))?;
+        index::artist_counts(&conn)
+            .map(|a| {
+                json!(
+                    a.into_iter()
+                        .map(|(name, songs)| json!({"name": name, "songs": songs}))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    fn delete_song(&self, key: &str) -> Result<(), String> {
+        let e = self
+            .lib
+            .get(key)
+            .map_err(|e| format!("{e:#}"))?
+            .ok_or("no such song")?;
+        let from = self.lib.files(&e).dir;
+        // recoverable: the library's trash folder, emptied by hand
+        let trash = self.lib.dir().join("trash");
+        std::fs::create_dir_all(&trash).map_err(|e| format!("trash folder: {e}"))?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        std::fs::rename(&from, trash.join(format!("{key}-{stamp}")))
+            .map_err(|e| format!("move to trash: {e}"))?;
+        tracing::info!(key, "song moved to the library trash");
+        let _ = index::update(&self.lib);
+        Ok(())
+    }
+
+    fn reindex(&self) -> Result<Value, String> {
+        // mark every row stale so the update re-reads each folder (safe
+        // with other readers, unlike deleting the file)
+        index::open(&self.lib)
+            .and_then(|c| {
+                c.execute("UPDATE tracks SET json_size = -1, lyrics_mtime = -1", [])
+                    .map_err(Into::into)
+            })
+            .map_err(|e| format!("{e:#}"))?;
+        let s = index::update(&self.lib).map_err(|e| format!("{e:#}"))?;
+        Ok(json!({"tracks": s.tracks, "playlists_changed": s.playlists_changed}))
     }
 
     fn genres(&self) -> Result<Value, String> {
@@ -522,6 +572,7 @@ fn song_query(p: &std::collections::HashMap<String, String>, guest: bool) -> ind
         limit: num("limit").map_or(0, |n| n as usize),
         offset: num("offset").map_or(0, |n| n as usize),
         playable: guest || flag("playable"),
+        unfinished: !guest && flag("unfinished"),
         playlist: text("playlist"),
         genre: text("genre"),
         artist: text("artist"),

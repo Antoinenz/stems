@@ -201,14 +201,15 @@ pub trait LibraryApi: Send + Sync {
     ) -> Result<serde_json::Value, String> {
         Err("not supported".into())
     }
-    /// Rename and/or replace the songs of one of the host's playlists, or
-    /// add songs to it.
+    /// Rename and/or replace the songs of one of the host's playlists,
+    /// add songs to it or take songs out.
     fn edit_playlist(
         &self,
         _id: &str,
         _name: Option<String>,
         _tracks: Option<Vec<String>>,
         _add: Vec<String>,
+        _remove: Vec<String>,
     ) -> Result<serde_json::Value, String> {
         Err("not supported".into())
     }
@@ -220,6 +221,18 @@ pub trait LibraryApi: Send + Sync {
     /// `ready`, `queued`, `incomplete` or `new`. Blocks; call off the
     /// async workers.
     fn spotify_search(&self, _query: &str, _limit: usize) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    /// Artists with song counts.
+    fn artists(&self) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    /// Move a song out of the library (into its trash folder).
+    fn delete_song(&self, _key: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    /// Rebuild the index from the track folders; returns counts.
+    fn reindex(&self) -> Result<serde_json::Value, String> {
         Err("not supported".into())
     }
 }
@@ -377,7 +390,12 @@ impl Server {
                 get(get_import_status).post(post_import),
             )
             .route("/api/library/songs", get(get_songs))
-            .route("/api/library/songs/{key}", get(get_song))
+            .route(
+                "/api/library/songs/{key}",
+                get(get_song).delete(delete_song),
+            )
+            .route("/api/library/artists", get(get_artists))
+            .route("/api/library/reindex", post(post_reindex))
             .route(
                 "/api/library/playlists",
                 get(get_playlists).post(post_playlist),
@@ -630,6 +648,46 @@ async fn get_playlists(
         .map_err(unavailable)
 }
 
+async fn get_artists(
+    State(app): State<App>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    tokio::task::spawn_blocking(move || lib.artists())
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
+}
+
+async fn delete_song(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Path(key): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    tokio::task::spawn_blocking(move || lib.delete_song(&key))
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(unavailable)
+}
+
+async fn post_reindex(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    tokio::task::spawn_blocking(move || lib.reindex())
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map(Json)
+        .map_err(unavailable)
+}
+
 async fn get_genres(
     State(app): State<App>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -666,7 +724,8 @@ async fn get_preview(
     let lib = app.library.clone().ok_or_else(no_library)?;
     // a third of the way in is usually past the intro
     let start = q.start_ms.unwrap_or(u64::MAX);
-    let secs = q.secs.unwrap_or(30).clamp(5, 120);
+    // up to a whole song (the Mac's preview window plays it all)
+    let secs = q.secs.unwrap_or(30).clamp(5, 1200);
     let wav = tokio::task::spawn_blocking(move || lib.preview(&key, &q.stem, start, secs))
         .await
         .map_err(|e| unavailable(e.to_string()))?
@@ -744,6 +803,8 @@ struct EditPlaylist {
     tracks: Option<Vec<String>>,
     #[serde(default)]
     add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 async fn patch_playlist(
@@ -755,7 +816,7 @@ async fn patch_playlist(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     host_only(&app, &headers, query.as_deref())?;
     let lib = app.library.clone().ok_or_else(no_library)?;
-    lib.edit_playlist(&id, req.name, req.tracks, req.add)
+    lib.edit_playlist(&id, req.name, req.tracks, req.add, req.remove)
         .map(Json)
         .map_err(bad_request)
 }
