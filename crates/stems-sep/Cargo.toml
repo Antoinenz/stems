@@ -31,6 +31,11 @@ realfft = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+
+[[example]]
+name = "align_memory"
+required-features = ["onnx"]
 
 [[example]]
 name = "mdx_window"

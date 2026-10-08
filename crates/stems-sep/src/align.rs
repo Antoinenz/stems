@@ -53,7 +53,15 @@ impl Aligner {
     /// Loads on the CPU provider: alignment runs offline and the quantized
     /// model has no GPU kernels anyway.
     pub fn load(path: &Path, threads: usize) -> Result<Self> {
-        let mut builder = Session::builder().context("ort session builder")?;
+        // every input has a different length: without these, ONNX Runtime
+        // keeps an arena as big as the largest input so far and a cached
+        // plan per input size, which only ever grows over a long import
+        let mut builder = Session::builder()
+            .context("ort session builder")?
+            .with_memory_pattern(false)
+            .map_err(|e| anyhow!("memory pattern: {e}"))?
+            .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+            .map_err(|e| anyhow!("cpu provider: {e}"))?;
         if threads > 0 {
             builder = builder
                 .with_intra_threads(threads)
@@ -400,6 +408,8 @@ pub mod worker {
     const POST_MS: u64 = 1_000;
     /// Target chunk length handed to the model.
     const CHUNK_MS: u64 = 20_000;
+    /// How long a chunk's last line may last.
+    const LAST_LINE_MS: u64 = 12_000;
     /// Mean letter log-probability below which a line is left unaligned.
     /// Rejected lines in field logs sat at −3.1…−5.4; the ones just under
     /// −3 were usually harmonies or effected vocals that still placed well.
@@ -546,7 +556,11 @@ pub mod worker {
             }
             let next = job.lines.get(b).map(|l| l.time_ms).unwrap_or(total_ms);
             let start = job.lines[a].time_ms.saturating_sub(PRE_MS);
-            let end = (next + POST_MS).min(total_ms);
+            // up to the next line, but not across a long gap (an outro, a
+            // solo): the extra audio is silence or instrumental, and the
+            // model's memory grows with the square of the length
+            let last_line_end = job.lines[b - 1].time_ms + LAST_LINE_MS;
+            let end = (next + POST_MS).min(last_line_end).min(total_ms);
             if end <= start + 500 {
                 continue;
             }
