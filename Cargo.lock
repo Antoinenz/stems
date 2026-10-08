@@ -3459,6 +3459,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "hound",
+ "rusqlite",
  "serde",
  "serde_json",
  "stems-core",

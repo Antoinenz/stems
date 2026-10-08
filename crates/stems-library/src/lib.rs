@@ -14,6 +14,9 @@
 //!   cover.jpg
 //!   .sent               handed off to another machine: only track.json is
 //!                       left here, and imports skip the track
+//! <library>/library.sqlite
+//!                       a searchable index of all of it, rebuilt from the
+//!                       folders whenever they change (see [`index`])
 //! <library>/playlists/<id>.json
 //!                       a Spotify playlist or album: name, link, track keys
 //! ```
@@ -25,6 +28,7 @@
 pub mod analysis;
 pub mod entry;
 pub mod flac;
+pub mod index;
 pub mod playlist;
 pub mod wav;
 

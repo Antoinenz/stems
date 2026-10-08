@@ -338,6 +338,24 @@ def main_genre(e: dict) -> str:
     return g.split(" / ")[0]
 
 
+def update_index(cfg: Config) -> None:
+    """library.sqlite: incremental, one transaction, safe to run alongside
+    the other task (SQLite makes concurrent updates take turns)."""
+    if not cfg.stemsd.is_file():
+        return
+    r = subprocess.run(
+        [str(cfg.stemsd), "index"],
+        env=stemsd_env(cfg),
+        capture_output=True,
+        text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if r.returncode == 0:
+        log.info("index: %s", r.stdout.strip().split(": ", 1)[-1])
+    else:
+        log.warning("index update failed: %s", (r.stderr or r.stdout).strip()[-300:])
+
+
 def write_catalog(cfg: Config) -> None:
     tracks, playlists = load_library(cfg.library)
     in_lists: dict[str, list[str]] = {}
@@ -474,11 +492,13 @@ def main() -> None:
             try:
                 # keep going while the box has more (a backlog drains in one run)
                 while pull(cfg) and args.no_finish:
-                    pass
+                    update_index(cfg)
             except Exception:  # noqa: BLE001 - finish what we have anyway
                 log.exception("pulling from the box failed")
+            update_index(cfg)
         if not (args.no_finish or args.catalog_only):
             finish(cfg)
+            update_index(cfg)
         if not args.no_finish:
             write_catalog(cfg)
     finally:

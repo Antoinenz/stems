@@ -112,6 +112,10 @@ enum Cmd {
         #[arg(long, default_value_t = 2000)]
         hop_ms: u64,
     },
+    /// Bring the library's SQLite index (library.sqlite) up to date with
+    /// the track folders: only what changed is re-read. Safe to run while
+    /// importing; prints what changed.
+    Index,
     /// Print the effective configuration and file locations (writes a
     /// default stems.toml if none exists).
     Config {
@@ -190,6 +194,21 @@ fn main() -> Result<()> {
             println!("library:     {}", cfg.library_dir()?.display());
             println!();
             print!("{}", toml::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+        Cmd::Index => {
+            let lib = stems_library::Library::open(cfg.library_dir()?)?;
+            let s = stems_library::index::update(&lib)?;
+            println!(
+                "{}: {} tracks ({} updated, {} removed), {} playlists ({} updated){}",
+                stems_library::index::path(&lib).display(),
+                s.tracks,
+                s.tracks_changed,
+                s.tracks_removed,
+                s.playlists,
+                s.playlists_changed,
+                if s.rebuilt { ", rebuilt" } else { "" }
+            );
             Ok(())
         }
         Cmd::Devices => {
