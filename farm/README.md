@@ -75,11 +75,36 @@ to a pipe without a console, as in a scheduled task.
 I:\stems\
   library\tracks\<key>\   track.json, mix.ogg, instrumental.flac, lyrics.json, video.mp4, cover.jpg
   library\playlists\      one JSON per imported playlist/album (name, link, tracks in order)
+  library\library.sqlite  the searchable index of all of it (see below)
   catalog.csv             every song: artist, title, year, BPM, key, danceability, moods,
                           genre, playlists, lyrics/video status, Spotify link (opens in Excel)
   browse\                 shortcuts to the track folders by playlist, genre and artist
   logs\  bin\  cache\  stems.toml  farm.json  farm\
 ```
+
+## The library index
+
+`library\library.sqlite` is a SQLite database built from the track folders
+(`stemsd index`; the sync tasks run it after every change, in about 0.3 s).
+Tables: `tracks` (title, artists, year, BPM, key, danceability, main genre,
+playable/lyrics/video flags…), `artists` + `track_artists`, `playlists` +
+`playlist_tracks` (in order, including songs that never imported), `genres`
+(top styles with scores), `moods`, `stages` (import progress and errors), a
+`playlist_songs` view, and `search`, a full-text index over titles, artists,
+albums and lyrics. Open it with any SQLite tool (e.g. DB Browser for SQLite):
+
+```sql
+SELECT artist_line, title, danceability FROM tracks
+WHERE playable AND year BETWEEN 1980 AND 1989 ORDER BY danceability DESC;
+
+SELECT t.title FROM search s JOIN tracks t USING (key)
+WHERE search MATCH 'lyrics:"dancing queen"';
+```
+
+The folders stay the source of truth: the index only reads them, updates in
+one transaction (readers never see a half-updated library; two updates at once
+take turns) and rebuilds itself from scratch if deleted or if its schema
+changes.
 
 ## The spool
 
