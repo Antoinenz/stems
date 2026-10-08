@@ -11,6 +11,7 @@ struct LibraryScreen: View {
     @State private var playlists: [PlaylistRow] = []
     @State private var genres: [GenreCount] = []
     @AppStorage("libraryBrowse") private var browse = "playlists"
+    @State private var search = ""
 
     var body: some View {
         @Bindable var model = model
@@ -51,6 +52,7 @@ struct LibraryScreen: View {
             songs(model.librarySelection ?? .all)
                 .frame(minWidth: 480)
         }
+        .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
         .task(id: client.connection.isConnected) {
             // new imports add playlists and genres
             while !Task.isCancelled {
@@ -65,12 +67,12 @@ struct LibraryScreen: View {
     private func songs(_ sel: LibrarySelection) -> some View {
         switch sel {
         case .all:
-            SongsView(title: "Songs", query: SongQuery()).id("all")
+            SongsView(title: "Songs", query: SongQuery(), search: search).id("all")
         case .playlist(let id):
-            SongsView(title: playlists.first { $0.id == id }?.displayName ?? "Playlist", query: SongQuery(playlist: id))
+            SongsView(title: playlists.first { $0.id == id }?.displayName ?? "Playlist", query: SongQuery(playlist: id), search: search)
                 .id("playlist-" + id)
         case .genre(let g):
-            SongsView(title: g, query: SongQuery(genre: g)).id("genre-" + g)
+            SongsView(title: g, query: SongQuery(genre: g), search: search).id("genre-" + g)
         }
     }
 }

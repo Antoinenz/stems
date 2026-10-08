@@ -60,12 +60,15 @@ struct SongsView: View {
     @State private var model: SongsModel
     @State private var selection = Set<String>()
     @State private var sortOrder: [KeyPathComparator<SongRow>]
-    @State private var search = ""
     @State private var requesting: RequestTarget?
     let title: String
+    /// From the screen's one search field (a toolbar search per table
+    /// crashes AppKit when tables are swapped).
+    let search: String
 
-    init(title: String, query: SongQuery) {
+    init(title: String, query: SongQuery, search: String = "") {
         self.title = title
+        self.search = search
         _model = State(initialValue: SongsModel(query: query))
         _sortOrder = State(initialValue: query.playlist != nil ? [KeyPathComparator(\SongRow.sPos)] : [KeyPathComparator(\SongRow.artists)])
     }
@@ -119,7 +122,6 @@ struct SongsView: View {
             if let row = row(keys.first) { requesting = RequestTarget(row) }
         }
         .overlay { emptyState }
-        .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
         .navigationTitle(title)
         .navigationSubtitle(subtitle)
         .sheet(item: $requesting) { RequestSheet(track: $0).frame(minWidth: 420, minHeight: 380) }
