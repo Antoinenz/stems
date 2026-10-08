@@ -1050,6 +1050,14 @@ impl Player {
 
     /// The current track has been pushed to its end.
     fn on_track_end(&mut self) {
+        // the next song is still loading: wait for it rather than ending
+        if self
+            .loads
+            .values()
+            .any(|p| matches!(p, Purpose::PlayNow { .. }))
+        {
+            return;
+        }
         let pending_action = self.show.after_song != AfterSong::Continue
             || (self.show.mode == PartyMode::Karaoke
                 && !self.show.held
