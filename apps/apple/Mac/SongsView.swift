@@ -65,10 +65,13 @@ struct SongsView: View {
     /// From the screen's one search field (a toolbar search per table
     /// crashes AppKit when tables are swapped).
     let search: String
+    /// Shown when the list is empty without a search.
+    let emptyHint: String?
 
-    init(title: String, query: SongQuery, search: String = "") {
+    init(title: String, query: SongQuery, search: String = "", emptyHint: String? = nil) {
         self.title = title
         self.search = search
+        self.emptyHint = emptyHint
         _model = State(initialValue: SongsModel(query: query))
         _sortOrder = State(initialValue: query.playlist != nil ? [KeyPathComparator(\SongRow.sPos)] : [KeyPathComparator(\SongRow.artists)])
     }
@@ -149,7 +152,8 @@ struct SongsView: View {
             ContentUnavailableView("Library Unavailable", systemImage: "externaldrive.badge.exclamationmark", description: Text(e))
         } else if model.rows.isEmpty && !model.loading {
             if search.isEmpty {
-                ContentUnavailableView("No Songs", systemImage: "music.note.list")
+                ContentUnavailableView(
+                    "No Songs", systemImage: "music.note.list", description: emptyHint.map { Text($0) })
             } else {
                 ContentUnavailableView.search(text: search)
             }

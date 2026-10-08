@@ -52,7 +52,7 @@ public struct QueueView: View {
             .moveDisabled(!canEdit)
             .deleteDisabled(!canEdit)
         } header: {
-            Text(client.state.queue.isEmpty ? "" : "Up Next")
+            if !client.state.queue.isEmpty { Text("Up Next") }
         }
     }
 

@@ -44,13 +44,13 @@ struct MainWindow: View {
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
         } detail: {
-            NavigationStack {
-                detail(model.destination ?? .show)
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                VStack(spacing: 0) {
-                    ServerBanner()
-                    ConnectionBanner()
+            // banners push the content down (a safe-area inset is ignored
+            // by AppKit-backed lists and tables, which drew over them)
+            VStack(spacing: 0) {
+                ServerBanner()
+                ConnectionBanner()
+                NavigationStack {
+                    detail(model.destination ?? .show)
                 }
             }
             .stemsErrorToast()

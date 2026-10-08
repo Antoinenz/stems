@@ -7,16 +7,18 @@ import SwiftUI
 
 struct ShowView: View {
     var body: some View {
-        HSplitView {
+        // fixed queue width: split views fight the queue list for width
+        HStack(spacing: 0) {
             NowPlayingView()
-                .frame(minWidth: 380, idealWidth: 520)
+                .frame(minWidth: 380, maxWidth: .infinity)
+            Divider()
             VStack(spacing: 0) {
                 AddSongsField()
                     .padding(12)
                 Divider()
                 QueueView()
             }
-            .frame(minWidth: 320, idealWidth: 420)
+            .frame(width: 380)
         }
         .navigationTitle("Now Playing")
     }

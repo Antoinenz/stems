@@ -15,7 +15,7 @@ struct LibraryScreen: View {
 
     var body: some View {
         @Bindable var model = model
-        HSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 0) {
                 Picker("Browse", selection: $browse) {
                     Text("Playlists").tag("playlists")
@@ -47,10 +47,10 @@ struct LibraryScreen: View {
                 }
                 .listStyle(.sidebar)
             }
-            .frame(minWidth: 170, idealWidth: 220, maxWidth: 320)
-
+            .frame(width: 230)
+            Divider()
             songs(model.librarySelection ?? .all)
-                .frame(minWidth: 480)
+                .frame(maxWidth: .infinity)
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
         .task(id: client.connection.isConnected) {
@@ -69,7 +69,10 @@ struct LibraryScreen: View {
         case .all:
             SongsView(title: "Songs", query: SongQuery(), search: search).id("all")
         case .playlist(let id):
-            SongsView(title: playlists.first { $0.id == id }?.displayName ?? "Playlist", query: SongQuery(playlist: id), search: search)
+            let p = playlists.first { $0.id == id }
+            SongsView(
+                title: p?.displayName ?? "Playlist", query: SongQuery(playlist: id), search: search,
+                emptyHint: p.map { "None of this playlist’s \($0.songs) songs are in this library yet." })
                 .id("playlist-" + id)
         case .genre(let g):
             SongsView(title: g, query: SongQuery(genre: g), search: search).id("genre-" + g)
