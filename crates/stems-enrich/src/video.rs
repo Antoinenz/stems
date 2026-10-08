@@ -73,8 +73,10 @@ impl VideoFetcher {
             .dir
             .join(format!("{}.%(ext)s", name.trim_end_matches(".mp4")));
         let query = Self::query(track);
+        // H.264 first: it plays everywhere (AV1, YouTube's usual pick,
+        // doesn't play in Apple's player on Macs older than M3)
         let format = format!(
-            "bv*[ext=mp4][height<={h}]+ba[ext=m4a]/b[ext=mp4][height<={h}]/b",
+            "bv*[vcodec^=avc1][height<={h}]+ba[ext=m4a]/bv*[ext=mp4][height<={h}]+ba[ext=m4a]/b[ext=mp4][height<={h}]/b",
             h = self.max_height
         );
         tracing::info!(query, "fetching music video");
