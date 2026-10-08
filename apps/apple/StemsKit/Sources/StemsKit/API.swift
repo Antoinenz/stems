@@ -58,9 +58,12 @@ public struct API: Sendable {
         return data
     }
 
-    /// Raw bytes of a GET (audio clips).
-    func raw(_ path: String, query: [URLQueryItem] = []) async throws -> Data {
-        try await send(request(path, query: query))
+    /// Raw bytes of a GET (audio clips). A whole song takes the server a
+    /// while to decode, so these wait longer than other requests.
+    func raw(_ path: String, query: [URLQueryItem] = [], timeout: TimeInterval = 120) async throws -> Data {
+        var r = request(path, query: query)
+        r.timeoutInterval = timeout
+        return try await send(r)
     }
 
     /// A request with a JSON body (or none); returns the response body.
@@ -129,7 +132,7 @@ extension URLSession {
     public static let stems: URLSession = {
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 6
-        c.timeoutIntervalForResource = 30
+        c.timeoutIntervalForResource = 300  // whole-song previews; the 6 s idle limit still applies
         c.waitsForConnectivity = false
         c.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: c)

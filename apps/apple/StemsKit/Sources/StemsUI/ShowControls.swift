@@ -31,6 +31,26 @@ extension PartyMode {
     }
 }
 
+extension ViewMode {
+    public var title: LocalizedStringKey {
+        switch self {
+        case .lyrics: "Lyrics"
+        case .karaoke: "Big Lyrics"
+        case .video: "Music Video"
+        case .canvas: "Spotify Canvas"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .lyrics: "text.alignleft"
+        case .karaoke: "textformat.size.larger"
+        case .video: "film"
+        case .canvas: "sparkles.tv"
+        }
+    }
+}
+
 extension AfterSong {
     var title: LocalizedStringKey {
         switch self {
@@ -135,6 +155,15 @@ public struct ShowControls: View {
                     TalkOverButton()
                 }
                 .controlSize(.regular)
+
+                Picker(selection: Binding(get: { client.state.viewMode }, set: { client.send(.setViewMode($0)) })) {
+                    ForEach(ViewMode.allCases, id: \.self) { m in
+                        Label(m.title, systemImage: m.symbol).tag(m)
+                    }
+                } label: {
+                    Label("Lyrics Screen", systemImage: "tv")
+                }
+                .help("What the lyrics screen shows")
 
                 HStack {
                     Toggle(isOn: Binding(get: { show.autoDj }, set: { client.send(.setAutoDj($0)) })) {

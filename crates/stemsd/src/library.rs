@@ -249,7 +249,7 @@ impl LibraryApi for LibraryService {
         let mut v = summary(&self.lib, &e, true);
         v["info"] = json!(e.info);
         let lyrics = self.lib.load_lyrics(&e).ok().flatten();
-        v["lyrics"] = json!(lyrics);
+        v["timed_lyrics"] = json!(lyrics);
         v["lyrics_text"] = json!(lyrics.map(|l| {
             if l.lines.is_empty() {
                 l.plain.unwrap_or_default()

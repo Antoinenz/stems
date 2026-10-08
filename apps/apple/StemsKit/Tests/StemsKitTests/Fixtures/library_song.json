@@ -35,8 +35,8 @@
   },
   "key": "spotify_1auxYwYrFRqZP7t3s7w4um",
   "loudness_lufs": -8.899999618530273,
-  "lyrics": null,
-  "lyrics_text": null,
+  "lyrics": true,
+  "lyrics_text": "Wake me up\nBefore you go-go",
   "playable": true,
   "playlists": [
     {
@@ -87,6 +87,35 @@
     }
   },
   "stems_model": "model_bs_roformer_ep_317_sdr_12.9755",
+  "timed_lyrics": {
+    "lines": [
+      {
+        "text": "Wake me up",
+        "time_ms": 12000,
+        "words": [
+          {
+            "text": "Wake",
+            "time_ms": 12000
+          },
+          {
+            "text": "me",
+            "time_ms": 12400
+          },
+          {
+            "text": "up",
+            "time_ms": 12700
+          }
+        ]
+      },
+      {
+        "text": "Before you go-go",
+        "time_ms": 15500
+      }
+    ],
+    "offset_ms": 0,
+    "plain": null,
+    "provider": "lrclib"
+  },
   "title": "Ni**as In Paris",
   "video": true,
   "video_corr": 0.8199999928474426,

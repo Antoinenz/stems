@@ -397,6 +397,21 @@ async fn api_fixtures_are_current() {
     put("library_songs", page);
     put("library_playlists", service.playlists().unwrap());
     put("library_genres", service.genres().unwrap());
+    // timed lyrics on the song page (the field must not clash with the
+    // `lyrics` flag every song row carries)
+    let e = lib.get("spotify_1auxYwYrFRqZP7t3s7w4um").unwrap().unwrap();
+    let lyrics: stems_core::Lyrics = serde_json::from_value(json!({
+        "provider": "lrclib",
+        "lines": [
+            {"time_ms": 12_000, "text": "Wake me up", "words": [
+                {"time_ms": 12_000, "text": "Wake"}, {"time_ms": 12_400, "text": "me"}, {"time_ms": 12_700, "text": "up"}]},
+            {"time_ms": 15_500, "text": "Before you go-go"}
+        ],
+        "plain": null,
+        "offset_ms": 0
+    }))
+    .unwrap();
+    lib.save_lyrics(&e, &lyrics).unwrap();
     put(
         "library_song",
         service

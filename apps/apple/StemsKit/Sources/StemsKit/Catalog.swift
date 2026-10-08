@@ -154,7 +154,8 @@ public struct SongDetail: Decodable, Hashable, Sendable {
     public var plays: [Play]
 
     enum CodingKeys: String, CodingKey {
-        case info, analysis, playlists, plays, lyrics
+        case info, analysis, playlists, plays
+        case lyrics = "timed_lyrics"
         case lyricsText = "lyrics_text"
         case videoOffsetMs = "video_offset_ms"
     }
