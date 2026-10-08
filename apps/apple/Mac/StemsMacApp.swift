@@ -28,6 +28,15 @@ final class AppModel {
     }
 
     func launch() {
+        #if DEBUG
+        // screenshots / UI checks: open on a given place
+        switch UserDefaults.standard.string(forKey: "initialDestination") {
+        case "library": destination = .library
+        case "machines": destination = .machines
+        case "guests": destination = .guests
+        default: break
+        }
+        #endif
         supervisor.start()
         client.start()
     }
@@ -86,6 +95,7 @@ struct StemsMacApp: App {
             }
         }
         .defaultSize(width: 980, height: 620)
+        .restorationBehavior(.disabled)  // don't reopen old previews at launch
 
         Window("Server Log", id: "log") {
             LogWindow()

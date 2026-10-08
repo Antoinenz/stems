@@ -42,7 +42,6 @@ struct LibraryScreen: View {
     @Environment(StemsClient.self) private var client
     @State private var data = LibraryData()
     @AppStorage("libraryBrowse") private var browse = "playlists"
-    @State private var showInspector = true
     @State private var artistFilter = ""
     @AppStorage("spotifySearch") private var spotifySearch = true
     @State private var search = ""
@@ -80,12 +79,14 @@ struct LibraryScreen: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            // a plain side panel: the glass inspector let the table run
+            // underneath it, ghosting rows and hiding the last columns
+            Divider()
+            SongInspector(key: selectedSong)
+                .frame(width: 320)
+                .background(.background)
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
-        .inspector(isPresented: $showInspector) {
-            SongInspector(key: selectedSong)
-                .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
-        }
         .task(id: client.connection.isConnected) {
             // new imports add playlists and genres
             while !Task.isCancelled {

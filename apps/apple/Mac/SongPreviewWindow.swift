@@ -4,6 +4,7 @@
 
 import AVFoundation
 import AVKit
+import VideoToolbox
 import StemsKit
 import StemsUI
 import SwiftUI
@@ -59,7 +60,7 @@ final class SongPlayer {
 
     func select(_ stem: PreviewStem, client: StemsClient) {
         let at = currentFrame
-        let wasPlaying = playing || phase == .idle
+        let wasPlaying = playing  // never starts by itself: press Play
         self.stem = stem
         stopNode()
         pausedAt = at
@@ -179,6 +180,8 @@ struct SongPreviewWindow: View {
     @State private var detail: SongDetail?
     @State private var player: SongPlayer
     @State private var video: AVPlayer?
+    /// Why the video can't play here, when it can't.
+    @State private var videoProblem: String?
     @State private var scrub: Double?
     @AppStorage("previewShowVideo") private var showVideo = true
 
@@ -193,8 +196,13 @@ struct SongPreviewWindow: View {
             Divider()
             HSplitView {
                 if showVideo, let video {
-                    VideoPlayer(player: video)
-                        .disabled(true)  // the audio drives it
+                    PlayerView(player: video)
+                        .overlay {
+                            if let videoProblem {
+                                ContentUnavailableView("Video Can’t Play Here", systemImage: "film", description: Text(videoProblem))
+                                    .background(.background)
+                            }
+                        }
                         .frame(minWidth: 320)
                 }
                 LyricsPane(lyrics: detail?.lyrics, plain: detail?.lyricsText, player: player)
@@ -204,14 +212,18 @@ struct SongPreviewWindow: View {
             transport
         }
         .navigationTitle(detail.map { "\($0.track.title) — \($0.track.artistLine)" } ?? "Preview")
-        .task {
+        .task(id: client.connection.isConnected) {
+            // the window can open before the app has connected
+            guard client.connection.isConnected, detail == nil else { return }
             detail = try? await client.api.song(key)
             if detail?.track.stages?.video == .done, let url = client.url(for: "/media/library/\(key)/video.mp4") {
                 let p = AVPlayer(url: url)
                 p.isMuted = true
                 video = p
+                videoProblem = await Self.unplayable(url)
+                syncVideo(force: true)  // show the first frame, not a placeholder
             }
-            player.select(.mix, client: client)
+            if player.phase != .ready { player.select(player.stem, client: client) }
         }
         .task {
             // keep the video on the audio's clock
@@ -294,6 +306,21 @@ struct SongPreviewWindow: View {
         }
     }
 
+    /// AV1 needs a hardware decoder in Apple's player (M3 and later).
+    /// Videos downloaded before H.264 was preferred are often AV1.
+    private static func unplayable(_ url: URL) async -> String? {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+            let format = try? await track.load(.formatDescriptions).first
+        else { return nil }
+        if CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_AV1
+            && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
+        {
+            return "It’s in AV1, which this Mac can’t decode. It still plays on the lyrics screen."
+        }
+        return nil
+    }
+
     private func syncVideo(force: Bool = false) {
         guard let video, let detail else { return }
         let want = Double(player.positionMs + detail.videoOffsetMs) / 1000
@@ -306,6 +333,25 @@ struct SongPreviewWindow: View {
         if force || drift > 0.3 {
             video.seek(to: CMTime(seconds: max(0, want), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
+    }
+}
+
+/// The music video, driven by the audio (no controls of its own). AVKit's
+/// SwiftUI `VideoPlayer` crashes on load on this macOS, so this wraps the
+/// AppKit view.
+struct PlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let v = AVPlayerView()
+        v.controlsStyle = .none
+        v.videoGravity = .resizeAspect
+        v.player = player
+        return v
+    }
+
+    func updateNSView(_ v: AVPlayerView, context: Context) {
+        if v.player !== player { v.player = player }
     }
 }
 

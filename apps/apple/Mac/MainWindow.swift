@@ -19,6 +19,10 @@ enum LibrarySelection: Hashable {
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(StemsClient.self) private var client
+    @Environment(\.openWindow) private var openWindow
+    #if DEBUG
+    @State private var debugSettings = false
+    #endif
 
     var body: some View {
         @Bindable var model = model
@@ -55,6 +59,15 @@ struct MainWindow: View {
             }
             .stemsErrorToast()
         }
+        #if DEBUG
+        // UI checks: -debugPreviewKey <song> opens its preview window,
+        // -debugServerSettings YES the settings sheet
+        .task {
+            if let key = UserDefaults.standard.string(forKey: "debugPreviewKey") { openWindow(id: "preview", value: key) }
+            debugSettings = UserDefaults.standard.bool(forKey: "debugServerSettings")
+        }
+        .sheet(isPresented: $debugSettings) { ServerSettingsView().frame(minWidth: 620, minHeight: 640) }
+        #endif
         .toolbar {
             // playback controls only where the show is (no stray pauses
             // while browsing or typing elsewhere)

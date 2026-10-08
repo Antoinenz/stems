@@ -60,6 +60,9 @@ struct SongsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openWindow) private var openWindow
     @State private var trashing: [SongRow] = []
+    /// Which columns show and their widths (right-click the header to
+    /// choose), kept between launches.
+    @State private var columns = SongsView.savedColumns
     @State private var model: SongsModel
     @State private var selection = Set<String>()
     @State private var sortOrder: [KeyPathComparator<SongRow>]
@@ -88,7 +91,7 @@ struct SongsView: View {
     }
 
     var body: some View {
-        Table(model.rows, selection: $selection, sortOrder: $sortOrder) {
+        Table(model.rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columns) {
             nameColumns
             detailColumns
         }
@@ -123,6 +126,9 @@ struct SongsView: View {
         .onChange(of: selection) { _, sel in
             if let first = sel.first { selected = first }
         }
+        .onChange(of: columns) { _, c in
+            if let data = try? JSONEncoder().encode(c) { UserDefaults.standard.set(data, forKey: "songColumns") }
+        }
         .onChange(of: sortOrder) { _, order in
             guard let first = order.first else { return }
             model.query.sort = Self.sort(for: first.keyPath)
@@ -136,19 +142,22 @@ struct SongsView: View {
             Text(s.position.map { String($0 + 1) } ?? "").foregroundStyle(.secondary).monospacedDigit()
         }
         .width(min: 24, ideal: 30, max: 44)
+        .customizationID("pos")
         .defaultVisibility(model.query.playlist == nil ? .hidden : .visible)
         TableColumn("Title", value: \.title) { s in
             Text(s.title).lineLimit(1).opacity(s.playable ? 1 : 0.45)
         }
-        .width(min: 140, ideal: 240)
-        TableColumn("Karaoke") { s in
+        .width(min: 140, ideal: 210)
+        .customizationID("title")
+        TableColumn(Text(Image(systemName: "music.mic")).accessibilityLabel("Karaoke")) { s in
             Image(systemName: s.playable ? "music.mic" : "hourglass")
                 .foregroundStyle(s.playable ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                 .help(s.playable ? "Ready for karaoke" : "Not ready yet (still importing, or an import step failed)")
                 .frame(maxWidth: .infinity)
         }
-        .width(min: 28, ideal: 52, max: 60)
-        TableColumn("Lyrics") { s in
+        .width(min: 24, ideal: 28, max: 40)
+        .customizationID("karaoke")
+        TableColumn(Text(Image(systemName: "text.bubble")).accessibilityLabel("Lyrics")) { s in
             Group {
                 if s.hasWords {
                     Image(systemName: "text.bubble.fill").foregroundStyle(.secondary).help("Word-by-word timing")
@@ -158,47 +167,66 @@ struct SongsView: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .width(min: 28, ideal: 44, max: 56)
-        TableColumn("Video") { s in
+        .width(min: 24, ideal: 28, max: 40)
+        .customizationID("lyrics")
+        TableColumn(Text(Image(systemName: "film")).accessibilityLabel("Video")) { s in
             Group {
                 if s.hasVideo { Image(systemName: "film").foregroundStyle(.secondary).help("Music video") }
             }
             .frame(maxWidth: .infinity)
         }
-        .width(min: 28, ideal: 42, max: 56)
-        TableColumn("Explicit") { s in
+        .width(min: 24, ideal: 28, max: 40)
+        .customizationID("video")
+        TableColumn(Text(Image(systemName: "e.square")).accessibilityLabel("Explicit")) { s in
             Group {
                 if s.explicit == true { Image(systemName: "e.square.fill").foregroundStyle(.secondary).help("Explicit") }
             }
             .frame(maxWidth: .infinity)
         }
-        .width(min: 28, ideal: 50, max: 60)
+        .width(min: 24, ideal: 28, max: 40)
+        .customizationID("explicit")
     }
 
     @TableColumnBuilder<SongRow, KeyPathComparator<SongRow>>
     private var detailColumns: some TableColumnContent<SongRow, KeyPathComparator<SongRow>> {
         TableColumn("Artist", value: \.artists) { s in Text(s.artists).lineLimit(1) }
-            .width(min: 100, ideal: 170)
+            .width(min: 100, ideal: 150)
+            .customizationID("artist")
         TableColumn("Year", value: \.sYear) { s in Text(s.year.map(String.init) ?? "").monospacedDigit() }
             .width(min: 36, ideal: 44, max: 60)
+            .customizationID("year")
         TableColumn("Time", value: \.durationMs) { s in Text(Fmt.time(ms: s.durationMs)).monospacedDigit() }
             .width(min: 40, ideal: 48, max: 60)
+            .customizationID("time")
         TableColumn("BPM", value: \.sBpm) { s in Text(s.bpm.map { String(Int($0.rounded())) } ?? "").monospacedDigit() }
             .width(min: 34, ideal: 42, max: 56)
+            .customizationID("bpm")
         TableColumn("Key", value: \.sKey) { s in Text(s.musicalKey ?? "").lineLimit(1) }
             .width(min: 50, ideal: 70, max: 90)
+            .customizationID("key")
+            .defaultVisibility(.hidden)
         TableColumn("Dance", value: \.sDance) { s in DanceBar(value: s.danceability) }
             .width(min: 50, ideal: 70, max: 100)
+            .customizationID("dance")
         TableColumn("Style", value: \.sStyle) { s in
             Text(s.styleName ?? "").lineLimit(1).help(s.style ?? "")
         }
-        .width(min: 80, ideal: 140)
+        .width(min: 80, ideal: 120)
+        .customizationID("style")
         TableColumn("Plays", value: \.plays) { s in
             Text(s.plays > 0 ? String(s.plays) : "")
                 .monospacedDigit()
                 .help(s.lastPlayed.map { "Last played " + Fmt.ago(unix: $0) } ?? "Never played")
         }
         .width(min: 34, ideal: 42, max: 60)
+        .customizationID("plays")
+    }
+
+    private static var savedColumns: TableColumnCustomization<SongRow> {
+        guard let data = UserDefaults.standard.data(forKey: "songColumns"),
+            let c = try? JSONDecoder().decode(TableColumnCustomization<SongRow>.self, from: data)
+        else { return TableColumnCustomization<SongRow>() }
+        return c
     }
 
     private var subtitle: String {

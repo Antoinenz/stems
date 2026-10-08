@@ -9,12 +9,14 @@ struct MachinesScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(StemsClient.self) private var client
     @State private var managing = false
+    @State private var settings = false
     @State private var info: ServerInfo?
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 16, alignment: .top)], spacing: 16) {
                 ThisMacCard()
+                LibraryCard()
                 if let sep = client.status?.separation {
                     if sep.workers.isEmpty && sep.backend == "remote" {
                         Card(title: "Separation Worker", symbol: "cpu", status: ("Not connected", .warning)) {
@@ -35,6 +37,13 @@ struct MachinesScreen: View {
                 Button("Manage Machines…", systemImage: "slider.horizontal.3") { managing = true }
                     .help("Workers, how they connect, adding machines")
             }
+            ToolbarItem {
+                Button("Server Settings…", systemImage: "gearshape.2") { settings = true }
+                    .help("Every server setting")
+            }
+        }
+        .sheet(isPresented: $settings) {
+            ServerSettingsView().frame(minWidth: 620, minHeight: 640)
         }
         .sheet(isPresented: $managing) {
             ManageMachines(info: info).frame(minWidth: 560, minHeight: 560)
@@ -165,17 +174,6 @@ struct ThisMacCard: View {
                 Row(label: "Dropouts", value: a.dropoutSeconds == 0 ? "None" : "\(a.dropoutMs) ms in \(a.dropoutSeconds) s")
                 Row(label: "Up for", value: Duration.seconds(a.uptimeS).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
             }
-            if let lib = s?.library {
-                Divider()
-                Row(label: "Library drive", value: lib.available ? "Connected" : "Not found")
-                Row(label: "Songs ready", value: "\(lib.playable) of \(lib.tracks)")
-                if lib.totalBytes > 0 {
-                    Meter(
-                        label: "Disk", value: Double(lib.totalBytes - lib.freeBytes) / Double(lib.totalBytes),
-                        text: ByteCountFormatter.string(fromByteCount: lib.freeBytes, countStyle: .file) + " free", warnAbove: 0.95)
-                }
-                if let cur = lib.import?.current { Row(label: "Importing", value: cur) }
-            }
             HStack {
                 Button("Restart Server") { sup.restart() }.disabled(sup.state == .external)
                 Spacer()
@@ -235,6 +233,9 @@ struct ScreensCard: View {
     var body: some View {
         let n = client.status?.clients?.apps["stage"] ?? 0
         Card(title: "Lyrics Screen", symbol: "tv", subtitle: "The stage view", status: n == 0 ? ("None connected", .warning) : (n == 1 ? "Connected" : "\(n) connected", .ok)) {
+            Picker("Shows", selection: Binding(get: { client.state.viewMode }, set: { client.send(.setViewMode($0)) })) {
+                ForEach(ViewMode.allCases, id: \.self) { m in Label(m.title, systemImage: m.symbol).tag(m) }
+            }
             if let url = info?.stageUrl {
                 Row(label: "Address", value: url)
             }
@@ -267,6 +268,90 @@ struct PhonesCard: View {
         case "stage": "Lyrics screen"
         default: app
         }
+    }
+}
+
+struct LibraryCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(StemsClient.self) private var client
+    @State private var unfinished: [SongRow] = []
+    @State private var working: String?
+    @State private var settings = false
+
+    var body: some View {
+        let lib = client.status?.library
+        Card(title: "Library", symbol: "music.note.house", subtitle: lib?.dir, status: health(lib)) {
+            if let lib {
+                Row(label: "Songs ready", value: "\(lib.playable) of \(lib.tracks)")
+                if lib.totalBytes > 0 {
+                    Meter(
+                        label: "Disk", value: Double(lib.totalBytes - lib.freeBytes) / Double(lib.totalBytes),
+                        text: ByteCountFormatter.string(fromByteCount: lib.freeBytes, countStyle: .file) + " free", warnAbove: 0.95)
+                }
+                if let cur = lib.import?.current { Row(label: "Downloading", value: cur) }
+                if let w = lib.import?.waiting, w > 0 { Row(label: "Waiting", value: String(w)) }
+                if let e = lib.import?.lastError {
+                    Text(e).font(.caption).foregroundStyle(.orange).lineLimit(3).textSelection(.enabled)
+                }
+            }
+            if !unfinished.isEmpty {
+                HStack {
+                    Text("\(unfinished.count) not ready yet").font(.callout)
+                    Spacer()
+                    Button("Show") {
+                        model.librarySelection = .unfinished
+                        model.destination = .library
+                    }
+                    Button("Retry All") { retryAll() }
+                        .help("Import them again; only missing or failed steps are redone")
+                }
+            }
+            Divider()
+            HStack {
+                Button("Show in Finder") {
+                    if let d = lib?.dir { NSWorkspace.shared.open(URL(fileURLWithPath: d)) }
+                }
+                .disabled(lib?.available != true)
+                Button("Rebuild Index") {
+                    working = "Rebuilding…"
+                    Task {
+                        try? await client.api.reindex()
+                        working = nil
+                        await loadUnfinished()
+                    }
+                }
+                .help("Re-read every song folder (after editing files by hand)")
+                Button("Move…") { settings = true }
+                    .help("Use another folder or drive for the library")
+                Spacer()
+                if let working { ProgressView().controlSize(.small).help(working) }
+            }
+        }
+        .task(id: client.connection.isConnected) {
+            while !Task.isCancelled {
+                await loadUnfinished()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+        .sheet(isPresented: $settings) { ServerSettingsView().frame(minWidth: 620, minHeight: 640) }
+    }
+
+    private func health(_ lib: LibraryStatus?) -> (String, Health) {
+        guard let lib else { return ("Unknown", .off) }
+        if !lib.available { return ("Drive missing", .problem) }
+        if lib.totalBytes > 0, Double(lib.freeBytes) / Double(lib.totalBytes) < 0.05 { return ("Almost full", .warning) }
+        if lib.import?.current != nil { return ("Downloading", .ok) }
+        return ("OK", .ok)
+    }
+
+    private func loadUnfinished() async {
+        unfinished = (try? await client.api.songs(SongQuery(unfinished: true), limit: 1000).songs) ?? unfinished
+    }
+
+    private func retryAll() {
+        let links = unfinished.compactMap(\.spotifyURL).map(\.absoluteString)
+        guard !links.isEmpty else { return }
+        Task { try? await client.api.importSources(links) }
     }
 }
 
