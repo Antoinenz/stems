@@ -147,7 +147,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_writer(|| QuietStderr)
         .init();
 
     // librespot uses ring; reqwest is built without a provider so both
@@ -289,6 +289,28 @@ fn main() -> Result<()> {
                     std::process::exit(1)
                 }
             }
+        }
+    }
+}
+
+/// stderr for logs that shrugs off a closed pipe. When the app that
+/// started the server goes away, its end of the log pipe closes; the
+/// logger would then report the failed write with `eprintln!`, which
+/// panics, taking down whichever task was logging.
+struct QuietStderr;
+
+impl std::io::Write for QuietStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match std::io::stderr().write(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(buf.len()),
+            other => other,
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match std::io::stderr().flush() {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            other => other,
         }
     }
 }
