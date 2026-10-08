@@ -41,6 +41,7 @@ struct LibraryScreen: View {
     @State private var data = LibraryData()
     @AppStorage("libraryBrowse") private var browse = "playlists"
     @AppStorage("showSongInspector") private var showInspector = true
+    @AppStorage("spotifySearch") private var spotifySearch = true
     @State private var search = ""
     @State private var selectedSong: String?
     @State private var naming: Naming?
@@ -67,8 +68,15 @@ struct LibraryScreen: View {
             browser
                 .frame(width: 230)
             Divider()
-            songs(model.librarySelection ?? .all)
-                .frame(maxWidth: .infinity)
+            VStack(spacing: 0) {
+                songs(model.librarySelection ?? .all)
+                if spotifySearch && search.trimmingCharacters(in: .whitespaces).count >= 2 {
+                    Divider()
+                    SpotifyPanel(search: search)
+                        .frame(height: 260)
+                }
+            }
+            .frame(maxWidth: .infinity)
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
         .inspector(isPresented: $showInspector) {

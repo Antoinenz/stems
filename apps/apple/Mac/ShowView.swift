@@ -31,6 +31,8 @@ struct AddSongsField: View {
     @State private var results: [SongRow] = []
     @State private var showing = false
     @State private var requesting: RequestTarget?
+    @State private var spotify = SpotifySearchModel()
+    @AppStorage("spotifySearch") private var spotifySearch = true
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -64,7 +66,12 @@ struct AddSongsField: View {
             query.q = q
             query.playable = true
             results = (try? await client.api.songs(query, limit: 8).songs) ?? []
-            showing = !results.isEmpty && focused
+            showing = (!results.isEmpty || spotifySearch) && focused
+            if spotifySearch {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                await spotify.search(q, client: client, limit: 5)
+            }
         }
         .sheet(item: $requesting) { RequestSheet(track: $0).frame(minWidth: 420, minHeight: 380) }
     }
@@ -92,6 +99,23 @@ struct AddSongsField: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
+            }
+            if spotifySearch {
+                if !list.isEmpty { Divider().padding(.vertical, 4) }
+                HStack {
+                    Text("On Spotify").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    if spotify.searching { ProgressView().controlSize(.mini) }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 2)
+                if let e = spotify.error {
+                    Text(e).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10)
+                }
+                ForEach(spotify.hits.filter { $0.status != .ready }) { h in
+                    SpotifyHitRow(hit: h, model: spotify)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                }
             }
         }
         .padding(.vertical, 6)

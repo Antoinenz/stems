@@ -30,6 +30,9 @@ struct GeneralSettings: View {
     @AppStorage("stemsdPath") private var stemsdPath = ""
     @AppStorage("stemsdConfig") private var configPath = ""
     @AppStorage("previewDeviceUID") private var previewDevice = ""
+    @AppStorage("spotifySearch") private var spotifySearch = true
+    @State private var ntfy = ""
+    @State private var ntfySaved = ""
 
     var body: some View {
         Form {
@@ -48,6 +51,20 @@ struct GeneralSettings: View {
                 }
             } footer: {
                 Text("Song previews play here, never on the party speakers. Choose headphones to listen without anyone hearing.")
+            }
+            Section {
+                Toggle("Search Spotify Too", isOn: $spotifySearch)
+            } footer: {
+                Text("Searches also show songs on Spotify you can download. Turn off when the internet is slow or offline.")
+            }
+            Section {
+                TextField("Phone Notifications Topic", text: $ntfy, prompt: Text("e.g. stems-antoine-8h2k"))
+                    .onSubmit(saveNtfy)
+                if ntfy != ntfySaved {
+                    Button("Save and Restart Server", action: saveNtfy)
+                }
+            } footer: {
+                Text("Install the free ntfy app on your phone and subscribe to this topic to be told when someone asks to sing. Pick something hard to guess.")
             }
             Section {
                 Toggle("Show in Menu Bar", isOn: $showMenuBarExtra)
@@ -95,6 +112,20 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+        .task(id: model.client.connection.isConnected) {
+            ntfy = (try? await model.client.api.settings())?.string("notify.ntfy") ?? ""
+            ntfySaved = ntfy
+        }
+    }
+
+    private func saveNtfy() {
+        let topic = ntfy.trimmingCharacters(in: .whitespaces)
+        Task {
+            _ = try? await model.client.setSetting("notify.ntfy", .string(topic))
+            ntfySaved = topic
+            ntfy = topic
+            model.supervisor.restart()
+        }
     }
 
     private func chooseConfig() {

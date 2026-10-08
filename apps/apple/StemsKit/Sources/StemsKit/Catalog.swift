@@ -294,3 +294,46 @@ extension API {
         _ = try await send(method: "DELETE", "/api/library/playlists/\(id)", body: Optional<String>.none)
     }
 }
+
+/// A Spotify search result, for downloading songs the library lacks.
+public struct SpotifyHit: Codable, Hashable, Identifiable, Sendable {
+    public enum Status: String, Codable, Sendable {
+        /// In the library and playable.
+        case ready
+        /// Asked for; downloading or waiting.
+        case queued
+        /// In the library but not playable yet (an import stopped part way).
+        case incomplete
+        case new
+
+        public init(from decoder: Decoder) throws {
+            self = Status(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .new
+        }
+    }
+
+    public var id: String
+    public var url: String
+    public var key: String
+    public var title: String
+    public var artists: [String]
+    public var album: String
+    public var durationMs: Int
+    public var art: String?
+    public var year: String?
+    public var explicit: Bool
+    public var status: Status
+
+    public var artistLine: String { artists.joined(separator: ", ") }
+
+    enum CodingKeys: String, CodingKey {
+        case id, url, key, title, artists, album, art, year, explicit, status
+        case durationMs = "duration_ms"
+    }
+}
+
+extension API {
+    /// Search Spotify (host only). Slow-ish: a second or two.
+    public func spotifySearch(_ q: String, limit: Int = 10) async throws -> [SpotifyHit] {
+        try await getJSON("/api/library/spotify", query: [URLQueryItem(name: "q", value: q), URLQueryItem(name: "limit", value: String(limit))])
+    }
+}
