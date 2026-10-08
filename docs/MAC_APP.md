@@ -124,3 +124,15 @@ live status; workers and screens report their own system stats.
 3. Song page, playlists with folders, smart lists, Mac-speaker preview.
 4. Machines: per-machine status and the manage panel.
 5. Auto-DJ, Spotify search/download, notifications.
+
+Steps 1–5 are in, except smart lists. Notes:
+
+- Spotify search uses the saved import login and Spotify's own search
+  context (the Web API refuses librespot's client). Results come back
+  deduplicated and marked `ready` / `queued` / `incomplete` / `new`.
+  Settings › General › Search Spotify Too switches it off.
+- Phone notifications: Settings › General › Phone Notifications Topic
+  (`[notify] ntfy`); saving restarts the server.
+- Manage Machines writes `karaoke.backend`, `karaoke.remote` (dial list
+  in priority order, plus `listen:<port>`) and `karaoke.local_fallback`;
+  these apply after a restart.
