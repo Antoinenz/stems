@@ -252,6 +252,104 @@ impl LibraryApi for LibraryService {
             .map_err(|e| format!("{e:#}"))
     }
 
+    fn preview(&self, key: &str, stem: &str, start_ms: u64, secs: u64) -> Result<Vec<u8>, String> {
+        preview_wav(&self.lib, key, stem, start_ms, secs).map_err(|e| format!("{e:#}"))
+    }
+
+    fn folders(&self) -> Result<Value, String> {
+        Ok(self
+            .lib
+            .load_state::<Value>(stems_library::FOLDERS_FILE)
+            .map_err(|e| format!("{e:#}"))?
+            .unwrap_or_else(|| json!({"folders": []})))
+    }
+
+    fn set_folders(&self, doc: Value) -> Result<(), String> {
+        // validate the shape: a list of {name, playlists}
+        let folders = doc
+            .get("folders")
+            .and_then(Value::as_array)
+            .ok_or("expected {\"folders\": [...]}")?;
+        for f in folders {
+            if f.get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|n| n.trim().is_empty())
+            {
+                return Err("every folder needs a name".into());
+            }
+            if !f.get("playlists").is_some_and(Value::is_array) {
+                return Err("every folder needs a playlists list".into());
+            }
+        }
+        self.lib
+            .save_state(stems_library::FOLDERS_FILE, &doc)
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    fn create_playlist(&self, name: &str, keys: Vec<String>) -> Result<Value, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a playlist needs a name".into());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = stems_library::Playlist {
+            id: format!("local_{now:x}"),
+            kind: "local".into(),
+            name: name.into(),
+            url: None,
+            description: String::new(),
+            tracks: keys,
+            updated_at: (now / 1_000_000_000) as u64,
+        };
+        self.lib.save_playlist(&p).map_err(|e| format!("{e:#}"))?;
+        Ok(json!(p))
+    }
+
+    fn edit_playlist(
+        &self,
+        id: &str,
+        name: Option<String>,
+        tracks: Option<Vec<String>>,
+        add: Vec<String>,
+    ) -> Result<Value, String> {
+        let mut p = self
+            .lib
+            .get_playlist(id)
+            .map_err(|e| format!("{e:#}"))?
+            .ok_or("no such playlist")?;
+        if p.kind != "local" {
+            return Err("imported playlists can't be edited (they come from Spotify)".into());
+        }
+        if let Some(n) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+            p.name = n;
+        }
+        if let Some(t) = tracks {
+            p.tracks = t;
+        }
+        for k in add {
+            if !p.tracks.contains(&k) {
+                p.tracks.push(k);
+            }
+        }
+        self.lib.save_playlist(&p).map_err(|e| format!("{e:#}"))?;
+        Ok(json!(p))
+    }
+
+    fn delete_playlist(&self, id: &str) -> Result<(), String> {
+        let p = self
+            .lib
+            .get_playlist(id)
+            .map_err(|e| format!("{e:#}"))?
+            .ok_or("no such playlist")?;
+        if p.kind != "local" {
+            return Err("imported playlists can't be deleted here".into());
+        }
+        self.lib.delete_playlist(id).map_err(|e| format!("{e:#}"))
+    }
+
     fn genres(&self) -> Result<Value, String> {
         let conn = index::open(&self.lib).map_err(|e| format!("{e:#}"))?;
         index::genre_counts(&conn)
@@ -399,4 +497,62 @@ async fn keep_index_fresh(lib: Library) {
         }
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     }
+}
+
+/// A WAV clip (16-bit stereo 44.1 kHz) of the mix, the instrumental or
+/// the vocals (mix − instrumental). `start_ms = u64::MAX` starts a third of
+/// the way in, usually past the intro.
+fn preview_wav(
+    lib: &Library,
+    key: &str,
+    stem: &str,
+    start_ms: u64,
+    secs: u64,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::{Context, anyhow};
+    let e = lib.get(key)?.ok_or_else(|| anyhow!("no such song"))?;
+    let mix_path = lib.files(&e).mix.ok_or_else(|| anyhow!("no audio"))?;
+    let mix = stems_source_file::decode_file(&mix_path).context("decode the mix")?;
+    let frames = mix.len() / 2;
+    let start = if start_ms == u64::MAX {
+        frames / 3
+    } else {
+        (stems_core::ms_to_frames(start_ms) as usize).min(frames)
+    };
+    let end = (start + secs as usize * stems_core::SAMPLE_RATE as usize).min(frames);
+    let range = start * 2..end * 2;
+    let pcm: Vec<f32> = match stem {
+        "mix" => mix[range].to_vec(),
+        "instrumental" | "vocals" => {
+            let inst = lib.read_instrumental(&e).context("read the instrumental")?;
+            if inst.len() != mix.len() {
+                return Err(anyhow!("instrumental doesn't match the mix"));
+            }
+            if stem == "instrumental" {
+                inst[range].to_vec()
+            } else {
+                mix[range.clone()]
+                    .iter()
+                    .zip(&inst[range])
+                    .map(|(m, i)| m - i)
+                    .collect()
+            }
+        }
+        other => return Err(anyhow!("unknown stem `{other}`")),
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: stems_core::SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::new(&mut out, spec)?;
+        for s in pcm {
+            w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)?;
+        }
+        w.finalize()?;
+    }
+    Ok(out.into_inner())
 }

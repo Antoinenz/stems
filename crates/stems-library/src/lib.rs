@@ -52,6 +52,8 @@ pub const INSTRUMENTAL_FILE: &str = "instrumental.wav";
 pub const INSTRUMENTAL_FLAC_FILE: &str = "instrumental.flac";
 pub const PLAYLISTS_DIR: &str = "playlists";
 pub const SENT_FILE: &str = ".sent";
+/// How the host groups playlists into folders (`folders.json`).
+pub const FOLDERS_FILE: &str = "folders.json";
 pub const LYRICS_FILE: &str = "lyrics.json";
 pub const LYRICS_OVERRIDE_FILE: &str = "lyrics.lrc";
 pub const VIDEO_FILE: &str = "video.mp4";
@@ -324,6 +326,14 @@ impl Library {
         Ok(Some(
             serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
         ))
+    }
+
+    pub fn delete_playlist(&self, id: &str) -> Result<()> {
+        let path = self
+            .dir
+            .join(PLAYLISTS_DIR)
+            .join(format!("{}.json", sanitize(id, 100)));
+        remove_if_exists(&path)
     }
 
     /// Every playlist, by name.

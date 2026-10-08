@@ -175,6 +175,46 @@ pub trait LibraryApi: Send + Sync {
     fn genres(&self) -> Result<serde_json::Value, String> {
         Err("not supported".into())
     }
+    /// A WAV clip of a song for previewing: `stem` is `mix`,
+    /// `instrumental` or `vocals`.
+    fn preview(
+        &self,
+        _key: &str,
+        _stem: &str,
+        _start_ms: u64,
+        _secs: u64,
+    ) -> Result<Vec<u8>, String> {
+        Err("not supported".into())
+    }
+    /// The host's playlist folders: `{"folders": [{"name", "playlists": [ids]}]}`.
+    fn folders(&self) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    fn set_folders(&self, _doc: serde_json::Value) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    /// Make a playlist of the host's own; returns it.
+    fn create_playlist(
+        &self,
+        _name: &str,
+        _keys: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    /// Rename and/or replace the songs of one of the host's playlists, or
+    /// add songs to it.
+    fn edit_playlist(
+        &self,
+        _id: &str,
+        _name: Option<String>,
+        _tracks: Option<Vec<String>>,
+        _add: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
+        Err("not supported".into())
+    }
+    fn delete_playlist(&self, _id: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
 }
 
 /// Everything optional the router serves.
@@ -331,7 +371,16 @@ impl Server {
             )
             .route("/api/library/songs", get(get_songs))
             .route("/api/library/songs/{key}", get(get_song))
-            .route("/api/library/playlists", get(get_playlists))
+            .route(
+                "/api/library/playlists",
+                get(get_playlists).post(post_playlist),
+            )
+            .route(
+                "/api/library/playlists/{id}",
+                axum::routing::patch(patch_playlist).delete(delete_playlist),
+            )
+            .route("/api/library/folders", get(get_folders).put(put_folders))
+            .route("/api/library/songs/{key}/preview", get(get_preview))
             .route("/api/library/genres", get(get_genres))
             .route("/api/info", {
                 let name = device_name.clone();
@@ -582,6 +631,123 @@ async fn get_genres(
         .map_err(|e| unavailable(e.to_string()))?
         .map(Json)
         .map_err(unavailable)
+}
+
+#[derive(serde::Deserialize)]
+struct PreviewQuery {
+    #[serde(default = "default_stem")]
+    stem: String,
+    #[serde(default)]
+    start_ms: Option<u64>,
+    #[serde(default)]
+    secs: Option<u64>,
+}
+
+fn default_stem() -> String {
+    "mix".into()
+}
+
+async fn get_preview(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PreviewQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    // a third of the way in is usually past the intro
+    let start = q.start_ms.unwrap_or(u64::MAX);
+    let secs = q.secs.unwrap_or(30).clamp(5, 120);
+    let wav = tokio::task::spawn_blocking(move || lib.preview(&key, &q.stem, start, secs))
+        .await
+        .map_err(|e| unavailable(e.to_string()))?
+        .map_err(unavailable)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav))
+}
+
+async fn get_folders(
+    State(app): State<App>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    lib.folders().map(Json).map_err(unavailable)
+}
+
+async fn put_folders(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    Json(doc): Json<serde_json::Value>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    lib.set_folders(doc)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(bad_request)
+}
+
+#[derive(serde::Deserialize)]
+struct NewPlaylist {
+    name: String,
+    #[serde(default)]
+    tracks: Vec<String>,
+}
+
+async fn post_playlist(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    Json(req): Json<NewPlaylist>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    lib.create_playlist(&req.name, req.tracks)
+        .map(Json)
+        .map_err(bad_request)
+}
+
+#[derive(serde::Deserialize)]
+struct EditPlaylist {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tracks: Option<Vec<String>>,
+    #[serde(default)]
+    add: Vec<String>,
+}
+
+async fn patch_playlist(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<EditPlaylist>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    lib.edit_playlist(&id, req.name, req.tracks, req.add)
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn delete_playlist(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    RawQuery(query): RawQuery,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    host_only(&app, &headers, query.as_deref())?;
+    let lib = app.library.clone().ok_or_else(no_library)?;
+    lib.delete_playlist(&id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(bad_request)
+}
+
+fn bad_request(e: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": e})),
+    )
 }
 
 #[derive(serde::Deserialize)]
