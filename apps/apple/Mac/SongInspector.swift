@@ -51,22 +51,31 @@ struct SongInspector: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // actions
-                HStack {
-                    Button("Sing…", systemImage: "music.mic") { requesting = RequestTarget(t) }
+                // actions: two rows so the labels never get cut off
+                Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                    GridRow {
+                        Button { requesting = RequestTarget(t) } label: {
+                            Label("Sing…", systemImage: "music.mic").frame(maxWidth: .infinity)
+                        }
                         .disabled(!t.playable)
-                    Button("Add", systemImage: "plus") {
-                        client.send(.enqueue(key: t.key, singer: nil, next: false, kind: .play))
-                    }
-                    .disabled(!t.playable)
-                    Button("Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
-                        client.send(.enqueue(key: t.key, singer: nil, next: true, kind: .play))
-                    }
-                    .disabled(!t.playable)
-                    Button("Preview", systemImage: "headphones") { openWindow(id: "preview", value: t.key) }
+                        Button { openWindow(id: "preview", value: t.key) } label: {
+                            Label("Preview", systemImage: "headphones").frame(maxWidth: .infinity)
+                        }
                         .help("Listen on this Mac with lyrics and video (never on the party speakers)")
+                    }
+                    GridRow {
+                        Button { client.send(.enqueue(key: t.key, singer: nil, next: false, kind: .play)) } label: {
+                            Label("Queue", systemImage: "text.badge.plus").frame(maxWidth: .infinity)
+                        }
+                        .help("Add to the end of the queue")
+                        .disabled(!t.playable)
+                        Button { client.send(.enqueue(key: t.key, singer: nil, next: true, kind: .play)) } label: {
+                            Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward").frame(maxWidth: .infinity)
+                        }
+                        .disabled(!t.playable)
+                    }
                 }
-                .controlSize(.small)
+                .lineLimit(1)
 
                 if let a = d.analysis { analysis(a) }
 

@@ -22,7 +22,7 @@ extension PartyMode {
         }
     }
 
-    var explanation: LocalizedStringKey {
+    public var explanation: LocalizedStringKey {
         switch self {
         case .background: "Chill music from your chosen playlists, quieter. Guest requests are off."
         case .party: "Music never stops; guests can request songs to play."
@@ -52,7 +52,7 @@ extension ViewMode {
 }
 
 extension AfterSong {
-    var title: LocalizedStringKey {
+    public var title: LocalizedStringKey {
         switch self {
         case .continue: "Keep Playing"
         case .hold: "Stop After This Song"
@@ -60,7 +60,7 @@ extension AfterSong {
         }
     }
 
-    var symbol: String {
+    public var symbol: String {
         switch self {
         case .continue: "forward.end"
         case .hold: "stop.circle"
@@ -201,11 +201,13 @@ public struct ShowControls: View {
 }
 
 /// Ducks the music while held down, like a push-to-talk button.
-struct TalkOverButton: View {
+public struct TalkOverButton: View {
     @Environment(StemsClient.self) private var client
     @State private var pressed = false
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         Label("Talk", systemImage: pressed ? "mic.fill" : "mic")
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -225,13 +227,15 @@ struct TalkOverButton: View {
 }
 
 /// Pick the playlists the auto-DJ draws from.
-struct PoolPicker: View {
+public struct PoolPicker: View {
     @Environment(StemsClient.self) private var client
     @Environment(\.dismiss) private var dismiss
     @State private var playlists: [PlaylistRow] = []
     @State private var chosen: Set<String> = []
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         NavigationStack {
             List {
                 Section {

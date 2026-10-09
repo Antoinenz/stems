@@ -1,28 +1,9 @@
-// The main view for running the night: what's playing on the left, the
-// queue on the right, and a search field to add songs without leaving.
+// The field at the top of the queue for finding and adding songs (from the
+// library, and from Spotify when that's on).
 
 import StemsKit
 import StemsUI
 import SwiftUI
-
-struct ShowView: View {
-    var body: some View {
-        // fixed queue width: split views fight the queue list for width
-        HStack(spacing: 0) {
-            NowPlayingView()
-                .frame(minWidth: 380, maxWidth: .infinity)
-            Divider()
-            VStack(spacing: 0) {
-                AddSongsField()
-                    .padding(12)
-                Divider()
-                QueueView()
-            }
-            .frame(width: 380)
-        }
-        .navigationTitle("Now Playing")
-    }
-}
 
 /// Type to find a song; results drop down; queue it from there.
 struct AddSongsField: View {

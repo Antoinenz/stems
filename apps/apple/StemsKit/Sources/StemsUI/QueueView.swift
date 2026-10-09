@@ -122,11 +122,13 @@ public struct QueueView: View {
 }
 
 /// A queue entry: song, who sings it, sing or just play.
-struct QueueRow: View {
+public struct QueueRow: View {
     @Environment(StemsClient.self) private var client
     var item: QueueItem
 
-    var body: some View {
+    public init(item: QueueItem) { self.item = item }
+
+    public var body: some View {
         HStack(spacing: 12) {
             ArtworkView(url: client.url(for: item.track.art), size: 44)
             VStack(alignment: .leading, spacing: 2) {

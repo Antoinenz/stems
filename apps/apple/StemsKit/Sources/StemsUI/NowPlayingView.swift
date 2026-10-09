@@ -99,11 +99,13 @@ extension PlaybackState {
 }
 
 /// Elapsed / remaining with a seek slider.
-struct ProgressSection: View {
+public struct ProgressSection: View {
     @Environment(StemsClient.self) private var client
     @State private var scrubbing: Double?
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         let duration = Double(client.state.track?.durationMs ?? 0)
         TimelineView(.periodic(from: .now, by: 0.25)) { _ in
             let position = scrubbing ?? Double(min(client.position(), Int(duration)))

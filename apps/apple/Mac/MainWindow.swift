@@ -46,6 +46,9 @@ struct MainWindow: View {
                         .tag(Destination.guests)
                 }
             }
+            // solid like every other pane (no desktop showing through)
+            .scrollContentBackground(.hidden)
+            .surface(Surface.pane)
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
         } detail: {
             // banners push the content down (a safe-area inset is ignored
@@ -69,38 +72,19 @@ struct MainWindow: View {
         .sheet(isPresented: $debugSettings) { ServerSettingsView().frame(minWidth: 620, minHeight: 640) }
         #endif
         .toolbar {
-            // playback controls only where the show is (no stray pauses
-            // while browsing or typing elsewhere)
-            if (model.destination ?? .show) == .show {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        client.togglePlayPause()
-                    } label: {
-                        Label(
-                            client.state.status == .playing ? "Pause" : "Play",
-                            systemImage: client.state.status == .playing ? "pause.fill" : "play.fill")
-                    }
-                    .help("Play or pause")
-                    .disabled(!client.connection.isConnected)
-
-                    Button("Next Song", systemImage: "forward.fill") { client.send(.next) }
-                        .help("Skip to the next request")
-                        .disabled(!client.connection.isConnected)
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                DownloadsButton()
-            }
         }
     }
 
     @ViewBuilder
     private func detail(_ d: Destination) -> some View {
         switch d {
-        case .show: ShowView()
+        case .show: NowPlayingScreen()
         case .library: LibraryScreen()
         case .machines: MachinesScreen()
-        case .guests: GuestsView()
+        case .guests:
+            GuestsView()
+                .surface(Surface.content)
+                .toolbar { ToolbarItem(placement: .primaryAction) { DownloadsButton() } }
         }
     }
 

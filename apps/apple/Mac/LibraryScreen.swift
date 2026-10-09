@@ -45,6 +45,7 @@ struct LibraryScreen: View {
     @State private var artistFilter = ""
     @AppStorage("libraryBrowserWidth") private var browserWidth = 250.0
     @AppStorage("songPanelWidth") private var panelWidth = 320.0
+    @AppStorage("showSongPanel") private var showPanel = true
     /// Sidebar sections the host folded away, by name.
     @AppStorage("collapsedLibrarySections") private var collapsedRaw = ""
     @AppStorage("spotifySearch") private var spotifySearch = true
@@ -73,6 +74,8 @@ struct LibraryScreen: View {
         HStack(spacing: 0) {
             browser
                 .frame(width: browserWidth)
+                .frame(maxHeight: .infinity)
+                .surface(Surface.pane)
             ResizeHandle(width: $browserWidth, range: 200...420, grows: .trailing)
             VStack(spacing: 0) {
                 songs(model.librarySelection ?? .all)
@@ -83,14 +86,30 @@ struct LibraryScreen: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .surface(Surface.content)
             // a plain side panel: the glass inspector let the table run
             // underneath it, ghosting rows and hiding the last columns
-            ResizeHandle(width: $panelWidth, range: 260...560, grows: .leading)
-            SongInspector(key: selectedSong)
-                .frame(width: panelWidth)
-                .background(.background)
+            if showPanel {
+                ResizeHandle(width: $panelWidth, range: 260...560, grows: .leading)
+                SongInspector(key: selectedSong)
+                    .frame(width: panelWidth)
+                    .frame(maxHeight: .infinity)
+                    .surface(Surface.pane)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) { DownloadsButton() }
+            ToolbarItem(placement: .primaryAction) {
+                Button(showPanel ? "Hide Song Panel" : "Show Song Panel", systemImage: "sidebar.right") {
+                    withAnimation(.easeInOut(duration: 0.2)) { showPanel.toggle() }
+                }
+                .help(showPanel ? "Hide the song details" : "Show the song details")
+            }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Songs, artists, lyrics")
+        #if DEBUG
+        .task { if let k = UserDefaults.standard.string(forKey: "debugSelectSong") { selectedSong = k } }
+        #endif
         .task(id: client.connection.isConnected) {
             // new imports add playlists and genres
             while !Task.isCancelled {
@@ -147,6 +166,9 @@ struct LibraryScreen: View {
                         } header: {
                             Label(folder.name, systemImage: "folder")
                                 .contextMenu {
+                                    Button("New Playlist…") { ask(.newPlaylist(songs: [])) }
+                                    Button("New Folder…") { ask(.newFolder(playlist: nil)) }
+                                    Divider()
                                     Button("Delete Folder") {
                                         data.folders.folders.removeAll { $0.name == folder.name }
                                         data.saveFolders(client)
@@ -171,6 +193,12 @@ struct LibraryScreen: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .contextMenu {
+                // right-click on the empty part of the list
+                Button("New Playlist…") { ask(.newPlaylist(songs: [])) }
+                Button("New Folder…") { ask(.newFolder(playlist: nil)) }
+            }
             Divider()
             HStack {
                 Menu {

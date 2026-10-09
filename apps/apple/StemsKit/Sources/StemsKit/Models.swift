@@ -301,9 +301,11 @@ public struct ShowState: Codable, Hashable, Sendable {
     public var autoDj: Bool
     /// Playlist ids the auto-DJ picks from (empty: whole library).
     public var pool: [String]
+    /// What the auto-DJ plays next, in order.
+    public var upcoming: [QueueItem]
 
     enum CodingKeys: String, CodingKey {
-        case mode, held, staged, pool
+        case mode, held, staged, pool, upcoming
         case afterSong = "after_song"
         case talkOver = "talk_over"
         case autoDj = "auto_dj"
@@ -316,6 +318,7 @@ public struct ShowState: Codable, Hashable, Sendable {
         talkOver = false
         autoDj = true
         pool = []
+        upcoming = []
     }
 
     public init(from decoder: Decoder) throws {
@@ -327,6 +330,7 @@ public struct ShowState: Codable, Hashable, Sendable {
         talkOver = try c.decodeIfPresent(Bool.self, forKey: .talkOver) ?? false
         autoDj = try c.decodeIfPresent(Bool.self, forKey: .autoDj) ?? true
         pool = try c.decodeIfPresent([String].self, forKey: .pool) ?? []
+        upcoming = try c.decodeIfPresent([QueueItem].self, forKey: .upcoming) ?? []
     }
 }
 
@@ -349,6 +353,8 @@ public struct PlaybackState: Codable, Hashable, Sendable {
     public var media: Media
     /// Output volume 0…1.
     public var volume: Double
+    /// The music's level in the mixer, 0…1.
+    public var musicGain: Double
     public var show: ShowState
     public var revision: Int
 
@@ -357,6 +363,7 @@ public struct PlaybackState: Codable, Hashable, Sendable {
         case nextTrack = "next_track"
         case libraryKey = "library_key"
         case viewMode = "view_mode"
+        case musicGain = "music_gain"
     }
 
     public static let empty = PlaybackState()
@@ -369,6 +376,7 @@ public struct PlaybackState: Codable, Hashable, Sendable {
         viewMode = .lyrics
         media = Media()
         volume = 1
+        musicGain = 1
         show = ShowState()
         revision = 0
     }
@@ -388,6 +396,7 @@ public struct PlaybackState: Codable, Hashable, Sendable {
         viewMode = try c.decodeIfPresent(ViewMode.self, forKey: .viewMode) ?? .lyrics
         media = try c.decodeIfPresent(Media.self, forKey: .media) ?? Media()
         volume = try c.decodeIfPresent(Double.self, forKey: .volume) ?? 1
+        musicGain = try c.decodeIfPresent(Double.self, forKey: .musicGain) ?? 1
         show = try c.decodeIfPresent(ShowState.self, forKey: .show) ?? ShowState()
         revision = try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0
     }
@@ -442,6 +451,8 @@ public enum Command: Encodable, Hashable, Sendable {
     case resume
     case setAutoDj(Bool)
     case setPool([String])
+    /// The music's level in the mixer.
+    case setMusicGain(Double)
 
     private struct Key: CodingKey {
         var stringValue: String
@@ -517,7 +528,31 @@ public enum Command: Encodable, Hashable, Sendable {
         case .setPool(let ids):
             try cmd("set_pool")
             try c.encode(ids, forKey: Key("playlists"))
+        case .setMusicGain(let g):
+            try cmd("set_music_gain")
+            try c.encode(g, forKey: Key("gain"))
         }
+    }
+}
+
+/// Peak levels for the mixer's meters, linear 0…1, post-fader.
+public struct Levels: Codable, Hashable, Sendable {
+    public var music: Double
+    public var vocals: Double
+    public var outL: Double
+    public var outR: Double
+
+    enum CodingKeys: String, CodingKey {
+        case music, vocals
+        case outL = "out_l"
+        case outR = "out_r"
+    }
+
+    public init(music: Double = 0, vocals: Double = 0, outL: Double = 0, outR: Double = 0) {
+        self.music = music
+        self.vocals = vocals
+        self.outL = outL
+        self.outR = outR
     }
 }
 
@@ -527,6 +562,8 @@ public enum Inbound: Decodable, Sendable {
     case clock(ClockTick)
     /// The machines view (hosts only), about once a second.
     case status(MachineStatus)
+    /// Mixer meter peaks (hosts only), ~15 Hz while there is sound.
+    case levels(Levels)
     case error(String)
     case unknown(String)
 
@@ -539,6 +576,7 @@ public enum Inbound: Decodable, Sendable {
         case "state": self = .state(try PlaybackState(from: decoder))
         case "clock": self = .clock(try ClockTick(from: decoder))
         case "status": self = .status(try MachineStatus(from: decoder))
+        case "levels": self = .levels(try Levels(from: decoder))
         case "error": self = .error(try c.decodeIfPresent(String.self, forKey: .message) ?? "")
         default: self = .unknown(type)
         }

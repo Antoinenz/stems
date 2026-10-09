@@ -27,6 +27,9 @@ public final class StemsClient {
     public private(set) var clock = PlaybackClock()
     /// The machines view; hosts only, refreshed about once a second.
     public private(set) var status: MachineStatus?
+    /// Mixer meters (hosts only). Its own object so ~15 updates a second
+    /// only redraw the meters.
+    public let meters = MeterLevels()
     public private(set) var me: Me?
     /// Last thing that went wrong with a command, for a non-modal banner.
     public var lastError: String?
@@ -203,6 +206,7 @@ public final class StemsClient {
         case .state(let s): state = s
         case .clock(let t): clock.apply(t)
         case .status(let s): status = s
+        case .levels(let l): meters.levels = l
         case .error(let m): lastError = m
         case .unknown: break
         }
@@ -251,6 +255,7 @@ public final class StemsClient {
         case .setKaraoke(let on): state.karaoke.enabled = on
         case .setVocalGain(let g): state.karaoke.vocalGain = g
         case .setVolume(let v): state.volume = v
+        case .setMusicGain(let g): state.musicGain = g
         case .setViewMode(let m): state.viewMode = m
         case .dequeue(let id): state.queue.removeAll { $0.id == id }
         case .clearQueue: state.queue.removeAll()
@@ -279,4 +284,12 @@ public final class StemsClient {
     public func setSetting(_ key: String, _ value: JSONValue) async throws -> [String] {
         try await api.patchSettings(.patch(key, value)).restartRequired
     }
+}
+
+/// The latest meter peaks from the server.
+@MainActor
+@Observable
+public final class MeterLevels {
+    public var levels = Levels()
+    public init() {}
 }

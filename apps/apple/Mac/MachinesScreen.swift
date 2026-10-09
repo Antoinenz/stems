@@ -31,8 +31,10 @@ struct MachinesScreen: View {
             }
             .padding(20)
         }
+        .surface(Surface.content)
         .navigationTitle("Machines")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) { DownloadsButton() }
             ToolbarItem {
                 Button("Manage Machines…", systemImage: "slider.horizontal.3") { managing = true }
                     .help("Workers, how they connect, adding machines")
@@ -81,7 +83,7 @@ struct Card<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.secondary, in: .rect(cornerRadius: 14))
+        .background(Surface.raised, in: .rect(cornerRadius: 14))
     }
 }
 
