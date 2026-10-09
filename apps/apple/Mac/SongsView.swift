@@ -118,7 +118,11 @@ struct SongsView: View {
         } message: {
             Text("They leave the library and its playlists. The files go to the library’s trash folder, so you can put them back.")
         }
-        .task(id: model.query) { await model.load(client) }
+        // reload when the query changes, and once connected (the app can
+        // open before the server it starts is up)
+        .task(id: LoadKey(query: model.query, connected: client.connection.isConnected)) {
+            if client.connection.isConnected { await model.load(client) }
+        }
         .task(id: search) {
             try? await Task.sleep(for: .milliseconds(250))  // debounce typing
             model.query.q = search
@@ -357,6 +361,11 @@ struct SongBadges: View {
         if song.explicit == true { parts.append("explicit") }
         return parts.joined(separator: ", ")
     }
+}
+
+private struct LoadKey: Hashable {
+    let query: SongQuery
+    let connected: Bool
 }
 
 /// Danceability as a small bar (with the number on hover).

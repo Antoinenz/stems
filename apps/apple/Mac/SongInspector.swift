@@ -25,8 +25,8 @@ struct SongInspector: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: key) {
-            guard let key else { return }
+        .task(id: "\(key ?? "")|\(client.connection.isConnected)") {
+            guard let key, client.connection.isConnected else { return }
             do {
                 detail = try await client.api.song(key)
                 error = nil

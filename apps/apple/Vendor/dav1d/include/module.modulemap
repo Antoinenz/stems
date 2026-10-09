@@ -1,0 +1,5 @@
+module CDav1d {
+    header "dav1d/dav1d.h"
+    link "dav1d"
+    export *
+}

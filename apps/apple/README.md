@@ -76,3 +76,11 @@ place must never stop the music). ⌘1…⌘4 switch screens, ⌥⌘L opens the 
   # against a running server too:
   STEMS_LIVE=127.0.0.1:7373 STEMS_LIVE_TOKEN=<host token> swift test --filter Live
   ```
+
+## AV1 music videos
+
+Macs before M3 have no AV1 decoder, and AVFoundation can't play AV1 on
+them. The song preview window decodes those videos with dav1d (VideoLAN,
+BSD-2-Clause; `Vendor/dav1d/COPYING`), built as a universal static library
+by `scripts/build-dav1d.sh` (needs `brew install meson ninja nasm`). The
+built library is committed so a normal build doesn't need those tools.

@@ -179,9 +179,12 @@ struct SongPreviewWindow: View {
     let key: String
     @State private var detail: SongDetail?
     @State private var player: SongPlayer
+    @Environment(AppModel.self) private var app
     @State private var video: AVPlayer?
     /// Why the video can't play here, when it can't.
     @State private var videoProblem: String?
+    /// AV1 without a hardware decoder: decoded in software from this file.
+    @State private var av1File: URL?
     @State private var scrub: Double?
     @AppStorage("previewShowVideo") private var showVideo = true
 
@@ -196,7 +199,15 @@ struct SongPreviewWindow: View {
             Divider()
             HSplitView {
                 if showVideo, let video {
-                    PlayerView(player: video)
+                    Group {
+                        if let av1File, let d = detail {
+                            AV1PlayerView(url: av1File) { [player] in
+                                Double(player.positionMs + d.videoOffsetMs) / 1000
+                            }
+                        } else {
+                            PlayerView(player: video)
+                        }
+                    }
                         .overlay {
                             if let videoProblem {
                                 ContentUnavailableView("Video Can’t Play Here", systemImage: "film", description: Text(videoProblem))
@@ -220,7 +231,10 @@ struct SongPreviewWindow: View {
                 let p = AVPlayer(url: url)
                 p.isMuted = true
                 video = p
-                videoProblem = await Self.unplayable(url)
+                if await Self.needsSoftwareAV1(url) {
+                    av1File = await localVideo(remote: url)
+                    if av1File == nil { videoProblem = "Couldn’t load the video." }
+                }
                 syncVideo(force: true)  // show the first frame, not a placeholder
             }
             if player.phase != .ready { player.select(player.stem, client: client) }
@@ -306,23 +320,35 @@ struct SongPreviewWindow: View {
         }
     }
 
-    /// AV1 needs a hardware decoder in Apple's player (M3 and later).
-    /// Videos downloaded before H.264 was preferred are often AV1.
-    private static func unplayable(_ url: URL) async -> String? {
+    /// AV1 on a Mac without its hardware decoder (before M3): Apple's
+    /// player can't show it, so it goes through dav1d instead.
+    private static func needsSoftwareAV1(_ url: URL) async -> Bool {
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
             let format = try? await track.load(.formatDescriptions).first
-        else { return nil }
-        if CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_AV1
+        else { return false }
+        return CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_AV1
             && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
-        {
-            return "It’s in AV1, which this Mac can’t decode. It still plays on the lyrics screen."
+    }
+
+    /// The video as a local file: straight from the library when it's on
+    /// this Mac, else downloaded once to a temporary file.
+    private func localVideo(remote: URL) async -> URL? {
+        if let dir = app.supervisor.config?.libraryDir {
+            let f = URL(fileURLWithPath: dir).appending(path: "tracks/\(key)/video.mp4")
+            if FileManager.default.isReadableFile(atPath: f.path) { return f }
         }
-        return nil
+        let tmp = FileManager.default.temporaryDirectory.appending(path: "stems-video-\(key).mp4")
+        if FileManager.default.fileExists(atPath: tmp.path) { return tmp }
+        guard let (file, response) = try? await URLSession.shared.download(from: remote),
+            (response as? HTTPURLResponse)?.statusCode == 200
+        else { return nil }
+        try? FileManager.default.removeItem(at: tmp)
+        return (try? FileManager.default.moveItem(at: file, to: tmp)) != nil ? tmp : nil
     }
 
     private func syncVideo(force: Bool = false) {
-        guard let video, let detail else { return }
+        guard av1File == nil, let video, let detail else { return }
         let want = Double(player.positionMs + detail.videoOffsetMs) / 1000
         if player.playing {
             if video.rate == 0 { video.play() }

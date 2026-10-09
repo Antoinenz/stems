@@ -50,6 +50,10 @@ targets:
         ENABLE_HARDENED_RUNTIME: NO
         ENABLE_APP_SANDBOX: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        # dav1d, VideoLAN's AV1 decoder (scripts/build-dav1d.sh), for music
+        # videos on Macs without hardware AV1 (before M3)
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Vendor/dav1d/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/Vendor/dav1d/lib
     postBuildScripts:
       - name: Embed stemsd and the web apps
         script: '"$SRCROOT/scripts/embed-server.sh"'
