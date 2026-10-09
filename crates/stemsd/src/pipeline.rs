@@ -233,6 +233,7 @@ fn spawn_server(
         clock: ch.clock.clone(),
         commands: ch.commands.clone(),
         status: Some(status),
+        levels: Some(ch.levels.clone()),
     };
     tracing::info!(
         token = cfg.host_token,

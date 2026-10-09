@@ -37,6 +37,19 @@ pub struct ProcessorControl {
     anchor: Arc<Mutex<Option<Anchor>>>,
     /// Karaoke on/off crossfade, ms (read when the processor starts).
     fade_ms_bits: Arc<AtomicU32>,
+    /// The music's level (the backing track when separating).
+    music_gain_bits: Arc<AtomicU32>,
+    /// Peaks since the last read: music, vocals, out left, out right.
+    meters: Arc<[AtomicU32; 4]>,
+}
+
+/// Peak levels since the last [`ProcessorControl::take_levels`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Meters {
+    pub music: f32,
+    pub vocals: f32,
+    pub out_l: f32,
+    pub out_r: f32,
 }
 
 impl ProcessorControl {
@@ -71,6 +84,40 @@ impl ProcessorControl {
     pub fn vocal_gain(&self) -> f32 {
         f32::from_bits(self.vocal_gain_bits.load(Ordering::Relaxed))
     }
+
+    /// 0.0 … 1.0: the music's level (the backing track with karaoke on).
+    pub fn set_music_gain(&self, g: f32) {
+        self.music_gain_bits
+            .store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn music_gain(&self) -> f32 {
+        f32::from_bits(self.music_gain_bits.load(Ordering::Relaxed))
+    }
+
+    /// Peaks since the last call (then reset), for meters.
+    pub fn take_levels(&self) -> Meters {
+        let take = |i: usize| f32::from_bits(self.meters[i].swap(0, Ordering::Relaxed));
+        Meters {
+            music: take(0),
+            vocals: take(1),
+            out_l: take(2),
+            out_r: take(3),
+        }
+    }
+
+    /// Raise the stored peaks (only the processor thread writes).
+    fn record(&self, m: Meters) {
+        for (i, v) in [m.music, m.vocals, m.out_l, m.out_r]
+            .into_iter()
+            .enumerate()
+        {
+            let cur = f32::from_bits(self.meters[i].load(Ordering::Relaxed));
+            if v > cur {
+                self.meters[i].store(v.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 pub struct Processor {
@@ -98,6 +145,7 @@ impl Processor {
     ) -> Self {
         let control = ProcessorControl::default();
         control.set_fade_ms(fade_ms);
+        control.set_music_gain(1.0);
         let stop = Arc::new(AtomicBool::new(false));
         let skipped = Arc::new(AtomicU64::new(0));
         let backend_name = separator.name();
@@ -118,6 +166,7 @@ impl Processor {
                     let mut inst = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut processed = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut out = vec![0.0f32; BLOCK_FRAMES * ch];
+                    let mut scaled = vec![0.0f32; BLOCK_FRAMES * ch];
                     let mut mixer = Mixer::with_fade_ms(f32::from_bits(
                         control.fade_ms_bits.load(Ordering::Relaxed),
                     ));
@@ -167,6 +216,8 @@ impl Processor {
 
                         let enabled = control.enabled();
                         mixer.set_processed(enabled);
+                        let m = control.music_gain();
+                        let mut peaks = Meters::default();
                         let dry: &[f32] = if streaming {
                             delay_line.extend(original.iter().copied());
                             for d in delayed.iter_mut() {
@@ -196,13 +247,36 @@ impl Processor {
                                 stem_w += (target - stem_w).clamp(-AVAIL_RAMP, AVAIL_RAMP);
                                 for c in 0..ch {
                                     let inst_eff = o[c] + stem_w * (i[c] - o[c]);
-                                    p[c] = inst_eff + g * (o[c] - inst_eff);
+                                    let music = m * inst_eff;
+                                    let vocals = g * (o[c] - inst_eff);
+                                    p[c] = music + vocals;
+                                    if enabled {
+                                        peaks.music = peaks.music.max(music.abs());
+                                        peaks.vocals = peaks.vocals.max(vocals.abs());
+                                    }
                                 }
+                            }
+                            if m < 1.0 {
+                                scaled.iter_mut().zip(dry).for_each(|(s, d)| *s = d * m);
+                            }
+                            let dry: &[f32] = if m < 1.0 { &scaled } else { dry };
+                            if !enabled {
+                                peaks.music = peak(dry);
                             }
                             mixer.process(dry, Some(&processed), &mut out);
                         } else {
+                            if m < 1.0 {
+                                scaled.iter_mut().zip(dry).for_each(|(s, d)| *s = d * m);
+                            }
+                            let dry: &[f32] = if m < 1.0 { &scaled } else { dry };
+                            peaks.music = peak(dry);
                             mixer.process(dry, None, &mut out);
                         }
+                        for f in out.chunks_exact(ch) {
+                            peaks.out_l = peaks.out_l.max(f[0].abs());
+                            peaks.out_r = peaks.out_r.max(f[ch - 1].abs());
+                        }
+                        control.record(peaks);
 
                         let mut written = 0;
                         while written < out.len() && !stop.load(Ordering::Relaxed) {
@@ -251,6 +325,10 @@ impl Processor {
             let _ = t.join();
         }
     }
+}
+
+fn peak(pcm: &[f32]) -> f32 {
+    pcm.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 }
 
 impl Drop for Processor {

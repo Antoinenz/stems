@@ -155,6 +155,7 @@ fn playing_state() -> PlaybackState {
             video_offset_ms: 350,
         },
         volume: 0.8,
+        music_gain: 0.9,
         show: stems_core::ShowState {
             mode: stems_core::PartyMode::Karaoke,
             after_song: stems_core::AfterSong::Background,
@@ -163,6 +164,7 @@ fn playing_state() -> PlaybackState {
             talk_over: false,
             auto_dj: true,
             pool: vec!["spotify_playlist_19PgP2QSGPcm6Ve8VhbtpG".into()],
+            upcoming: vec![item(9, &next, None, QueueKind::Play)],
         },
         revision: 42,
     }

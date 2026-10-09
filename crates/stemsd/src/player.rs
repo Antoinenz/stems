@@ -269,6 +269,9 @@ struct Player {
     failed: HashSet<u64>,
     /// Background song picked to play when the queue is empty.
     intermission_next: Option<QueueItem>,
+    /// The auto-DJ's picks after `intermission_next`, so the host can see
+    /// what's coming (shown with it as `show.upcoming`).
+    lookahead: VecDeque<QueueItem>,
     /// Recently played keys, newest last (background music avoids them).
     recent: VecDeque<String>,
     fade: Option<Fade>,
@@ -365,6 +368,12 @@ impl Player {
     /// The auto-DJ's next song: from the pool (all of the library when
     /// empty), like what's playing, not played recently, not queued.
     fn pick_intermission(&mut self) -> Option<QueueItem> {
+        let after = self.current.as_ref().map(|c| c.item.key.clone());
+        self.pick_after(after.as_deref())
+    }
+
+    /// An auto-DJ pick that follows on from the song `after`.
+    fn pick_after(&mut self, after: Option<&str>) -> Option<QueueItem> {
         let entries = match self.lib.list() {
             Ok(e) => e,
             Err(e) => {
@@ -393,10 +402,18 @@ impl Player {
             .map(String::as_str)
             .collect();
         avoid.extend(self.queue.iter().map(|q| q.key.as_str()));
-        let seed = self
-            .current
-            .as_ref()
-            .and_then(|c| entries.iter().find(|e| e.key == c.item.key));
+        avoid.extend(self.intermission_next.iter().map(|q| q.key.as_str()));
+        avoid.extend(self.lookahead.iter().map(|q| q.key.as_str()));
+        if let Some(c) = &self.current {
+            avoid.insert(c.item.key.as_str());
+        }
+        // a song about to start (still loading) counts as playing
+        for p in self.loads.values() {
+            if let Purpose::PlayNow { item, .. } = p {
+                avoid.insert(item.key.as_str());
+            }
+        }
+        let seed = after.and_then(|k| entries.iter().find(|e| e.key == k));
         let pick =
             crate::autodj::pick(&entries, seed, pool.as_ref(), &avoid, &mut rand::rng())?.clone();
         Some(QueueItem {
@@ -478,9 +495,83 @@ impl Player {
             return None;
         }
         if self.intermission_next.is_none() {
-            self.intermission_next = self.pick_intermission();
+            self.intermission_next = match self.lookahead.pop_front() {
+                Some(i) => Some(i),
+                None => self.pick_intermission(),
+            };
         }
+        self.refresh_upcoming();
         self.intermission_next.clone()
+    }
+
+    /// How many songs ahead the auto-DJ shows.
+    const UPCOMING: usize = 3;
+
+    /// Keep a few auto-DJ picks ahead and tell clients when they change.
+    fn refresh_upcoming(&mut self) {
+        let active = self.auto_dj() && self.knobs.intermission();
+        // picks that have since started or been requested drop out
+        let taken: HashSet<String> = self
+            .current
+            .iter()
+            .map(|c| c.item.key.clone())
+            .chain(self.queue.iter().map(|q| q.key.clone()))
+            .chain(self.loads.values().filter_map(|p| match p {
+                Purpose::PlayNow { item, .. } => Some(item.key.clone()),
+                Purpose::Preload(_) => None,
+            }))
+            .collect();
+        self.lookahead.retain(|q| !taken.contains(&q.key));
+        if self
+            .intermission_next
+            .as_ref()
+            .is_some_and(|q| taken.contains(&q.key))
+        {
+            self.intermission_next = self.lookahead.pop_front();
+        }
+        if !active {
+            self.lookahead.clear();
+        } else if self.intermission_next.is_some() {
+            while self.lookahead.len() + 1 < Self::UPCOMING {
+                let after = self
+                    .lookahead
+                    .back()
+                    .or(self.intermission_next.as_ref())
+                    .map(|q| q.key.clone());
+                // a small library runs out: stop rather than repeat
+                match self.pick_after(after.as_deref()) {
+                    Some(p)
+                        if !taken.contains(&p.key)
+                            && self
+                                .intermission_next
+                                .as_ref()
+                                .is_none_or(|q| q.key != p.key)
+                            && !self.lookahead.iter().any(|q| q.key == p.key) =>
+                    {
+                        self.lookahead.push_back(p)
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let list: Vec<QueueItem> = if active {
+            self.intermission_next
+                .iter()
+                .chain(self.lookahead.iter())
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let same = list.len() == self.show.upcoming.len()
+            && list
+                .iter()
+                .zip(&self.show.upcoming)
+                .all(|(a, b)| a.id == b.id);
+        if !same {
+            self.show.upcoming = list;
+            self.show_changed();
+        }
     }
 
     /// Keep whatever plays next decoded (and a request's stems registered).
@@ -614,10 +705,17 @@ impl Player {
         if !self.auto_dj() {
             return None;
         }
-        match self.intermission_next.take() {
+        let next = match self.intermission_next.take() {
             Some(i) => Some(i),
-            None => self.pick_intermission(),
-        }
+            None => self
+                .lookahead
+                .pop_front()
+                .or_else(|| self.pick_intermission()),
+        };
+        // the next one in line moves up
+        self.intermission_next = self.lookahead.pop_front();
+        self.refresh_upcoming();
+        next
     }
 
     fn start_item(&mut self, item: QueueItem, intermission: bool, cut: bool) {
@@ -919,10 +1017,12 @@ impl Player {
                 self.show.auto_dj = on;
                 self.show_changed();
                 self.maybe_preload();
+                self.refresh_upcoming();
             }
             Command::SetPool { playlists } => {
                 self.show.pool = playlists;
                 self.intermission_next = None;
+                self.lookahead.clear();
                 self.show_changed();
                 self.maybe_preload();
             }
@@ -1234,6 +1334,7 @@ impl LibraryPlayer {
             next_id,
             failed: HashSet::new(),
             intermission_next: None,
+            lookahead: VecDeque::new(),
             recent: VecDeque::new(),
             fade: None,
             scratch: Vec::with_capacity(CHUNK_FRAMES * CHANNELS as usize),
@@ -1580,6 +1681,42 @@ mod tests {
             ],
             "the interrupted song comes back first, nothing plays by itself"
         );
+        player.shutdown();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn auto_dj_shows_what_it_will_play_next() {
+        let (lib, dir) = library("upcoming");
+        let store = Arc::new(StemStore::default());
+        let (p, mut c) = AudioRing::with_frames(4096);
+        let mut player = LibraryPlayer::new(lib, knobs(true), p, FlushSignal::new(), store);
+        let mut rx = player.events();
+        player
+            .command(&Command::SetMode {
+                mode: PartyMode::Background,
+            })
+            .unwrap();
+        player.command(&enqueue("spotify_a", None, false)).unwrap();
+        let shows_upcoming =
+            |e: &SourceEvent| matches!(e, SourceEvent::Show(s) if !s.upcoming.is_empty());
+        let (events, _) = drain_until(&mut c, &mut rx, shows_upcoming);
+        let Some(SourceEvent::Show(show)) = events.last() else {
+            unreachable!()
+        };
+        let keys: Vec<&str> = show.upcoming.iter().map(|q| q.key.as_str()).collect();
+        // distinct, and never the song playing
+        let unique: HashSet<&str> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+        assert!(!keys.contains(&"spotify_a"), "{keys:?}");
+        // turning the auto-DJ off empties the list
+        player.command(&Command::SetAutoDj { on: false }).unwrap();
+        let (events, _) = drain_until(
+            &mut c,
+            &mut rx,
+            |e| matches!(e, SourceEvent::Show(s) if s.upcoming.is_empty() && !s.auto_dj),
+        );
+        assert!(!events.is_empty());
         player.shutdown();
         std::fs::remove_dir_all(&dir).unwrap();
     }

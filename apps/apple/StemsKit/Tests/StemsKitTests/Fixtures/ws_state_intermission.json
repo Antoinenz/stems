@@ -19,6 +19,7 @@
     "video_offset_ms": 350,
     "video_url": "/media/library/spotify_1auxYwYrFRqZP7t3s7w4um/video.mp4"
   },
+  "music_gain": 0.8999999761581421,
   "next_track": {
     "album": "Album",
     "art": "/media/library/spotify_0nbXyq5TXYPCO7pr3N8S4I/cover.jpg",
@@ -63,7 +64,28 @@
         "title": "Never Gonna Give You Up"
       }
     },
-    "talk_over": false
+    "talk_over": false,
+    "upcoming": [
+      {
+        "id": 9,
+        "key": "spotify_0nbXyq5TXYPCO7pr3N8S4I",
+        "kind": "play",
+        "track": {
+          "album": "Album",
+          "art": "/media/library/spotify_0nbXyq5TXYPCO7pr3N8S4I/cover.jpg",
+          "artists": [
+            "Roddy Ricch"
+          ],
+          "duration_ms": 196652,
+          "id": {
+            "id": "0nbXyq5TXYPCO7pr3N8S4I",
+            "kind": "spotify"
+          },
+          "isrc": "USUM71111621",
+          "title": "The Box"
+        }
+      }
+    ]
   },
   "source": "library",
   "status": "playing",

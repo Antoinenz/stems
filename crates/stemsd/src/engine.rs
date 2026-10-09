@@ -73,6 +73,8 @@ pub struct Channels {
     pub clock: watch::Receiver<ClockTick>,
     pub commands: mpsc::Sender<Command>,
     pub status: watch::Receiver<AudioStatus>,
+    /// Mixer meter peaks, ~15 Hz.
+    pub levels: watch::Receiver<stems_core::state::Levels>,
 }
 
 /// The audio path, for status screens; published once a second.
@@ -103,6 +105,7 @@ pub struct Engine {
     state_tx: watch::Sender<PlaybackState>,
     clock_tx: watch::Sender<ClockTick>,
     status_tx: watch::Sender<AudioStatus>,
+    levels_tx: watch::Sender<stems_core::state::Levels>,
     /// Sink underrun count at the last status, and dropouts while playing.
     underruns_seen: u64,
     dropout_frames: u64,
@@ -164,6 +167,7 @@ impl Engine {
         let (state_tx, state_rx) = watch::channel(PlaybackState {
             source: Some(source.name().to_string()),
             volume: 1.0,
+            music_gain: 1.0,
             karaoke: stems_core::KaraokeState {
                 enabled: false,
                 vocal_gain: 0.0,
@@ -174,6 +178,7 @@ impl Engine {
         });
         let (clock_tx, clock_rx) = watch::channel(ClockTick::default());
         let (status_tx, status_rx) = watch::channel(AudioStatus::default());
+        let (levels_tx, levels_rx) = watch::channel(stems_core::state::Levels::default());
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (lyrics_tx, lyrics_rx) = mpsc::channel(8);
         let (video_tx, video_rx) = mpsc::channel(8);
@@ -191,6 +196,7 @@ impl Engine {
             state_tx,
             clock_tx,
             status_tx,
+            levels_tx,
             underruns_seen: 0,
             dropout_frames: 0,
             dropout_seconds: 0,
@@ -230,6 +236,7 @@ impl Engine {
                 clock: clock_rx,
                 status: status_rx,
                 commands: cmd_tx,
+                levels: levels_rx,
             },
         )
     }
@@ -341,6 +348,7 @@ impl Engine {
     pub async fn run(mut self) -> Result<()> {
         let mut events = self.source.events();
         self.source.start();
+        self.spawn_meters();
         let mut ticker = tokio::time::interval(TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -617,7 +625,9 @@ impl Engine {
     fn on_command(&mut self, cmd: Command) {
         // sliders send a stream of these; keep them out of the info log
         match cmd {
-            Command::SetVocalGain { .. } | Command::SetVolume { .. } => {
+            Command::SetVocalGain { .. }
+            | Command::SetVolume { .. }
+            | Command::SetMusicGain { .. } => {
                 tracing::debug!(?cmd, "command")
             }
             _ => tracing::info!(?cmd, "command"),
@@ -636,6 +646,14 @@ impl Engine {
                 self.processor.control().set_vocal_gain(gain);
                 self.state_tx.send_modify(|s| {
                     s.karaoke.vocal_gain = gain;
+                    s.revision += 1;
+                });
+            }
+            Command::SetMusicGain { gain } => {
+                let gain = gain.clamp(0.0, 1.0);
+                self.processor.control().set_music_gain(gain);
+                self.state_tx.send_modify(|s| {
+                    s.music_gain = gain;
                     s.revision += 1;
                 });
             }
@@ -1424,6 +1442,38 @@ impl Engine {
             uptime_s: self.started.elapsed().as_secs(),
         };
         let _ = self.status_tx.send(status);
+    }
+
+    /// Mixer meters: the processor's peaks, ~15 times a second, with the
+    /// output volume applied to the line out.
+    fn spawn_meters(&self) {
+        let control = self.processor.control();
+        let tx = self.levels_tx.clone();
+        let state = self.state_tx.subscribe();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_millis(66));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                if tx.is_closed() {
+                    return;
+                }
+                let m = control.take_levels();
+                let vol = state.borrow().volume;
+                let l = stems_core::state::Levels {
+                    music: m.music.min(1.0),
+                    vocals: m.vocals.min(1.0),
+                    out_l: (m.out_l * vol).min(1.0),
+                    out_r: (m.out_r * vol).min(1.0),
+                };
+                // quiet stays quiet: don't wake every client 15×/s for zeros
+                tx.send_if_modified(|cur| {
+                    let changed = *cur != l;
+                    *cur = l;
+                    changed
+                });
+            }
+        });
     }
 
     fn tick(&mut self) {

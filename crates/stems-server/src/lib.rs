@@ -48,6 +48,8 @@ pub struct Channels {
     pub commands: mpsc::Sender<Command>,
     /// The daemon's status document (refreshed by it, ~1 Hz), if any.
     pub status: Option<watch::Receiver<serde_json::Value>>,
+    /// Mixer meters (~15 Hz while there is sound), if any.
+    pub levels: Option<watch::Receiver<stems_core::state::Levels>>,
 }
 
 /// Open WebSocket sessions, by the `app=` they connect with (`stage`,
@@ -362,6 +364,8 @@ pub enum Outbound<'a> {
     Clock(&'a ClockTick),
     /// The machines view (hosts only).
     Status(&'a serde_json::Value),
+    /// Mixer meters (hosts only).
+    Levels(&'a stems_core::state::Levels),
     Error {
         message: String,
     },
@@ -966,6 +970,7 @@ async fn ws_session(socket: WebSocket, app: App, role: Role, client: String) {
     let App { mut ch, access, .. } = app;
     // only hosts get the machines view
     let mut status = ch.status.clone().filter(|_| role == Role::Host);
+    let mut levels = ch.levels.clone().filter(|_| role == Role::Host);
     let (mut tx, mut rx) = socket.split();
 
     // Initial snapshot.
@@ -1002,6 +1007,15 @@ async fn ws_session(socket: WebSocket, app: App, role: Role, client: String) {
                 let a = status_app.clone();
                 let doc = tokio::task::spawn_blocking(move || a.full_status()).await.unwrap_or_default();
                 if send(&mut tx, Outbound::Status(&doc)).await.is_err() { break; }
+            }
+            Ok(()) = async {
+                match levels.as_mut() {
+                    Some(l) => l.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let l = levels.as_mut().map(|l| *l.borrow_and_update()).unwrap_or_default();
+                if send(&mut tx, Outbound::Levels(&l)).await.is_err() { break; }
             }
             incoming = rx.next() => {
                 match incoming {
@@ -1048,6 +1062,7 @@ mod tests {
                 clock: clock_rx,
                 commands: cmd_tx,
                 status: None,
+                levels: None,
             },
             state_tx,
             cmd_rx,

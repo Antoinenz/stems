@@ -25,7 +25,7 @@ pub fn permission(cmd: &Command) -> &'static str {
     match cmd {
         Command::SetKaraoke { .. } => "karaoke",
         Command::SetVocalGain { .. } => "vocals",
-        Command::SetVolume { .. } => "volume",
+        Command::SetVolume { .. } | Command::SetMusicGain { .. } => "volume",
         Command::SetViewMode { .. } => "stage",
         Command::SetLyricsOffset { .. } | Command::SetVideoOffset { .. } => "timing",
         Command::Play

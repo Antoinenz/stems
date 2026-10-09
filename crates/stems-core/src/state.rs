@@ -190,6 +190,8 @@ pub struct ShowState {
     pub auto_dj: bool,
     /// Playlist ids the auto-DJ picks from (empty: the whole library).
     pub pool: Vec<String>,
+    /// What the auto-DJ will play next, in order (a few songs ahead).
+    pub upcoming: Vec<QueueItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -215,10 +217,26 @@ pub struct PlaybackState {
     pub media: Media,
     /// Output volume 0.0..=1.0.
     pub volume: f32,
+    /// The music's level in the mixer (the backing track when karaoke is
+    /// on, everything otherwise), 0.0..=1.0.
+    pub music_gain: f32,
     /// Mode, end-of-song action, staged singer… (library playback).
     pub show: ShowState,
     /// Monotonic revision, bumped on every change.
     pub revision: u64,
+}
+
+/// Peak levels for the mixer's meters, 0.0..=1.0 (linear, post-fader),
+/// since the last report. Sent ~15 Hz to hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Levels {
+    /// The backing track (everything when karaoke is off).
+    pub music: f32,
+    /// Guide vocals (karaoke on).
+    pub vocals: f32,
+    /// What reaches the speakers, after the volume.
+    pub out_l: f32,
+    pub out_r: f32,
 }
 
 /// Sent at ~10 Hz. Clients extrapolate between ticks.
@@ -244,6 +262,10 @@ pub enum Command {
     },
     SetVolume {
         level: f32,
+    },
+    /// The music's level in the mixer (see [`PlaybackState::music_gain`]).
+    SetMusicGain {
+        gain: f32,
     },
     /// Nudge lyric timing for the current track.
     SetLyricsOffset {

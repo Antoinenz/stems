@@ -14,6 +14,7 @@
     "video_offset_ms": 0,
     "video_url": null
   },
+  "music_gain": 0.0,
   "next_track": null,
   "queue": [],
   "revision": 0,
@@ -24,7 +25,8 @@
     "mode": "party",
     "pool": [],
     "staged": null,
-    "talk_over": false
+    "talk_over": false,
+    "upcoming": []
   },
   "source": null,
   "status": "idle",
